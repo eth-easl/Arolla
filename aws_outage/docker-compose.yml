@@ -64,7 +64,12 @@ services:
     build: ./client
     environment:
       - TARGET_URL=http://nlb/launch_instance
-      - NUM_CLIENTS=${NUM_CLIENTS:-20}
+      - NUM_GOOD_CLIENTS=${NUM_GOOD_CLIENTS:-20}
+      - NUM_BAD_CLIENTS=${NUM_BAD_CLIENTS:-0}
+      - NUM_SDK_A_CLIENTS=${NUM_SDK_A_CLIENTS:-0}
+      - NUM_SDK_B_CLIENTS=${NUM_SDK_B_CLIENTS:-0}
+      - NUM_SDK_C_CLIENTS=${NUM_SDK_C_CLIENTS:-0}
+      - NUM_SDK_D_CLIENTS=${NUM_SDK_D_CLIENTS:-0}
     volumes:
       - ./metrics:/metrics
     depends_on:

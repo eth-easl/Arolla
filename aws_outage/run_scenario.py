@@ -83,12 +83,26 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run AWS outage simulation")
-    parser.add_argument("-n", "--num-clients", type=int, default=20, 
-                        help="Number of client threads to simulate (default: 20)")
+    parser.add_argument("--good-clients", type=int, default=20, help="Number of standard (good) clients")
+    parser.add_argument("--bad-clients", type=int, default=0, help="Number of aggressive (bad) clients")
+    parser.add_argument("--sdk-a-clients", type=int, default=0, help="Number of SDK-A clients")
+    parser.add_argument("--sdk-b-clients", type=int, default=0, help="Number of SDK-B clients")
+    parser.add_argument("--sdk-c-clients", type=int, default=0, help="Number of SDK-C clients")
+    parser.add_argument("--sdk-d-clients", type=int, default=0, help="Number of SDK-D clients")
+    
     args = parser.parse_args()
     
-    # Set environment variable for docker-compose
-    os.environ["NUM_CLIENTS"] = str(args.num_clients)
+    # Set environment variables for docker-compose
+    os.environ["NUM_GOOD_CLIENTS"] = str(args.good_clients)
+    os.environ["NUM_BAD_CLIENTS"] = str(args.bad_clients)
+    os.environ["NUM_SDK_A_CLIENTS"] = str(args.sdk_a_clients)
+    os.environ["NUM_SDK_B_CLIENTS"] = str(args.sdk_b_clients)
+    os.environ["NUM_SDK_C_CLIENTS"] = str(args.sdk_c_clients)
+    os.environ["NUM_SDK_D_CLIENTS"] = str(args.sdk_d_clients)
     
-    print(f"Running simulation with {args.num_clients} clients")
+    total_clients = (args.good_clients + args.bad_clients + 
+                     args.sdk_a_clients + args.sdk_b_clients + 
+                     args.sdk_c_clients + args.sdk_d_clients)
+    
+    print(f"Running simulation with {total_clients} total clients")
     main()

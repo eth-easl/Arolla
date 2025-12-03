@@ -3,87 +3,118 @@ import time
 import os
 import threading
 import random
+import uuid
 
 TARGET_URL = os.environ.get("TARGET_URL", "http://nlb/launch_instance")
-NUM_THREADS = int(os.environ.get("NUM_CLIENTS", "20"))
 
-def client_worker(worker_id):
-    print(f"Worker {worker_id} started")
+# Configuration for different client profiles
+PROFILES = {
+    "good":  {"retries": 3,  "base": 0.1,  "max": 20.0, "jitter": "full", "timeout": 10},
+    "bad":   {"retries": 10, "base": 0.01, "max": 1.0,  "jitter": "none", "timeout": 10},
+    "sdk-a": {"retries": 2,  "base": 0.1,  "max": 20.0, "jitter": "full", "timeout": 10}, # Exp backoff
+    "sdk-b": {"retries": 7,  "base": 0.2,  "max": 0.2,  "jitter": "none", "timeout": 10}, # Fixed 200ms
+    "sdk-c": {"retries": 4,  "base": 0.05, "max": 0.05, "jitter": "none", "timeout": 2},  # Aggressive small timeout
+    "sdk-d": {"retries": 0,  "base": 0,    "max": 0,    "jitter": "none", "timeout": 10}, # No retries
+}
+
+def get_env_count(name):
+    return int(os.environ.get(f"NUM_{name.upper().replace('-', '_')}_CLIENTS", "0"))
+
+def client_worker(worker_id, profile_name):
+    print(f"Worker {worker_id} ({profile_name}) started")
     
-    # AWS SDK retry config
-    MAX_RETRIES = 3
-    BASE_DELAY = 0.1  # 100ms
-    MAX_DELAY = 20.0  # 20s
+    config = PROFILES.get(profile_name, PROFILES["good"])
     
     # Wait for system to stabilize
-    print(f"Worker {worker_id}: Waiting 10s for system stabilization...")
     time.sleep(10)
     
-    # Stagger start to prevent thundering herd
+    # Stagger start
     time.sleep(random.uniform(0, 5))
 
     while True:
-        # --- Request Loop ---
-        current_status_code = 0 # To track the final status of this request cycle
+        request_id = str(uuid.uuid4())
+        current_status_code = 0 
+        attempts = 0
         
         # 1. Initial Request
+        attempts += 1
         request_start_time = time.time()
         try:
-            resp = requests.post(TARGET_URL, timeout=10)
+            resp = requests.post(TARGET_URL, timeout=config["timeout"])
             current_status_code = resp.status_code
         except requests.exceptions.RequestException:
-            current_status_code = 0  # Connection Error
+            current_status_code = 0
 
-        # Log the initial attempt
+        # Log initial attempt
         latency = time.time() - request_start_time
         try:
             with open("/metrics/client.csv", "a") as f:
-                f.write(f"{time.time()},{latency},{current_status_code}\n")
+                # Format: timestamp, latency, status_code, client_type, request_id, attempt_number
+                f.write(f"{time.time()},{latency},{current_status_code},{profile_name},{request_id},{attempts}\n")
         except Exception:
             pass
 
-        # 2. Retry Logic (only if transient failure)
+        # 2. Retry Logic
         if current_status_code == 503 or current_status_code == 0:
             retries = 0
-            while retries < MAX_RETRIES:
-                # Exponential Backoff with Jitter
-                delay = min(BASE_DELAY * (2 ** retries), MAX_DELAY)
-                jitter = random.uniform(0, delay * 0.5)
-                sleep_time = delay + jitter
+            while retries < config["retries"]:
+                # Calculate Delay
+                if config["jitter"] == "full":
+                    # Full Jitter: sleep = random_between(0, min(cap, base * 2^attempt))
+                    temp = min(config["max"], config["base"] * (2 ** retries))
+                    sleep_time = random.uniform(0, temp)
+                else:
+                    # No Jitter / Fixed
+                    # If max == base, it's fixed delay. If not, it's linear or exponential without jitter
+                    # For simplicity in this profile set:
+                    # SDK-B (Fixed): base=0.2, max=0.2 -> always 0.2
+                    # Bad (Linear-ish): base=0.01 -> let's just use base * (retries+1) capped at max
+                    if config["max"] == config["base"]:
+                        sleep_time = config["base"]
+                    else:
+                        sleep_time = min(config["base"] * (retries + 1), config["max"])
+                
                 time.sleep(sleep_time)
                 
                 # Retry Attempt
+                attempts += 1
                 retry_start = time.time()
                 retry_status = 0
                 try:
-                    resp = requests.post(TARGET_URL, timeout=10)
+                    resp = requests.post(TARGET_URL, timeout=config["timeout"])
                     retry_status = resp.status_code
                 except requests.exceptions.RequestException:
                     retry_status = 0
                 
-                # Log the retry
+                # Log retry
                 retry_latency = time.time() - retry_start
                 try:
                     with open("/metrics/client.csv", "a") as f:
-                        f.write(f"{time.time()},{retry_latency},{retry_status}\n")
+                        f.write(f"{time.time()},{retry_latency},{retry_status},{profile_name},{request_id},{attempts}\n")
                 except Exception:
                     pass
                 
                 if retry_status == 200:
-                    break # Success! Exit retry loop
+                    break
                 
                 retries += 1
 
-        # Sleep before next new request (simulate user think time)
-        time.sleep(random.uniform(0.5, 2.0))
-        
-
+        # Think time
+        if profile_name in ["good", "sdk-a", "sdk-d"]:
+            time.sleep(random.uniform(0.5, 2.0))
+        else:
+            # Aggressive clients are impatient
+            time.sleep(random.uniform(0.1, 0.5))
 
 threads = []
-for i in range(NUM_THREADS):
-    t = threading.Thread(target=client_worker, args=(i,))
-    t.start()
-    threads.append(t)
+
+# Start clients for each profile
+for profile in PROFILES.keys():
+    count = get_env_count(profile)
+    for i in range(count):
+        t = threading.Thread(target=client_worker, args=(f"{profile}-{i}", profile))
+        t.start()
+        threads.append(t)
 
 for t in threads:
     t.join()

@@ -1,45 +1,65 @@
-# AWS Outage Prototype
+# AWS Outage Simulation & Experiments
 
-A realistic Docker-based prototype of the AWS outage, demonstrating DNS failures and retry storms.
+This project simulates an AWS outage scenario (DNS failure causing retry storms) to demonstrate the impact of client behavior on system stability.
 
 ## Quick Start
 
-Run the simulation with default settings (20 clients):
+### 1. Run the Basic Simulation
+Run a single simulation with default settings (20 clients, standard AWS SDK behavior):
 ```bash
-cd aws_outage
 python3 run_scenario.py
 ```
+This generates `simulation_results.png`.
 
-Run with custom number of clients:
+### 2. Run Heterogeneous Experiments
+Run the full suite of experiments to generate the 10 analysis plots:
 ```bash
-python3 run_scenario.py -n 50    # 50 client threads
-python3 run_scenario.py -n 100   # 100 client threads
+# 1. Run experiments (takes ~10 mins)
+python3 run_experiments.py
+
+# 2. Generate plots
+python3 visualize_experiments.py
 ```
+The plots will be saved in `experiment_logs/` and `experiment_plots/`.
 
-## What It Does
+## Experiments Overview
 
-1. Starts all services (DNS, DynamoDB, Control Plane, NLB, Clients)
-2. Runs normal operation for 10 seconds
-3. Triggers DNS failure at T=10s
-4. Observes retry storm for 15 seconds
-5. Fixes DNS at T=25s
-6. Observes recovery for 10 seconds
-7. Generates visualization in `simulation_results.png`
+The `run_experiments.py` script executes two main experiments:
 
-## Visualization
+### Experiment 1: Bad Clients Destabilize System
+Varies the fraction of "Bad" (aggressive) clients from 0% to 50%.
+*   **Goal**: Show that a small minority of bad clients can starve well-behaved clients.
+*   **Plots Generated**:
+    *   Amplification vs Fraction of Bad Clients
+    *   Share of Backend Load vs Logical Traffic
+    *   Fairness (Success Rate per Client Type)
+    *   Tail Latency CDF
+    *   Backend Load Time-Series
 
-The generated plot shows 4 panels:
-- **Control Plane RPS**: Success vs Failure requests
-- **DNS Server RPS**: Success vs NXDOMAIN queries  
-- **Client Latency**: Request latency scatter plot
-- **Client Request Rate**: Total requests per second
+### Experiment 2: Library Defaults Inconsistency
+Runs a mix of 4 different SDK profiles (SDK-A, B, C, D) with different retry/backoff strategies.
+*   **Goal**: Show that diverse defaults create unpredictable aggregate behavior.
+*   **Plots Generated**:
+    *   Histogram of Attempt Counts
+    *   Retry Waves (Time-Series)
+    *   Heatmap (Attempt Index vs Time)
+    *   Amplification Distribution per SDK
+    *   Load Variance Comparison
 
-The red shaded area indicates the DNS failure window.
+## Client Profiles
 
-## Components
+*   **Good**: Standard AWS SDK (3 retries, exp backoff, full jitter).
+*   **Bad**: Aggressive (10 retries, 10ms fixed delay, no jitter).
+*   **SDK-A**: 2 retries, exp backoff.
+*   **SDK-B**: 7 retries, fixed 200ms delay.
+*   **SDK-C**: 4 retries, aggressive small timeout.
+*   **SDK-D**: No retries.
 
-- `dns-server`: Custom DNS with failure injection API
-- `dynamodb`: AWS DynamoDB Local
-- `control-plane`: FastAPI service simulating EC2 Control Plane
-- `nlb`: Nginx load balancer
-- `client`: Traffic generator with AWS SDK retry logic
+## Directory Structure
+
+*   `run_scenario.py`: Main orchestration script.
+*   `run_experiments.py`: Automation script for parameter sweeps.
+*   `visualize.py`: Visualization for a single run.
+*   `visualize_experiments.py`: Visualization for the experiment suite.
+*   `experiment_logs/`: Contains raw CSV metrics from experiments.
+*   `experiment_plots/`: Contains the generated analysis plots.
