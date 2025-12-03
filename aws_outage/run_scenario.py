@@ -41,8 +41,8 @@ def main():
         time.sleep(10)
         
         # 3. Normal Operation
-        print("Phase: Normal Operation (10s)")
-        time.sleep(10)
+        print("Phase: Normal Operation (60s)")
+        time.sleep(60)
         
         # 4. Trigger Outage
         print("Phase: Triggering DNS Failure...")
@@ -55,8 +55,8 @@ def main():
             print(f"Error triggering outage: {e}")
             
         # 5. Outage / Retry Storm
-        print("Phase: Outage / Retry Storm (15s)")
-        time.sleep(15)
+        print("Phase: Outage / Retry Storm (30s)")
+        time.sleep(30)
         
         # 6. Recovery
         print("Phase: Recovering DNS...")
@@ -66,8 +66,8 @@ def main():
         except Exception as e:
             print(f"Error fixing DNS: {e}")
             
-        print("Phase: Recovery (10s)")
-        time.sleep(10)
+        print("Phase: Recovery (60s)")
+        time.sleep(60)
         
         log_event("SIMULATION_END")
         
@@ -76,10 +76,6 @@ def main():
         print("Stopping Docker...")
         run_command("docker-compose down")
 
-    # 8. Visualize
-    print("Generating Visualization...")
-    run_command("python3 visualize.py")
-    print("Done. Check simulation_results.png")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run AWS outage simulation")
@@ -89,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--sdk-b-clients", type=int, default=0, help="Number of SDK-B clients")
     parser.add_argument("--sdk-c-clients", type=int, default=0, help="Number of SDK-C clients")
     parser.add_argument("--sdk-d-clients", type=int, default=0, help="Number of SDK-D clients")
+    parser.add_argument("--ghost-clients", type=int, default=0, help="Number of Ghost clients")
     
     args = parser.parse_args()
     
@@ -99,10 +96,12 @@ if __name__ == "__main__":
     os.environ["NUM_SDK_B_CLIENTS"] = str(args.sdk_b_clients)
     os.environ["NUM_SDK_C_CLIENTS"] = str(args.sdk_c_clients)
     os.environ["NUM_SDK_D_CLIENTS"] = str(args.sdk_d_clients)
+    os.environ["NUM_GHOST_CLIENTS"] = str(args.ghost_clients)
     
     total_clients = (args.good_clients + args.bad_clients + 
                      args.sdk_a_clients + args.sdk_b_clients + 
-                     args.sdk_c_clients + args.sdk_d_clients)
+                     args.sdk_c_clients + args.sdk_d_clients +
+                     args.ghost_clients)
     
     print(f"Running simulation with {total_clients} total clients")
     main()

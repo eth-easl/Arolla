@@ -1,7 +1,7 @@
-import requests
+import asyncio
+import aiohttp
 import time
 import os
-import threading
 import random
 import uuid
 
@@ -15,21 +15,28 @@ PROFILES = {
     "sdk-b": {"retries": 7,  "base": 0.2,  "max": 0.2,  "jitter": "none", "timeout": 10}, # Fixed 200ms
     "sdk-c": {"retries": 4,  "base": 0.05, "max": 0.05, "jitter": "none", "timeout": 2},  # Aggressive small timeout
     "sdk-d": {"retries": 0,  "base": 0,    "max": 0,    "jitter": "none", "timeout": 10}, # No retries
+    "ghost": {"retries": 3, "base": 1.0,  "max": 10.0, "jitter": "full", "timeout": 1.5},  # Machine gun retries
 }
 
 def get_env_count(name):
     return int(os.environ.get(f"NUM_{name.upper().replace('-', '_')}_CLIENTS", "0"))
 
-def client_worker(worker_id, profile_name):
-    print(f"Worker {worker_id} ({profile_name}) started")
-    
+async def log_metric(latency, status_code, profile_name, request_id, attempt):
+    try:
+        with open("/metrics/client.csv", "a") as f:
+            # Format: timestamp, latency, status_code, client_type, request_id, attempt_number
+            f.write(f"{time.time()},{latency},{status_code},{profile_name},{request_id},{attempt}\n")
+    except Exception:
+        pass
+
+async def client_worker(session, profile_name):
     config = PROFILES.get(profile_name, PROFILES["good"])
     
     # Wait for system to stabilize
-    time.sleep(10)
+    await asyncio.sleep(10)
     
     # Stagger start
-    time.sleep(random.uniform(0, 5))
+    await asyncio.sleep(random.uniform(0, 5))
 
     while True:
         request_id = str(uuid.uuid4())
@@ -38,61 +45,59 @@ def client_worker(worker_id, profile_name):
         
         # 1. Initial Request
         attempts += 1
+        headers = {
+            "X-Request-ID": request_id,
+            "X-Attempt-Number": str(attempts),
+            "X-Client-Type": profile_name
+        }
+        
         request_start_time = time.time()
         try:
-            resp = requests.post(TARGET_URL, timeout=config["timeout"])
-            current_status_code = resp.status_code
-        except requests.exceptions.RequestException:
+            async with session.post(TARGET_URL, headers=headers, timeout=config["timeout"]) as resp:
+                current_status_code = resp.status
+                await resp.read() # Ensure we read the body
+        except Exception:
             current_status_code = 0
 
         # Log initial attempt
         latency = time.time() - request_start_time
-        try:
-            with open("/metrics/client.csv", "a") as f:
-                # Format: timestamp, latency, status_code, client_type, request_id, attempt_number
-                f.write(f"{time.time()},{latency},{current_status_code},{profile_name},{request_id},{attempts}\n")
-        except Exception:
-            pass
+        await log_metric(latency, current_status_code, profile_name, request_id, attempts)
 
         # 2. Retry Logic
-        if current_status_code == 503 or current_status_code == 0:
+        if current_status_code == 503 or current_status_code == 502 or current_status_code == 504 or current_status_code == 0:
             retries = 0
             while retries < config["retries"]:
                 # Calculate Delay
                 if config["jitter"] == "full":
-                    # Full Jitter: sleep = random_between(0, min(cap, base * 2^attempt))
                     temp = min(config["max"], config["base"] * (2 ** retries))
                     sleep_time = random.uniform(0, temp)
                 else:
-                    # No Jitter / Fixed
-                    # If max == base, it's fixed delay. If not, it's linear or exponential without jitter
-                    # For simplicity in this profile set:
-                    # SDK-B (Fixed): base=0.2, max=0.2 -> always 0.2
-                    # Bad (Linear-ish): base=0.01 -> let's just use base * (retries+1) capped at max
                     if config["max"] == config["base"]:
                         sleep_time = config["base"]
                     else:
                         sleep_time = min(config["base"] * (retries + 1), config["max"])
                 
-                time.sleep(sleep_time)
+                await asyncio.sleep(sleep_time)
                 
                 # Retry Attempt
                 attempts += 1
                 retry_start = time.time()
                 retry_status = 0
+                headers = {
+                    "X-Request-ID": request_id,
+                    "X-Attempt-Number": str(attempts),
+                    "X-Client-Type": profile_name
+                }
                 try:
-                    resp = requests.post(TARGET_URL, timeout=config["timeout"])
-                    retry_status = resp.status_code
-                except requests.exceptions.RequestException:
+                    async with session.post(TARGET_URL, headers=headers, timeout=config["timeout"]) as resp:
+                        retry_status = resp.status
+                        await resp.read()
+                except Exception:
                     retry_status = 0
                 
                 # Log retry
                 retry_latency = time.time() - retry_start
-                try:
-                    with open("/metrics/client.csv", "a") as f:
-                        f.write(f"{time.time()},{retry_latency},{retry_status},{profile_name},{request_id},{attempts}\n")
-                except Exception:
-                    pass
+                await log_metric(retry_latency, retry_status, profile_name, request_id, attempts)
                 
                 if retry_status == 200:
                     break
@@ -101,20 +106,25 @@ def client_worker(worker_id, profile_name):
 
         # Think time
         if profile_name in ["good", "sdk-a", "sdk-d"]:
-            time.sleep(random.uniform(0.5, 2.0))
+            await asyncio.sleep(random.uniform(0.5, 2.0))
         else:
             # Aggressive clients are impatient
-            time.sleep(random.uniform(0.1, 0.5))
+            await asyncio.sleep(random.uniform(0.1, 0.5))
 
-threads = []
+async def main():
+    # Increase limit for high concurrency
+    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = []
+        for profile in PROFILES.keys():
+            count = get_env_count(profile)
+            for i in range(count):
+                tasks.append(asyncio.create_task(client_worker(session, profile)))
+        
+        if tasks:
+            await asyncio.gather(*tasks)
+        else:
+            print("No clients configured. Exiting.")
 
-# Start clients for each profile
-for profile in PROFILES.keys():
-    count = get_env_count(profile)
-    for i in range(count):
-        t = threading.Thread(target=client_worker, args=(f"{profile}-{i}", profile))
-        t.start()
-        threads.append(t)
-
-for t in threads:
-    t.join()
+if __name__ == "__main__":
+    asyncio.run(main())

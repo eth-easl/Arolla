@@ -22,6 +22,20 @@ python3 visualize_experiments.py
 ```
 The plots will be saved in `experiment_logs/` and `experiment_plots/`.
 
+### 3. Run Ghost Storm Demo
+Demonstrate how retries persist after the root cause is fixed:
+```bash
+# Simplified Demo (Recommended)
+python3 run_scenario.py --ghost-clients 20 --good-clients 0
+python3 visualize_simple.py
+# Generates plot_simple_ghost.png
+
+# Detailed Demo
+python3 run_scenario.py --bad-clients 20 --good-clients 0
+python3 visualize_ghost.py
+# Generates plot_11_ghost_storm.png and plot_12_heatmap.png
+```
+
 ## Experiments Overview
 
 The `run_experiments.py` script executes two main experiments:
