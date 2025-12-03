@@ -209,3 +209,6 @@ __marimo__/
 
 # Custom
 outputs/
+*.csv
+*.png
+*.DS_Store
