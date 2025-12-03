@@ -2,6 +2,8 @@ from fastapi import FastAPI, HTTPException
 import boto3
 import os
 import time
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from botocore.exceptions import EndpointConnectionError, ClientError
 
 app = FastAPI()
@@ -9,37 +11,64 @@ app = FastAPI()
 # Configuration
 DYNAMODB_ENDPOINT = os.environ.get("DYNAMODB_ENDPOINT")
 REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "5"))  # Capacity limit
 
-# Initialize DynamoDB Client
-# We create a new client per request or reuse? 
-# Boto3 sessions are thread-safe, clients are generally thread-safe.
-# However, to ensure we hit DNS every time (or respect TTL), we might need to be careful.
-# Standard boto3 usage relies on urllib3 which pools connections. 
-# If connection breaks, it should retry DNS resolution.
+# Capacity control
+worker_semaphore = asyncio.Semaphore(MAX_WORKERS)
+current_queue_depth = 0
+executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
-@app.post("/launch_instance")
-async def launch_instance():
-    status_code = 200
+from botocore.config import Config
+
+def call_dynamodb():
+    """Synchronous function to call DynamoDB - raises exceptions for async handler to catch"""
     try:
-        # Simulate some logic that requires DynamoDB
         client = boto3.client(
             'dynamodb', 
             endpoint_url=DYNAMODB_ENDPOINT,
-            region_name=REGION
+            region_name=REGION,
+            config=Config(connect_timeout=1, read_timeout=1, retries={'max_attempts': 0})
         )
-        
         client.list_tables()
-        return {"status": "success", "instance_id": f"i-{int(time.time())}"}
-        
-    except (EndpointConnectionError, ClientError) as e:
-        status_code = 503
-        print(f"AWS Error: {e}")
-        raise HTTPException(status_code=503, detail="Service Unavailable: Dependency Failure")
     except Exception as e:
-        status_code = 500
-        print(f"Internal Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Log metrics
-        with open("/metrics/control_plane.csv", "a") as f:
-            f.write(f"{time.time()},{status_code}\n")
+        # Re-raise so the executor can propagate it
+        raise e
+
+@app.post("/launch_instance")
+async def launch_instance():
+    global current_queue_depth
+    
+    # Track queue depth (requests waiting for capacity)
+    current_queue_depth += 1
+    queue_depth_at_entry = current_queue_depth
+    
+    status_code = 200
+    start_time = time.time()
+    
+    # Wait for available worker capacity
+    async with worker_semaphore:
+        current_queue_depth -= 1  # Got capacity, no longer queued
+        
+        try:
+            # Simulate realistic CPU/IO work (500-600ms)
+            await asyncio.sleep(0.5 + (hash(str(time.time())) % 100) / 1000)
+            
+            # Run synchronous boto3 call in thread pool
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(executor, call_dynamodb)
+            
+            return {"status": "success", "instance_id": f"i-{int(time.time())}"}
+            
+        except (EndpointConnectionError, ClientError) as e:
+            status_code = 503
+            print(f"AWS Error: {e}")
+            raise HTTPException(status_code=503, detail="Service Unavailable: Dependency Failure")
+        except Exception as e:
+            status_code = 500
+            print(f"Internal Error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # Log metrics
+            processing_time = time.time() - start_time
+            with open("/metrics/control_plane.csv", "a") as f:
+                f.write(f"{time.time()},{status_code},{queue_depth_at_entry},{processing_time}\n")

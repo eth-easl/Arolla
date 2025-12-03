@@ -3,6 +3,7 @@ import time
 import requests
 import os
 import shutil
+import argparse
 
 METRICS_DIR = "metrics"
 EVENTS_FILE = os.path.join(METRICS_DIR, "events.csv")
@@ -81,4 +82,13 @@ def main():
     print("Done. Check simulation_results.png")
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run AWS outage simulation")
+    parser.add_argument("-n", "--num-clients", type=int, default=20, 
+                        help="Number of client threads to simulate (default: 20)")
+    args = parser.parse_args()
+    
+    # Set environment variable for docker-compose
+    os.environ["NUM_CLIENTS"] = str(args.num_clients)
+    
+    print(f"Running simulation with {args.num_clients} clients")
     main()

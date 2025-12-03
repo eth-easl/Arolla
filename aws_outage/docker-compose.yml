@@ -34,6 +34,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=us-east-1
       - DYNAMODB_ENDPOINT=http://dynamodb.us-east-1.amazonaws.com:8000
+      - MAX_WORKERS=${MAX_WORKERS:-10}
     volumes:
       - ./metrics:/metrics
     depends_on:
@@ -63,6 +64,7 @@ services:
     build: ./client
     environment:
       - TARGET_URL=http://nlb/launch_instance
+      - NUM_CLIENTS=${NUM_CLIENTS:-20}
     volumes:
       - ./metrics:/metrics
     depends_on:
