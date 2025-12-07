@@ -18,6 +18,7 @@ apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
   name: retry-interceptor
+  namespace: default
 spec:
   workloadSelector:
     labels:
@@ -31,20 +32,32 @@ spec:
     patch:
       operation: MERGE
       value:
-        upstream_http_filters:
-        - name: envoy.filters.http.lua
-          typed_config:
-            "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
-            inlineCode: |
-              function envoy_on_request(request_handle)
-              end
-              
-              function envoy_on_response(response_handle)
-                local attempt_count = response_handle:headers():get("x-envoy-attempt-count")
-                if attempt_count then
-                  response_handle:logInfo("Upstream Retry intercepted! Attempt count: " .. attempt_count)
-                end
-              end
-        - name: envoy.filters.http.upstream_codec
-          typed_config:
-            "@type": "type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec"
+        typed_extension_protocol_options:
+          envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+            "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+            # keep using downstream protocol like Istio already configured
+            use_downstream_protocol_config:
+              http_protocol_options: {}
+              http2_protocol_options: {}
+            # THIS is the upstream HTTP filter chain
+            http_filters:
+            - name: envoy.filters.http.lua
+              typed_config:
+                "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+                inlineCode: |
+                  function envoy_on_request(request_handle)
+                    local attempt = request_handle:headers():get("x-envoy-attempt-count") or "1"
+                    request_handle:logWarn("Lua upstream filter: envoy_on_request, attempt=" .. attempt)
+                  end
+
+                  function envoy_on_response(response_handle)
+                    local attempt = response_handle:headers():get("x-envoy-attempt-count") or "1"
+                    local status = response_handle:headers():get(":status") or "unknown"
+                    response_handle:logWarn(
+                      "Lua upstream filter: envoy_on_response, status=" .. status ..
+                      ", attempt=" .. attempt
+                    )
+                  end
+            - name: envoy.filters.http.upstream_codec
+              typed_config:
+                "@type": "type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec"
