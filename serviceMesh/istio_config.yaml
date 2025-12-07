@@ -1,0 +1,50 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: service-b-retry
+spec:
+  hosts:
+  - service-b
+  http:
+  - route:
+    - destination:
+        host: service-b
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: 5xx
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: retry-interceptor
+spec:
+  workloadSelector:
+    labels:
+      app: service-a
+  configPatches:
+  - applyTo: CLUSTER
+    match:
+      context: SIDECAR_OUTBOUND
+      cluster:
+        service: service-b.default.svc.cluster.local
+    patch:
+      operation: MERGE
+      value:
+        upstream_http_filters:
+        - name: envoy.filters.http.lua
+          typed_config:
+            "@type": "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+            inlineCode: |
+              function envoy_on_request(request_handle)
+              end
+              
+              function envoy_on_response(response_handle)
+                local attempt_count = response_handle:headers():get("x-envoy-attempt-count")
+                if attempt_count then
+                  response_handle:logInfo("Upstream Retry intercepted! Attempt count: " .. attempt_count)
+                end
+              end
+        - name: envoy.filters.http.upstream_codec
+          typed_config:
+            "@type": "type.googleapis.com/envoy.extensions.filters.http.upstream_codec.v3.UpstreamCodec"
