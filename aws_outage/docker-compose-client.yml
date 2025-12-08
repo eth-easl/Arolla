@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  # 5. Client / Traffic Generator
+  # Simulates external customers.
+  client:
+    build: ./client
+    environment:
+      - TARGET_URL=${TARGET_URL}
+      - NUM_GOOD_CLIENTS=${NUM_GOOD_CLIENTS:-20}
+      - NUM_BAD_CLIENTS=${NUM_BAD_CLIENTS:-0}
+      - NUM_SDK_A_CLIENTS=${NUM_SDK_A_CLIENTS:-0}
+      - NUM_SDK_B_CLIENTS=${NUM_SDK_B_CLIENTS:-0}
+      - NUM_SDK_C_CLIENTS=${NUM_SDK_C_CLIENTS:-0}
+      - NUM_SDK_D_CLIENTS=${NUM_SDK_D_CLIENTS:-0}
+      - NUM_GHOST_CLIENTS=${NUM_GHOST_CLIENTS:-0}
+    volumes:
+      - ./metrics:/metrics
