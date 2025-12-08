@@ -78,6 +78,9 @@ async def launch_instance(request: Request):
         finally:
             # Log metrics
             processing_time = time.time() - start_time
-            with open("/metrics/control_plane.csv", "a") as f:
-                # Format: timestamp, status_code, queue_depth, processing_time, req_id, attempt, client_type
-                f.write(f"{time.time()},{status_code},{queue_depth_at_entry},{processing_time},{req_id},{attempt},{client_type}\n")
+            try:
+                with open("/metrics/control_plane.csv", "a") as f:
+                    # Format: timestamp, status_code, queue_depth, processing_time, req_id, attempt, client_type
+                    f.write(f"{time.time()},{status_code},{queue_depth_at_entry},{processing_time},{req_id},{attempt},{client_type}\n")
+            except Exception as e:
+                print(f"Failed to write metrics: {e}")

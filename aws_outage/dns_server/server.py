@@ -40,7 +40,8 @@ class CustomResolver(BaseResolver):
         try:
             with open("/metrics/dns_server.csv", "a") as f:
                 f.write(f"{time.time()},{status}\n")
-        except Exception:
+        except Exception as e:
+            print(f"Failed to write metrics: {e}")
             pass
         
         return reply

@@ -15,10 +15,22 @@ def log_event(name):
     print(f"[{time.strftime('%H:%M:%S')}] Event: {name}")
 
 def run_command(cmd):
+    print(f"Running local: {cmd}")
     subprocess.run(cmd, shell=True, check=True)
 
-def main():
+def run_remote_command(host, cmd):
+    print(f"Running remote on {host}: {cmd}")
+    # Assume shared filesystem, so we can cd to the same path
+    cwd = os.getcwd()
+    full_cmd = f"ssh {host} 'cd {cwd} && {cmd}'"
+    subprocess.run(full_cmd, shell=True, check=True)
+
+def main(args):
+    backend_host = args.backend_host
+    backend_api_url = f"http://{backend_host}:8080"
+    
     # 1. Cleanup Metrics
+    # Since filesystem is shared, this cleans it for both
     if os.path.exists(METRICS_DIR):
         shutil.rmtree(METRICS_DIR)
     os.makedirs(METRICS_DIR)
@@ -27,13 +39,36 @@ def main():
     with open(EVENTS_FILE, "w") as f:
         f.write("timestamp,event\n")
 
-    print("Starting Simulation Scenario...")
+    print(f"Starting Distributed Simulation Scenario...")
+    print(f"Backend Node: {backend_host}")
+    print(f"Client Node: Local")
     
     try:
         # 2. Start Docker
         print("Cleaning up old containers...")
-        subprocess.run("docker-compose down", shell=True, check=False) # Ignore errors if down fails
-        run_command("docker-compose up --build -d")
+        # Cleanup remote backend
+        try:
+            run_remote_command(backend_host, "sudo docker compose -f docker-compose-backend.yml down")
+        except:
+            pass
+            
+        # Cleanup local client
+        try:
+            run_command("sudo docker compose -f docker-compose-client.yml down")
+        except:
+            pass
+            
+        # Ensure metrics dir exists and has permissions on remote
+        run_remote_command(backend_host, "mkdir -p metrics && chmod 777 metrics")
+
+        print("Starting Backend on Remote Node...")
+        run_remote_command(backend_host, "sudo docker compose -f docker-compose-backend.yml up --build -d")
+        
+        print("Starting Client on Local Node...")
+        # Set TARGET_URL for client to point to backend NLB
+        os.environ["TARGET_URL"] = f"http://{backend_host}/launch_instance"
+        run_command("sudo docker compose -f docker-compose-client.yml up --build -d")
+        
         log_event("SIMULATION_START")
         
         # Wait for services to be ready
@@ -48,9 +83,9 @@ def main():
         print("Phase: Triggering DNS Failure...")
         log_event("DNS_BREAK")
         try:
-            requests.post("http://localhost:8080/break_dns")
+            requests.post(f"{backend_api_url}/break_dns")
             # Force restart control plane to ensure new connections fail immediately
-            run_command("docker-compose restart control-plane")
+            run_remote_command(backend_host, "sudo docker compose -f docker-compose-backend.yml restart control-plane")
         except Exception as e:
             print(f"Error triggering outage: {e}")
             
@@ -62,7 +97,7 @@ def main():
         print("Phase: Recovering DNS...")
         log_event("DNS_FIX")
         try:
-            requests.post("http://localhost:8080/fix_dns")
+            requests.post(f"{backend_api_url}/fix_dns")
         except Exception as e:
             print(f"Error fixing DNS: {e}")
             
@@ -72,13 +107,28 @@ def main():
         log_event("SIMULATION_END")
         
     finally:
+        # Capture logs before cleanup
+        print("Capturing debug logs...")
+        try:
+            run_remote_command(backend_host, "sudo docker compose -f docker-compose-backend.yml logs dns-server > metrics/dns_debug.log")
+            run_remote_command(backend_host, "sudo docker compose -f docker-compose-backend.yml logs control-plane > metrics/cp_debug.log")
+        except:
+            print("Failed to capture logs")
+
         # 7. Cleanup
         print("Stopping Docker...")
-        run_command("docker-compose down")
+        try:
+            run_remote_command(backend_host, "sudo docker compose -f docker-compose-backend.yml down")
+        except:
+            pass
+        try:
+            run_command("sudo docker compose -f docker-compose-client.yml down")
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run AWS outage simulation")
+    parser = argparse.ArgumentParser(description="Run AWS outage simulation (Distributed)")
     parser.add_argument("--good-clients", type=int, default=20, help="Number of standard (good) clients")
     parser.add_argument("--bad-clients", type=int, default=0, help="Number of aggressive (bad) clients")
     parser.add_argument("--sdk-a-clients", type=int, default=0, help="Number of SDK-A clients")
@@ -86,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument("--sdk-c-clients", type=int, default=0, help="Number of SDK-C clients")
     parser.add_argument("--sdk-d-clients", type=int, default=0, help="Number of SDK-D clients")
     parser.add_argument("--ghost-clients", type=int, default=0, help="Number of Ghost clients")
+    parser.add_argument("--backend-host", type=str, default="pc735.emulab.net", help="Hostname/IP of the backend node")
     
     args = parser.parse_args()
     
@@ -104,4 +155,4 @@ if __name__ == "__main__":
                      args.ghost_clients)
     
     print(f"Running simulation with {total_clients} total clients")
-    main()
+    main(args)
