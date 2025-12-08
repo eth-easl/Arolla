@@ -47,13 +47,13 @@ spec:
                 inlineCode: |
                   function envoy_on_request(request_handle)
                     local attempt = request_handle:headers():get("x-envoy-attempt-count") or "1"
-                    request_handle:logWarn("Lua upstream filter: envoy_on_request, attempt=" .. attempt)
+                    request_handle:logInfo("Lua upstream filter: envoy_on_request, attempt=" .. attempt)
                   end
 
                   function envoy_on_response(response_handle)
                     local attempt = response_handle:headers():get("x-envoy-attempt-count") or "1"
                     local status = response_handle:headers():get(":status") or "unknown"
-                    response_handle:logWarn(
+                    response_handle:logInfo(
                       "Lua upstream filter: envoy_on_response, status=" .. status ..
                       ", attempt=" .. attempt
                     )
