@@ -13,7 +13,7 @@ results/default_20251209_084304/
 └── plots/              # All 5 visualizations
     ├── latency.png
     ├── qps.png
-    ├── queue.png       ← Fixed!
+    ├── queue.png
     ├── failures.png
     └── success_rate.png
 ```
