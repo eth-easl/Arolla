@@ -1,4 +1,0 @@
-# Python 3.12 compatible
-matplotlib>=3.7
-pandas>=2.0
-numpy>=1.24

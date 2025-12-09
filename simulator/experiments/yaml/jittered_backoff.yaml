@@ -1,0 +1,55 @@
+# Jittered backoff with latency injection
+# Demonstrates jittered exponential backoff and latency spikes
+
+name: jittered_backoff_experiment
+seed: 12345
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 50
+    
+    # Jittered exponential backoff
+    retry:
+      type: jittered
+      max_attempts: 5
+      initial_delay_ms: 50
+      max_delay_ms: 2000
+      jitter_mode: full  # full, equal, or decorrelated
+    
+    timeout:
+      global_ms: 5000  # 5 second global timeout
+      attempt_ms: 500  # 500ms per attempt
+    
+    # Latency injection: add 200ms from 40s to 80s
+    latency_injections:
+      - type: latency_injection
+        start_s: 40
+        end_s: 80
+        add_latency_ms: 200
+        multiplier: 1
+    
+    # Partial failures during latency spike
+    partial_failures:
+      - type: partial_failure
+        start_s: 50
+        end_s: 70
+        p_fail: 0.3
+
+workload:
+  base_rps: 200
+  duration_s: 150
+  
+  # Traffic spike during fault period
+  load_spikes:
+    - type: load_spike
+      start_s: 55
+      end_s: 65
+      rps_multiplier: 3.0
+
+output_csv: jittered_backoff_output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

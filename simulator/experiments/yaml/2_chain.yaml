@@ -1,0 +1,59 @@
+# Two-service chain experiment
+# Equivalent to experiments/2_chain.py
+
+name: two_service_chain
+seed: 43232
+
+services:
+  # Downstream service B
+  - name: svc-B
+    latency:
+      median_ms: 20
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 20
+    
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+    
+    timeout:
+      attempt_ms: 50
+    
+    partial_failures:
+      - type: partial_failure
+        start_s: 50
+        end_s: 70
+        p_fail: 0.5
+  
+  # Upstream service A (calls B)
+  - name: svc-A
+    dependency: svc-B  # Calls svc-B
+    latency:
+      median_ms: 20
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 20
+    
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+    
+    timeout:
+      attempt_ms: 50
+    
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.65
+
+workload:
+  base_rps: 300
+  duration_s: 200
+
+output_csv: 2_chain_output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

@@ -1,0 +1,51 @@
+# Default experiment configuration
+# Equivalent to experiments/default.py
+
+name: default_experiment
+seed: 43232
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 20
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 20
+    
+    # Retry policy: fixed backoff with 2 attempts
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+    
+    # Timeout policy: 50ms per attempt
+    timeout:
+      attempt_ms: 50
+    
+    # Retry budget: 10% of successes
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 10
+    
+    # Fault injection: 50% failure rate from 50s to 70s
+    partial_failures:
+      - type: partial_failure
+        start_s: 50
+        end_s: 70
+        p_fail: 0.5
+
+workload:
+  base_rps: 300
+  duration_s: 300
+  
+  # Load spike: 2x RPS from 20s to 40s
+  load_spikes:
+    - type: load_spike
+      start_s: 20
+      end_s: 40
+      rps_multiplier: 2.0
+
+# Output configuration
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
