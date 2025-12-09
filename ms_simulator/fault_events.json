@@ -1,0 +1,10 @@
+[
+  {
+    "event_type": "partial_failure",
+    "start_time_s": 30.0,
+    "end_time_s": 60.0,
+    "parameters": {
+      "failure_rate": 0.65
+    }
+  }
+]
