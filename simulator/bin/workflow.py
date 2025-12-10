@@ -57,9 +57,14 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     print("Step 1/2: Running simulation...")
     print("-" * 70)
     
+    # Locate run_experiment.py relative to this script (workflow.py)
+    # Both are in the same 'bin' directory
+    script_dir = Path(__file__).parent.resolve()
+    run_experiment_script = script_dir / "run_experiment.py"
+
     cmd = [
         sys.executable,
-        "bin/run_experiment.py",
+        str(run_experiment_script),
         str(yaml_file),
         "--output", str(output_dir)
     ]

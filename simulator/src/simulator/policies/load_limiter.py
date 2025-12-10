@@ -206,6 +206,7 @@ class RetryBudgetPolicy(LoadLimiter):
         # Add tokens for a successful request
         if success:
             self._tokens = min(self._max_tokens, self._tokens + self._success_award)
+            # print(f"[Budget] Success! Added {self._success_award} tokens. Balance: {self._tokens}")
 
     def can_retry(self) -> bool:
         return self._tokens >= self._retry_cost
@@ -216,7 +217,9 @@ class RetryBudgetPolicy(LoadLimiter):
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
         if self.can_retry():
             self._tokens -= self._retry_cost
+            # print(f"[Budget] Retry Allowed! Cost {self._retry_cost}. Balance: {self._tokens}")
             return True, 0  # Budget available, allow retry
+        # print(f"[Budget] Retry BLOCKED! Balance: {self._tokens} < {self._retry_cost}")
         return False, 0  # Budget exhausted, block retry
 
 

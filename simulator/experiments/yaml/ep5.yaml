@@ -1,0 +1,42 @@
+# Experiment 5 - Retry Budget Prevention
+# Demonstrates how retry budget prevents metastable failure seen in ep4
+
+name: experiment_5_retry_budget
+seed: 43232
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    
+    retry:
+      type: fixed
+      max_attempts: 4        # Up to 4 retries (5 total attempts)
+      delay_ms: 0            # Immediate retries
+    
+    # Same timeout as ep4 that caused the issue
+    timeout:
+      attempt_ms: 192
+
+    # NEW: Retry Budget to choke the storm
+    retry_budget:
+      budget_ratio: 1      # 10% retry budget
+      max_retries: 10000         # Token bucket depth
+    
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 40
+        p_fail: 0.5          # 50% failure rate
+
+workload:
+  base_rps: 188              # Constant load
+  duration_s: 60
+
+# Output configuration
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

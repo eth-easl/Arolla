@@ -345,8 +345,10 @@ class ServiceRuntime:
             service_name=self.cfg.name,
         )
         
-        # If successful, we're done
+        # If successful, we're done, BUT we must update load limiter if present
         if attempt_ctx.is_successful:
+            if self.cfg.load_limiter is not None and hasattr(self.cfg.load_limiter, 'add_result'):
+                self.cfg.load_limiter.add_result(True, end_time)
             ctx.on_root_done()
             return
         
