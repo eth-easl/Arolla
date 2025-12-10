@@ -36,7 +36,7 @@ def plot_latency(df, output_dir, fault_events=None):
         plt.plot(t, df['Max'], label='Max', linewidth=1, alpha=0.7)
     
     add_fault_events(fault_events)
-    plt.legend()
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
     save_plot(output_dir / 'latency.png')
     plt.close()
 
@@ -56,7 +56,7 @@ def plot_qps(df, output_dir, fault_events=None):
         plt.plot(t, df['failure_root'], label='Failures', linewidth=2)
     
     add_fault_events(fault_events)
-    plt.legend()
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
     save_plot(output_dir / 'qps.png')
     plt.close()
 
@@ -82,7 +82,7 @@ def plot_queue(df, output_dir, fault_events=None):
     plt.plot(t, df[queue_col], label='Queue Size', linewidth=2)
     
     add_fault_events(fault_events)
-    plt.legend()
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
     save_plot(output_dir / 'queue.png')
     plt.close()
 
@@ -112,7 +112,7 @@ def plot_failures(df, output_dir, fault_events=None):
         return
     
     add_fault_events(fault_events)
-    plt.legend()
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
     save_plot(output_dir / 'failures.png')
     plt.close()
 
@@ -133,7 +133,7 @@ def plot_success_rate(df, output_dir, fault_events=None):
     plt.ylim(0, 105)  # 0-100% with some headroom
     
     add_fault_events(fault_events)
-    plt.legend()
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
     save_plot(output_dir / 'success_rate.png')
     plt.close()
 

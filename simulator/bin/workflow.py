@@ -81,12 +81,18 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         print(f"\nStep 2/2: Generating plots...")
         print("-" * 70)
         
+        fault_events_file = output_dir / "fault_events.json"
+        
         cmd = [
             sys.executable,
             "plotting/plot_all.py",
             str(csv_file),
             "-o", str(plots_dir)
         ]
+        
+        # Add fault events if file exists
+        if fault_events_file.exists():
+            cmd.extend(["--fault-events", str(fault_events_file)])
         
         if time_range:
             cmd.extend(["--time-range", time_range])
