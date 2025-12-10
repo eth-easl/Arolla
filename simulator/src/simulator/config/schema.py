@@ -110,9 +110,27 @@ class RateLimiterConfig(BaseModel):
 
 
 class RetryBudgetConfig(BaseModel):
-    """Configuration for retry budget"""
+    """Configuration for local/legacy retry budget"""
     budget_ratio: float = Field(ge=0, le=1, description="Retry budget as ratio of successes (e.g., 0.1 = 10%)")
     max_retries: int = Field(ge=1, description="Maximum consecutive retries")
+
+
+class GlobalRetryBudgetConfig(BaseModel):
+    """Configuration for server-side global retry budget (token bucket)"""
+    target_rps: int = Field(ge=1, description="Target allowed retries per second")
+    max_burst: int = Field(default=10, ge=1, description="Maximum burst of retries allowed at once")
+
+
+class AIMDGlobalRetryBudgetConfig(BaseModel):
+    """Configuration for AIMD adaptive global retry budget"""
+    min_rps: int = Field(ge=1, description="Minimum RPS floor")
+    max_rps: int = Field(ge=1, description="Maximum RPS ceiling")
+    initial_rps: int = Field(ge=1, description="Initial RPS")
+    max_burst: int = Field(default=10, ge=1, description="Maximum burst capacity")
+    additive_step: int = Field(default=1, ge=1, description="RPS added per healthy window")
+    decrease_factor: float = Field(default=0.5, gt=0, lt=1, description="Multiplicative decrease factor on congestion")
+    window_ms: float = Field(default=1000.0, gt=0, description="Update window in ms")
+    failure_threshold: float = Field(default=0.1, ge=0, le=1, description="Failure rate threshold (0.0-1.0)")
 
 
 # ============================================================================
@@ -192,6 +210,8 @@ class ServiceConfigYAML(BaseModel):
     circuit_breaker: Optional[CircuitBreakerConfig] = None
     rate_limiter: Optional[RateLimiterConfig] = None
     retry_budget: Optional[RetryBudgetConfig] = None
+    global_retry_budget: Optional[GlobalRetryBudgetConfig] = None
+    aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig] = None
     
     # Faults
     latency_injections: List[LatencyInjectionConfig] = Field(default_factory=list)

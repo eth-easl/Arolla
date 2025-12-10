@@ -22,6 +22,8 @@ from simulator.policies.load_limiter import (
     BurstyRateLimiterPolicy, FixedWindowBurstyLimiterPolicy,
     RetryBudgetPolicy
 )
+from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.aimd_retry_budget import AIMDGlobalRetryBudget
 from simulator.faults.injection import LatencyInjection, PartialFailure, LoadSpike
 from simulator.runtime.service import ServiceConfig, ServiceRuntime
 from simulator.runtime.workload import Workload
@@ -204,8 +206,8 @@ class ConfigLoader:
             raise ValueError(f"Unknown rate limiter type: {cfg.type}")
     
     @staticmethod
-    def build_retry_budget(cfg: Optional[RetryBudgetConfig]) -> Optional[RetryBudgetPolicy]:
-        """Build retry budget from configuration"""
+    def build_retry_budget(cfg: Optional[RetryBudgetConfig]) -> Optional[LoadLimiter]:
+        """Build legacy/local retry budget from configuration"""
         if cfg is None:
             return None
         
@@ -213,21 +215,55 @@ class ConfigLoader:
             budget_ratio=cfg.budget_ratio,
             max_retries=cfg.max_retries
         )
+
+    @staticmethod
+    def build_global_retry_budget(cfg: Optional[GlobalRetryBudgetConfig]) -> Optional[LoadLimiter]:
+        """Build server-side global retry budget from configuration"""
+        if cfg is None:
+            return None
+        
+        return GlobalRetryBudget(
+            max_tokens=cfg.max_burst,
+            refill_rate=cfg.target_rps,
+            period=s_to_ns(1)  # 1 second period
+        )
     
+    @staticmethod
+    def build_aimd_global_retry_budget(cfg: Optional[AIMDGlobalRetryBudgetConfig]) -> Optional[LoadLimiter]:
+        """Build AIMD global retry budget"""
+        if cfg is None:
+            return None
+        
+        return AIMDGlobalRetryBudget(
+            min_rps=cfg.min_rps,
+            max_rps=cfg.max_rps,
+            initial_rps=cfg.initial_rps,
+            max_burst=cfg.max_burst,
+            additive_step=cfg.additive_step,
+            decrease_factor=cfg.decrease_factor,
+            window_duration=ms_to_ns(cfg.window_ms),
+            failure_threshold=cfg.failure_threshold
+        )
+
     @staticmethod
     def build_load_limiter(
         circuit_breaker: Optional[CircuitBreakerConfig],
         rate_limiter: Optional[RateLimiterConfig],
-        retry_budget: Optional[RetryBudgetConfig]
+        retry_budget: Optional[RetryBudgetConfig],
+        global_retry_budget: Optional[GlobalRetryBudgetConfig],
+        aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig]
     ) -> Optional[LoadLimiter]:
         """
         Build load limiter from configuration.
         
-        Priority: circuit_breaker > retry_budget > rate_limiter
-        (Only one load limiter is used; middleware can compose multiple)
+        Priority: circuit_breaker > aimd > global > retry_budget > rate_limiter
         """
         if circuit_breaker is not None:
             return ConfigLoader.build_circuit_breaker(circuit_breaker)
+        elif aimd_global_retry_budget is not None:
+            return ConfigLoader.build_aimd_global_retry_budget(aimd_global_retry_budget)
+        elif global_retry_budget is not None:
+            return ConfigLoader.build_global_retry_budget(global_retry_budget)
         elif retry_budget is not None:
             return ConfigLoader.build_retry_budget(retry_budget)
         elif rate_limiter is not None:
@@ -300,7 +336,9 @@ class ConfigLoader:
         load_limiter = ConfigLoader.build_load_limiter(
             cfg.circuit_breaker,
             cfg.rate_limiter,
-            cfg.retry_budget
+            retry_budget=cfg.retry_budget,
+            global_retry_budget=cfg.global_retry_budget,
+            aimd_global_retry_budget=cfg.aimd_global_retry_budget,
         )
         
         # Build fault injections
