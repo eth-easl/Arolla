@@ -138,6 +138,117 @@ def plot_success_rate(df, output_dir, fault_events=None):
     plt.close()
 
 
+def plot_failure_breakdown(df, output_dir, fault_events=None):
+    """Plot failure breakdown as stacked area chart."""
+    from plotting.core import setup_plot, save_plot
+    
+    # Check if failure columns exist
+    if 'failure_deadline' not in df.columns or 'failure_server' not in df.columns:
+        print("⚠ Skipping failure breakdown plot: required columns not found")
+        return
+    
+    setup_plot("Failures (%) over Time by Reason Breakdown", "Time (s)", "Failure rate (%)")
+    
+    t = df['timepoint']
+    
+    # Calculate total failures (all types combined)
+    total_failures = df['failure_deadline'] + df['failure_server'] + df['failure_queue_full']
+    
+    # Calculate what percentage each failure type is of total failures
+    deadline_pct = (df['failure_deadline'] / total_failures.replace(0, 1)) * 100
+    server_pct = (df['failure_server'] / total_failures.replace(0, 1)) * 100
+    queue_pct = (df['failure_queue_full'] / total_failures.replace(0, 1)) * 100
+    
+    # Replace NaN with 0
+    deadline_pct = deadline_pct.fillna(0)
+    server_pct = server_pct.fillna(0)
+    queue_pct = queue_pct.fillna(0)
+    
+    # Calculate user-facing failure rate based on COMPLETED root requests
+    # Use (success_root + failure_root) as denominator to avoid >100% due to timing artifacts
+    completed_root = df['success_root'] + df['failure_root']
+    user_failure_rate = (df['failure_root'] / completed_root.replace(0, 1)) * 100
+    user_failure_rate = user_failure_rate.fillna(0)
+
+    
+    # Scale breakdown by user failure rate to get stacked failure rates
+    deadline_rate = (deadline_pct / 100) * user_failure_rate
+    server_rate = (server_pct / 100) * user_failure_rate
+    queue_rate = (queue_pct / 100) * user_failure_rate
+    
+    # Stack plot - colors match reference image
+    plt.stackplot(t, deadline_rate, server_rate, queue_rate,
+                  labels=['deadline', 'server', 'queue_full'],
+                  colors=['#1f77b4', '#ff7f0e', '#2ca02c'],
+                  alpha=1.0)
+    
+    plt.ylim(0, 100)
+    # Add fault events AFTER (blends with underlying colors to create purple)
+    add_fault_events(fault_events)
+    plt.legend(loc='upper left', bbox_to_anchor=(0, 1.0))
+    save_plot(output_dir / 'failure_breakdown.png')
+    plt.close()
+
+
+def plot_request_amplification(df, output_dir, fault_events=None):
+    """Plot request amplification over time."""
+    from plotting.core import setup_plot, save_plot
+    
+    # Check if required columns exist
+    if 'root_requests' not in df.columns or 'retries' not in df.columns:
+        print("⚠ Skipping amplification plot: required columns not found")
+        return
+    
+    setup_plot("Request Amplification Over Time", "Time (s)", "Amplification (%)")
+    
+    t = df['timepoint']
+    
+    # Calculate amplification as additional load percentage (0% = no retries, 25% = 1.25x load)
+    amplification = (df['retries'] / df['root_requests'].replace(0, 1)) * 100
+    amplification = amplification.fillna(0.0)
+    
+    plt.plot(t, amplification, label='Request amplification', linewidth=2, color='#1f77b4')
+    
+    # Add max sustainable amplification line (max additional load = 25%, total = 125%)
+    plt.axhline(y=125, color='red', linestyle='--', linewidth=2, 
+                label='Max Sustainable (125%)', alpha=0.7)
+    
+    plt.ylim(0, max(amplification.max() * 1.1, 350))
+    add_fault_events(fault_events)
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
+    save_plot(output_dir / 'amplification.png')
+    plt.close()
+
+
+def plot_success_rate_detailed(df, output_dir, fault_events=None):
+    """Plot detailed success rate over time with filled regions."""
+    from plotting.core import setup_plot, save_plot
+    
+    # Check if required columns exist
+    if 'success_root' not in df.columns or 'root_requests' not in df.columns:
+        print("⚠ Skipping detailed success rate plot: required columns not found")
+        return
+    
+    setup_plot("Success Rate over Time", "Time (s)", "Success Rate (%)")
+    
+    t = df['timepoint']
+    
+    # Calculate success rate
+    success_rate = (df['success_root'] / df['root_requests'].replace(0, 1)) * 100
+    success_rate = success_rate.fillna(100.0)
+    
+    plt.plot(t, success_rate, label='Success Rate', linewidth=2, color='green')
+    plt.fill_between(t, success_rate, 100, alpha=0.3, color='green', label='Success Region')
+    plt.fill_between(t, 0, success_rate, alpha=0.3, color='red', label='Failure Region')
+    
+    plt.ylim(0, 105)
+    add_fault_events(fault_events)
+    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
+    save_plot(output_dir / 'success_rate_detailed.png')
+    plt.close()
+
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate all plots from simulation results',
@@ -208,15 +319,20 @@ Examples:
     plot_latency(df, output_dir, args.fault_events)
     plot_qps(df, output_dir, args.fault_events)
     plot_queue(df, output_dir, args.fault_events)
-    plot_failures(df, output_dir, args.fault_events)
-    plot_success_rate(df, output_dir, args.fault_events)
+    
+    # Additional analysis plots
+    plot_failure_breakdown(df, output_dir, args.fault_events)
+    plot_request_amplification(df, output_dir, args.fault_events)
     
     print(f"\n✅ All plots generated in {output_dir}/")
     print(f"   - latency.png")
     print(f"   - qps.png")
     print(f"   - queue.png (if available)")
-    print(f"   - failures.png (if available)")
-    print(f"   - success_rate.png (if available)")
+    print(f"   - failure_breakdown.png (if available)")
+    print(f"   - amplification.png (if available)")
+
+
+
     
     return 0
 

@@ -1,0 +1,45 @@
+# Experiment 3 - Partial Failure w Retries
+# Demonstrates retry storm and metastable failure
+
+name: experiment_3_retry_storm
+seed: 43232
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000    # Large queue to allow retry storm buildup
+
+    retry:
+      type: fixed
+      max_attempts: 4        # Up to 4 retries (5 total attempts)
+      delay_ms: 0            # Immediate retries (no delay)
+    
+    # NO TIMEOUT - allows retries to continue without time limit
+    # timeout:
+    #   attempt_ms: 100
+    
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 40
+        p_fail: 0.5          # 50% failure rate
+
+workload:
+  base_rps: 188              # Constant load (λ = 188 QPS)
+  duration_s: 60
+  
+  # No load spikes in this experiment
+  # load_spikes:
+  #   - type: load_spike
+  #     start_s: 20
+  #     end_s: 40
+  #     rps_multiplier: 2.0
+
+# Output configuration
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+
