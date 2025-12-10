@@ -8,6 +8,7 @@ Automatically organizes outputs by scenario name (from YAML filename).
 import argparse
 import sys
 import subprocess
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -42,6 +43,9 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(output_base) / f"{scenario_name}_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Archive config file
+    shutil.copy(yaml_path, output_dir / yaml_path.name)
     
     csv_file = output_dir / "output.csv"
     plots_dir = output_dir / "plots"
