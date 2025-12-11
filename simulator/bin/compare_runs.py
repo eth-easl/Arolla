@@ -80,17 +80,17 @@ def plot_comparison(runs_data: List[tuple]):
             ax.axhline(y=val, color=color, linestyle=style, linewidth=2, label=label)
             ax.legend(fontsize=12)
 
-    # 1. Retry Success Rate
-    plot_bar(axs[0, 0], retry_success, 'Retry Success Rate (%)', 'Success Rate %', 
-             'lightgreen', limit=(0, 100))
-
-    # 2. Global Success Rate
+    # 1. Global Success Rate
     global_success = [res.get('efficiency', 0) * 100 if "error" not in res else 0 for _, res in runs_data]
-    plot_bar(axs[0, 1], global_success, 'Global Success Rate (%)', 'Success Rate %',
+    plot_bar(axs[0, 0], global_success, 'Global Success Rate (%)', 'Success Rate %',
              'skyblue', limit=(0, 100))
     
+    # 2. Retry Success Rate
+    plot_bar(axs[0, 1], retry_success, 'Retry Success Rate (%)', 'Success Rate %', 
+             'lightgreen', limit=(0, 100))
+    
     # 3. Amplification
-    plot_bar(axs[1, 0], amplification, 'Amplification (Load Overhead)', 'Total Load / Root Requests',
+    plot_bar(axs[1, 0], amplification, 'Amplification', 'Total Load / Root Requests',
              'orange', hline=(1.0, 'k', '--', 'Ideal (1.0x)'))
 
     # 4. Latency
@@ -104,7 +104,7 @@ def plot_comparison(runs_data: List[tuple]):
 
 def find_results(exp_name: str, limit: int = 5) -> List[str]:
     """Find timestamped result dirs for experiment, sorted newest first"""
-    base = "results"
+    base = "results_0"
     pattern = f"{base}/{exp_name}_[0-9]*"
     candidates = glob.glob(pattern)
     candidates = [c for c in candidates if os.path.isdir(c)]

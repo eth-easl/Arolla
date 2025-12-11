@@ -24,7 +24,7 @@ services:
     # NEW: Server-side Global Retry Budget
     global_retry_budget:
       target_rps: 40         # Limit to 40 retries per second
-      max_burst: 10          # Allow bursts of up to 10
+      max_burst: 40          # Allow bursts of up to 10
     
     partial_failures:
       - type: partial_failure
