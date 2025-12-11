@@ -1,7 +1,7 @@
 import sys
 import os
 import argparse
-from simulator import plotting, scenarios
+import plotting, scenarios
 
 def main():
     parser = argparse.ArgumentParser(description="Run simulation scenarios.")

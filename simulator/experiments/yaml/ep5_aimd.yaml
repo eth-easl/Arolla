@@ -1,0 +1,46 @@
+# Experiment 5 (AIMD) - AIMD Global Retry Budget
+# Demonstrates adaptive retry budget
+
+name: experiment_5_aimd
+seed: 43232
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    
+    retry:
+      type: fixed
+      max_attempts: 4        # Up to 4 retries (5 total attempts)
+      delay_ms: 0            # Immediate retries
+    
+    timeout:
+      attempt_ms: 192
+
+    # AIMD Adaptive Budget
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 40
+      max_burst: 10
+      additive_step: 5       # Add 5 RPS per second if healthy
+      decrease_factor: 0.5   # Cut by 50% if >10% failure
+      window_ms: 1000        # Update every 1s
+      failure_threshold: 0.1
+
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 40
+        p_fail: 0.5          # 50% failure rate
+
+workload:
+  base_rps: 188
+  duration_s: 60
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

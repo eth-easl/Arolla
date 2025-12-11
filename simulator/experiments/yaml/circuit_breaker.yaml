@@ -1,0 +1,41 @@
+# Circuit breaker experiment
+# Demonstrates time-based circuit breaker
+
+name: circuit_breaker_experiment
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 20
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 20
+    
+    retry:
+      type: exponential
+      max_attempts: 3
+      initial_delay_ms: 10
+      max_delay_ms: 1000
+    
+    # Time-based circuit breaker
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.5  # Open if >50% failures
+      success_threshold: 0.8  # Close if >80% successes
+      min_requests: 10
+      window_duration_ms: 5000  # 5 second window
+      half_open_delay_ms: 1000  # 1 second cooldown
+    
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.8  # High failure rate
+
+workload:
+  base_rps: 100
+  duration_s: 120
+
+output_csv: circuit_breaker_output.csv
+granularity_s: 0.5

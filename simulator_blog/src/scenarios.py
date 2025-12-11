@@ -1,5 +1,5 @@
 import numpy as np
-from simulator.core import run_simulation, run_metastable_simulation, NoRetries, NRetries, AdaptiveRetries, CircuitBreakerRetries
+from core import run_simulation, run_metastable_simulation, NoRetries, NRetries, AdaptiveRetries, CircuitBreakerRetries
 
 def run_sweep(strategy_factory, failure_rates, num_clients=100, requests_per_client=500, retry_budget_rate=None, max_capacity=None):
     success_rates = []

@@ -212,3 +212,4 @@ outputs/
 *.csv
 *.png
 *.DS_Store
+results*/
