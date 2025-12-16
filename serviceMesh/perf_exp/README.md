@@ -80,3 +80,20 @@ kubectl exec -it $(kubectl get pod -l app=client -o jsonpath="{.items[0].metadat
 ```
 Service A -> Service B Success
 ```
+
+## 5. RPS Sweep Experiment (Measure Overhead)
+To measure the overhead of the Envoy sidecar:
+
+1.  **Run with Mesh**:
+    ```bash
+    python3 run_sweep.py
+    mv sweep_results.json results_mesh.json
+    ```
+2.  **Disable Mesh**:
+    See [toggle_mesh.md](toggle_mesh.md) for instructions.
+3.  **Run without Mesh**:
+    ```bash
+    python3 run_sweep.py
+    mv sweep_results.json results_no_mesh.json
+    ```
+4.  **Compare**: Check the latency numbers in the two JSON files.

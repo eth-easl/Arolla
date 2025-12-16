@@ -19,8 +19,8 @@ spec:
       containers:
       - name: client
         image: service-mesh-demo:latest
-        imagePullPolicy: IfNotPresent
-        command: ["python", "client.py"]
+        imagePullPolicy: Never
+        command: ["sleep", "infinity"]
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -28,6 +28,7 @@ metadata:
   name: service-a
   labels:
     app: service-a
+    app-tier: service
 spec:
   replicas: 1
   selector:
@@ -37,14 +38,15 @@ spec:
     metadata:
       labels:
         app: service-a
+        app-tier: service
     spec:
       nodeSelector:
         app-tier: service
       containers:
       - name: service-a
         image: service-mesh-demo:latest
-        imagePullPolicy: IfNotPresent
-        command: ["python", "service_a.py"]
+        imagePullPolicy: Never
+        command: ["./service-a"]
         ports:
         - containerPort: 80
 ---
@@ -65,6 +67,7 @@ metadata:
   name: service-b
   labels:
     app: service-b
+    app-tier: service
 spec:
   replicas: 1
   selector:
@@ -74,14 +77,15 @@ spec:
     metadata:
       labels:
         app: service-b
+        app-tier: service
     spec:
       nodeSelector:
         app-tier: service
       containers:
       - name: service-b
         image: service-mesh-demo:latest
-        imagePullPolicy: IfNotPresent
-        command: ["python", "service_b.py"]
+        imagePullPolicy: Never
+        command: ["./service-b"]
         ports:
         - containerPort: 80
 ---
