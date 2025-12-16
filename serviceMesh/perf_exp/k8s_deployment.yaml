@@ -41,6 +41,9 @@ spec:
       labels:
         app: service-a
         app-tier: service
+      annotations:
+        sidecar.istio.io/proxyMemoryLimit: "4Gi"
+        sidecar.istio.io/proxyCPULimit: "4"
     spec:
       nodeSelector:
         app-tier: service
@@ -80,6 +83,9 @@ spec:
       labels:
         app: service-b
         app-tier: service
+      annotations:
+        sidecar.istio.io/proxyMemoryLimit: "4Gi"
+        sidecar.istio.io/proxyCPULimit: "4"
     spec:
       nodeSelector:
         app-tier: service
