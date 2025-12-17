@@ -1,0 +1,35 @@
+# Experiment 2 - Metastable Failure
+# Unsafe configuration: Aggressive retries + Load Spike -> Metastable Failure
+# Base load (200) < Capacity (320), but Spike causes 4x retry amplification -> 800 RPS
+
+name: load_spike_ep2_metastable
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60       # Aligned with user's ref (P99 ~192ms)
+      lognorm_sigma: 0.5
+    workers: 16           # Capacity ~266 RPS
+    queue_capacity: 10000   # Large queue to trap failure
+    
+    retry:
+      type: fixed
+      max_attempts: 3     # 1 initial + 3 retries (Aggressive)
+      delay_ms: 0         # Immediate retry
+    
+    timeout:
+      attempt_ms: 192     # P99 timeout
+
+workload:
+  base_rps: 188           # User's reference value (70% util)
+  duration_s: 90
+  load_spikes:
+    - type: load_spike
+      start_s: 20
+      end_s: 30           # 10s spike
+      rps_multiplier: 3.0 # 600 RPS
+
+output_csv: results/load_spike_ep2/output.csv
+fault_events_json: results/load_spike_ep2/fault_events.json
+granularity_s: 1.0
