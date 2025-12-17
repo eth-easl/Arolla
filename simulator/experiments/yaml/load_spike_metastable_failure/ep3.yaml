@@ -1,0 +1,39 @@
+# Experiment 3 - Static Global Budget (Prevention)
+# Same as ep2, but with Static Global Retry Budget to limit retries
+
+name: load_spike_ep3_static
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 10000
+    
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    
+    timeout:
+      attempt_ms: 192
+    
+    # Static Global Retry Budget
+    global_retry_budget:
+      target_rps: 30      # Allow only 30 retries/sec (vs 600 needed for storm)
+      max_burst: 10
+
+workload:
+  base_rps: 188
+  duration_s: 90
+  load_spikes:
+    - type: load_spike
+      start_s: 20
+      end_s: 30
+      rps_multiplier: 3.0
+
+output_csv: results/load_spike_ep3/output.csv
+fault_events_json: results/load_spike_ep3/fault_events.json
+granularity_s: 1.0
