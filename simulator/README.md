@@ -45,3 +45,43 @@ Client-side budgets rely on the client being *well-behaved*.
   - **Tier 1 (Checkout, Login)**: 100% Budget.
   - **Tier 2 (Search, Recommendations)**: 50% Budget.
   - **Tier 3 (Logs, Analytics)**: 0% Budget.
+
+## Capacity Planning
+To understand your service's limits and calculate **Headroom**, use Little's Law.
+
+### 1. Calculate Theoretical Capacity
+The maximum throughput ($RPS_{max}$) is determined by your concurrency limit (workers) and average service time.
+
+$$
+RPS_{max} = \frac{\text{Workers}}{\text{Mean Latency (seconds)}}
+$$
+
+For **Lognormal Latency** (configured with `median_ms` and `lognorm_sigma` ($\sigma$)):
+$$
+\text{Mean Latency} = \text{median} \times e^{(\sigma^2 / 2)}
+$$
+
+**Example**:
+*   `workers: 10`
+*   `median_ms: 100` (0.1s)
+*   `lognorm_sigma: 0.5`
+
+$$
+\text{Mean Latency} = 0.1 \times e^{(0.5^2 / 2)} = 0.1 \times e^{0.125} \approx 0.1 \times 1.133 = 0.1133 \text{ s}
+$$
+
+$$
+RPS_{max} = \frac{10}{0.1133} \approx 88 \text{ RPS}
+$$
+
+### 2. Calculate Headroom
+Headroom is the spare capacity available before queuing begins.
+
+$$
+\text{Headroom} = RPS_{max} - \text{Current Load}
+$$
+
+If your current load is **50 RPS**, your headroom is:
+$$
+88 - 50 = 38 \text{ RPS}
+$$

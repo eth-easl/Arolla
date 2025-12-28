@@ -205,7 +205,7 @@ class ServiceConfigYAML(BaseModel):
     queue_capacity: Optional[int] = Field(default=None, ge=0, description="Queue capacity (None = unbounded)")
     
     # Policies
-    retry: Optional[RetryConfig] = None
+    # retry: Optional[RetryConfig] = None # MOVED TO CLIENT
     timeout: Optional[TimeoutConfig] = None
     circuit_breaker: Optional[CircuitBreakerConfig] = None
     rate_limiter: Optional[RateLimiterConfig] = None
@@ -241,6 +241,7 @@ class ClientConfigYAML(BaseModel):
     """Configuration for a client"""
     name: str = Field(description="Client name")
     workload: WorkloadConfig
+    retry: Optional[RetryConfig] = Field(default=None, description="Client-side retry policy")
 
 # ============================================================================
 # Experiment Configuration

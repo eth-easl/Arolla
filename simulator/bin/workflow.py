@@ -47,7 +47,8 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     # Archive config file
     shutil.copy(yaml_path, output_dir / yaml_path.name)
     
-    csv_file = output_dir / "output.csv"
+    shutil.copy(yaml_path, output_dir / yaml_path.name)
+    
     plots_dir = output_dir / "plots"
     
     print("=" * 70)
@@ -83,7 +84,7 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         return 1
     
     print(f"\n✓ Simulation completed")
-    print(f"  CSV output: {csv_file}")
+    # print(f"  CSV output: {csv_file}") # csv_file depends on run now
     
     # Step 2: Generate plots
     if plot:
@@ -92,9 +93,17 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         
         fault_events_file = output_dir / "fault_events.json"
         
-        # Check if single output.csv exists (Legacy/Single Client)
-        if csv_file.exists():
-            print("Detected single-client output.")
+        # Find all CSV files in output dir
+        all_csvs = list(output_dir.glob("*.csv"))
+        
+        if not all_csvs:
+             print(f"Error: No output CSVs found in {output_dir}")
+             return 1
+             
+        # Case 1: Single Client (Legacy) - Exactly one CSV found
+        if len(all_csvs) == 1:
+            csv_file = all_csvs[0]
+            print(f"Detected single-client output: {csv_file.name}")
             cmd = [
                 sys.executable,
                 "plotting/plot_all.py",
@@ -115,28 +124,23 @@ def run_workflow(yaml_file: str, output_base: str = "results",
             except subprocess.CalledProcessError as e:
                 print(f"\n⚠ Plotting failed with exit code {e.returncode}")
         
-        # Check for multi-client outputs
+        # Case 2: Multi-Client - Multiple CSVs found
         else:
-            client_csvs = list(output_dir.glob("*_*.csv"))
-            if client_csvs:
-                print(f"Detected multi-client output ({len(client_csvs)} files).")
-                print("Running comparison plots...")
-                
-                cmd = [
-                    sys.executable,
-                    "plotting/compare_clients.py",
-                    str(output_dir),
-                    "-o", str(plots_dir)
-                ]
-                
-                try:
-                    subprocess.run(cmd, check=True)
-                    print(f"\n✓ Comparison plots generated in {plots_dir}/")
-                except subprocess.CalledProcessError as e:
-                    print(f"\n⚠ Plotting failed with exit code {e.returncode}")
-            else:
-                 print(f"Error: No output CSVs found in {output_dir}")
-                 return 1
+            print(f"Detected multi-client output ({len(all_csvs)} files).")
+            print("Running comparison plots...")
+            
+            cmd = [
+                sys.executable,
+                "plotting/compare_clients.py",
+                str(output_dir),
+                "-o", str(plots_dir)
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True)
+                print(f"\n✓ Comparison plots generated in {plots_dir}/")
+            except subprocess.CalledProcessError as e:
+                print(f"\n⚠ Plotting failed with exit code {e.returncode}")
     else:
         print(f"\nStep 2/2: Skipping plots (--no-plot)")
 
@@ -154,13 +158,15 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     print()
     print("Next steps:")
     print(f"  # View plots")
-    if plot:
-        print(f"  open {plots_dir}/*.png")
     print(f"  # Analyze data")
-    if csv_file.exists():
-        print(f"  python -c \"import pandas as pd; df = pd.read_csv('{csv_file}'); print(df.describe())\"")
+    # Try to find what CSVs were generated for the hint
+    found_csvs = list(output_dir.glob("*.csv"))
+    if len(found_csvs) == 1:
+            print(f"  python -c \"import pandas as pd; df = pd.read_csv('{found_csvs[0]}'); print(df.describe())\"")
+    elif len(found_csvs) > 1:
+            print(f"  # (Multi-client output files are in {output_dir})")
     else:
-        print(f"  # (Multi-client output files are in {output_dir})")
+            print(f"  # (No CSV output found)")
     print()
     
     return 0

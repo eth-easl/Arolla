@@ -331,7 +331,8 @@ class ConfigLoader:
         """Build ServiceRuntime from configuration"""
         
         # Build policies
-        retry_policy = ConfigLoader.build_retry_policy(cfg.retry, sim.rng())
+        # NOTE: Retry policy is now Client-side. Service gets None.
+        retry_policy = None 
         timeout_policy = ConfigLoader.build_timeout_policy(cfg.timeout)
         load_limiter = ConfigLoader.build_load_limiter(
             cfg.circuit_breaker,
@@ -422,7 +423,8 @@ class ConfigLoader:
             # Multi-client mode
             for client_cfg_yaml in config.clients:
                 # Create client
-                c_cfg = ClientConfig(name=client_cfg_yaml.name)
+                c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, sim.rng())
+                c_cfg = ClientConfig(name=client_cfg_yaml.name, retry=c_retry_policy)
                 client_runtime = ClientRuntime(cfg=c_cfg, service=entry_service)
                 clients.append(client_runtime)
                 

@@ -110,7 +110,7 @@ def main():
     parser = argparse.ArgumentParser(description='Compare client results')
     parser.add_argument('input_dir', help='Directory containing client CSVs')
     parser.add_argument('-o', '--output', default='plots', help='Output directory')
-    parser.add_argument('--pattern', default='*_client.csv', help='File pattern to match (e.g. *_client.csv)')
+    parser.add_argument('--pattern', default='*.csv', help='File pattern to match (e.g. *.csv)')
     
     args = parser.parse_args()
     
