@@ -415,12 +415,35 @@ class ConfigLoader:
         # Get entry service (first service in list)
         entry_service = services[config.services[0].name]
         
-        # Create client
-        client_cfg = ClientConfig()
-        client = ClientRuntime(cfg=client_cfg, service=entry_service)
+        clients: List[ClientRuntime] = []
+        workloads: List[Workload] = []
+
+        if config.clients:
+            # Multi-client mode
+            for client_cfg_yaml in config.clients:
+                # Create client
+                c_cfg = ClientConfig(name=client_cfg_yaml.name)
+                client_runtime = ClientRuntime(cfg=c_cfg, service=entry_service)
+                clients.append(client_runtime)
+                
+                # Create workload
+                wl = ConfigLoader.build_workload(client_cfg_yaml.workload)
+                wl.register_fault_events(fault_tracker)
+                workloads.append(wl)
+                
+        else:
+            # Single-client mode (legacy)
+            if not config.workload:
+                 raise ValueError("No workload configuration found")
+                 
+            client_cfg = ClientConfig(name="client")
+            client_runtime = ClientRuntime(cfg=client_cfg, service=entry_service)
+            clients.append(client_runtime)
+            
+            # Build workload
+            workload = ConfigLoader.build_workload(config.workload)
+            workload.register_fault_events(fault_tracker)
+            workloads.append(workload)
         
-        # Build workload
-        workload = ConfigLoader.build_workload(config.workload)
-        workload.register_fault_events(fault_tracker)
-        
-        return sim, client, workload, fault_tracker
+        return sim, clients, workloads, fault_tracker
+

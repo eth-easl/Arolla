@@ -12,7 +12,7 @@ from simulator.metrics.collector import Metrics
 
 @dataclass(frozen=True)
 class ClientConfig:
-    passme: str = "client"
+    name: str = "client"
 
 
 @dataclass

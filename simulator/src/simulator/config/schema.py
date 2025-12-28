@@ -234,6 +234,15 @@ class WorkloadConfig(BaseModel):
 
 
 # ============================================================================
+# Client Configuration
+# ============================================================================
+
+class ClientConfigYAML(BaseModel):
+    """Configuration for a client"""
+    name: str = Field(description="Client name")
+    workload: WorkloadConfig
+
+# ============================================================================
 # Experiment Configuration
 # ============================================================================
 
@@ -243,7 +252,12 @@ class ExperimentConfig(BaseModel):
     seed: int = Field(default=42, description="Simulator RNG seed")
     
     services: List[ServiceConfigYAML] = Field(min_length=1, description="List of services")
-    workload: WorkloadConfig
+    
+    # Workload configuration (Single Client Mode)
+    workload: Optional[WorkloadConfig] = Field(default=None, description="Global workload (legacy/single-client)")
+    
+    # Multiple Clients Mode
+    clients: List[ClientConfigYAML] = Field(default_factory=list, description="List of clients")
     
     # Output configuration
     output_csv: str = Field(default="output.csv", description="Output CSV file path")
@@ -259,6 +273,27 @@ class ExperimentConfig(BaseModel):
             if svc.dependency and svc.dependency not in service_names:
                 raise ValueError(f"Service {svc.name} depends on unknown service {svc.dependency}")
         return services
+
+    @field_validator('clients')
+    @classmethod
+    def validate_workload_configuration(cls, v, info):
+        """Ensure either workload (single) or clients (multi) is specified"""
+        # Note: We can't easily access 'workload' field here because of validation order/context quirks in Pydantic v2/v1
+        # But we can check at the model level via a root validator if needed.
+        # For simple field validation, we'll just leave this pass and rely on logic below or root validator.
+        return v
+    
+    # Pydantic v2 root validator equivalent (model_validator) is preferred, 
+    # but assuming v1 style or mix based on imports. 
+    # Let's add a generic check in __init__ or use root_validator if available.
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.workload and not self.clients:
+            raise ValueError("Must specify either 'workload' (single client) or 'clients' (multiple clients)")
+        if self.workload and self.clients:
+            raise ValueError("Cannot specify both 'workload' and 'clients'. Choose one.")
+
     
     def get_service_by_name(self, name: str) -> Optional[ServiceConfigYAML]:
         """Get service configuration by name"""

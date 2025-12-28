@@ -1,0 +1,37 @@
+name: multi_client_rogue
+seed: 1
+
+services:
+  - name: backend-service
+    latency:
+      median_ms: 20
+      lognorm_sigma: 0.1
+    workers: 10
+    queue_capacity: 50
+    # Add a global budget to see it in action
+    global_retry_budget:
+       target_rps: 10
+       max_burst: 20
+
+    # Ensure the policy allows some retries
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+
+clients:
+  - name: good_client
+    workload:
+      base_rps: 50
+      duration_s: 10
+      rng_seed: 1
+
+  - name: rogue_client
+    workload:
+      # Rogue client behaves aggressively (high RPS)
+      base_rps: 500
+      duration_s: 10
+      rng_seed: 2
+
+output_csv: multi_rogue_output.csv
+granularity_s: 1.0

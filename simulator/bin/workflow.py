@@ -92,29 +92,54 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         
         fault_events_file = output_dir / "fault_events.json"
         
-        cmd = [
-            sys.executable,
-            "plotting/plot_all.py",
-            str(csv_file),
-            "-o", str(plots_dir)
-        ]
+        # Check if single output.csv exists (Legacy/Single Client)
+        if csv_file.exists():
+            print("Detected single-client output.")
+            cmd = [
+                sys.executable,
+                "plotting/plot_all.py",
+                str(csv_file),
+                "-o", str(plots_dir)
+            ]
+            
+            # Add fault events if file exists
+            if fault_events_file.exists():
+                cmd.extend(["--fault-events", str(fault_events_file)])
+            
+            if time_range:
+                cmd.extend(["--time-range", time_range])
+
+            try:
+                subprocess.run(cmd, check=True)
+                print(f"\n✓ Plots generated in {plots_dir}/")
+            except subprocess.CalledProcessError as e:
+                print(f"\n⚠ Plotting failed with exit code {e.returncode}")
         
-        # Add fault events if file exists
-        if fault_events_file.exists():
-            cmd.extend(["--fault-events", str(fault_events_file)])
-        
-        if time_range:
-            cmd.extend(["--time-range", time_range])
-        
-        try:
-            result = subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"\n⚠ Plotting failed with exit code {e.returncode}")
-            print("  (Simulation data is still available)")
+        # Check for multi-client outputs
         else:
-            print(f"\n✓ Plots generated in {plots_dir}/")
+            client_csvs = list(output_dir.glob("*_*.csv"))
+            if client_csvs:
+                print(f"Detected multi-client output ({len(client_csvs)} files).")
+                print("Running comparison plots...")
+                
+                cmd = [
+                    sys.executable,
+                    "plotting/compare_clients.py",
+                    str(output_dir),
+                    "-o", str(plots_dir)
+                ]
+                
+                try:
+                    subprocess.run(cmd, check=True)
+                    print(f"\n✓ Comparison plots generated in {plots_dir}/")
+                except subprocess.CalledProcessError as e:
+                    print(f"\n⚠ Plotting failed with exit code {e.returncode}")
+            else:
+                 print(f"Error: No output CSVs found in {output_dir}")
+                 return 1
     else:
         print(f"\nStep 2/2: Skipping plots (--no-plot)")
+
     
     # Summary
     print()
@@ -132,7 +157,10 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     if plot:
         print(f"  open {plots_dir}/*.png")
     print(f"  # Analyze data")
-    print(f"  python -c \"import pandas as pd; df = pd.read_csv('{csv_file}'); print(df.describe())\"")
+    if csv_file.exists():
+        print(f"  python -c \"import pandas as pd; df = pd.read_csv('{csv_file}'); print(df.describe())\"")
+    else:
+        print(f"  # (Multi-client output files are in {output_dir})")
     print()
     
     return 0
