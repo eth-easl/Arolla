@@ -1,7 +1,19 @@
+# https://medium.com/yandex/good-retry-bad-retry-an-incident-story-648072d3cee6#28fc
+
 name: demo_exponential
 seed: 42
 
 services:
+  - name: svc-no-retry
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
   - name: svc-fixed-target
     latency: {median_ms: 10, lognorm_sigma: 0}
     # Increased workers to handle 1000 RPS (approx 40-50 needed for 10ms processing)
@@ -54,6 +66,17 @@ services:
         p_fail: 0.3
 
 clients:
+  - name: no-retry
+    target_service: svc-no-retry
+    retry: 
+      type: fixed
+      max_attempts: 1
+      delay_ms: 0
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
   - name: fixed
     target_service: svc-fixed-target
     retry: 

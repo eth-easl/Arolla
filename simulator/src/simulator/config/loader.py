@@ -433,9 +433,6 @@ class ConfigLoader:
                     if client_cfg_yaml.circuit_breaker is not None:
                         # Instantiate the robust TimeBasedCircuitBreakerPolicy
                         cb_cfg = client_cfg_yaml.circuit_breaker
-                        print(f"DEBUG: Using TimeBasedCircuitBreakerPolicy from {TimeBasedCircuitBreakerPolicy.__module__} at {TimeBasedCircuitBreakerPolicy}")
-                        import inspect
-                        print(f"DEBUG: Init signature: {inspect.signature(TimeBasedCircuitBreakerPolicy.__init__)}")
                         c_retry_policy = TimeBasedCircuitBreakerPolicy(
                             inner=c_retry_policy,
                             failure_rate_threshold=cb_cfg.failure_threshold,
