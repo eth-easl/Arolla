@@ -12,10 +12,19 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
+# Add src to path
+import sys
+from pathlib import Path
+script_dir = Path(__file__).parent.resolve()
+src_dir = script_dir.parent / "src"
+sys.path.append(str(src_dir))
+
+from simulator.config.loader import ConfigLoader
+
 
 def run_workflow(yaml_file: str, output_base: str = "results", 
                  verbose: bool = False, plot: bool = True,
-                 time_range: str = None):
+                 time_range: str = None, plotting_script: str = None):
     """
     Run complete experiment workflow.
     
@@ -88,6 +97,57 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     
     # Step 2: Generate plots
     if plot:
+        print(f"\nStep 2/2: Generating plots...")
+        print("-" * 70)
+        
+        # Load config to check for custom plotting script
+        try:
+             config = ConfigLoader.load_from_file(yaml_file)
+        except Exception as e:
+             print(f"Warning: Could not load YAML to check for plotting script: {e}")
+             config = None
+             
+        custom_script = None
+        if config and config.plotting_script:
+             custom_script = config.plotting_script
+        
+        # CLI override
+        if plotting_script:
+             custom_script = plotting_script
+             
+        if custom_script:
+             print(f"Detected custom plotting script: {custom_script}")
+             cmd = [
+                sys.executable,
+                custom_script,
+                str(output_dir), # Pass output dir as first arg
+                "-o", str(plots_dir)
+             ]
+             try:
+                subprocess.run(cmd, check=True)
+                print(f"\n✓ Custom plots generated in {plots_dir}/")
+             except subprocess.CalledProcessError as e:
+                print(f"\n⚠ Custom plotting failed with exit code {e.returncode}")
+                # Fallback to default plotting? No, better to stop or let user know.
+             
+             # Return early or continue? 
+             # Let's return early as custom script likely replaces default plots.
+             # Or maybe user wants BOTH? Usually replacement.
+             # Summary
+             print()
+             print("=" * 70)
+             print("✅ Workflow Complete!")
+             print("=" * 70)
+             print(f"Scenario: {scenario_name}")
+             print(f"Output directory: {output_dir}")
+             print(f"  - output.csv (simulation data)")
+             print(f"  - plots/ (visualizations)")
+             print()
+             print("Next steps:")
+             print(f"  # View plots")
+             return 0
+
+        fault_events_file = output_dir / "fault_events.json"
         print(f"\nStep 2/2: Generating plots...")
         print("-" * 70)
         
@@ -215,6 +275,8 @@ Output Structure:
                        help='Skip plot generation')
     parser.add_argument('--time-range',
                        help='Time range for plots (e.g., "0-60")')
+    parser.add_argument('--plotting-script',
+                       help='Path to custom plotting script (overrides YAML)')
     
     args = parser.parse_args()
     
@@ -223,7 +285,8 @@ Output Structure:
         output_base=args.output,
         verbose=args.verbose,
         plot=not args.no_plot,
-        time_range=args.time_range
+        time_range=args.time_range,
+        plotting_script=args.plotting_script
     )
 
 

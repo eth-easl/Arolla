@@ -9,12 +9,14 @@ from simulator.core.engine import Simulator
 from simulator.runtime.service import ServiceRuntime
 from simulator.metrics.collector import Metrics
 from simulator.policies.retry import RetryPolicy, RetryContext
+from simulator.policies.timeout import Timeout
 
 
 @dataclass(frozen=True)
 class ClientConfig:
     name: str = "client"
     retry: Optional['RetryPolicy'] = None
+    timeout: Optional['Timeout'] = None
 
 
 @dataclass
@@ -54,7 +56,11 @@ class ClientRuntime:
         root_req = RootRequest()
 
         global_timeout = None
-        if self.service.cfg.timeout is not None:
+        
+        # Priority: Client config > Service config
+        if self.cfg.timeout is not None:
+             global_timeout = self.cfg.timeout.get_global_timeout()
+        elif self.service.cfg.timeout is not None:
             global_timeout = self.service.cfg.timeout.get_global_timeout()
 
         if global_timeout is not None:
@@ -143,6 +149,9 @@ class ClientRuntime:
              attempt=len(ctx.root.attempts), # 1-based count because we just added the failed attempt
              now=sim.timestep
         )
+        
+        if self.cfg.retry:
+            self.cfg.retry.record_attempt(retry_ctx, success)
         
         should_retry, delay = self.cfg.retry.next_delay(retry_ctx)
         

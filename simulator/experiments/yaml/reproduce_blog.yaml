@@ -1,0 +1,25 @@
+name: reproduce_figures
+seed: 42
+
+services:
+  # 1. Service with 0.5-1.0s Outage
+  - name: svc
+    latency: {median_ms: 15, lognorm_sigma: 0}
+    workers: 40
+    queue_capacity: null
+    partial_failures: [{type: partial_failure, start_s: 50, end_s: 100, p_fail: 1.0}]
+
+plotting_script: plotting/reproduce_figures.py
+
+clients:
+  # "retry-3x"
+  # 3 Retries -> 4 Total Attempts
+  # Expect 400% amplification
+  - name: retry-3x
+    target_service: svc
+    retry: {type: fixed, max_attempts: 4, delay_ms: 0} 
+    timeout: {global_ms: 100}
+    workload: {base_rps: 100, duration_s: 200, rng_seed: 1}
+
+output_csv: output.csv
+granularity_s: 1

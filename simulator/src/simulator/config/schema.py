@@ -49,6 +49,12 @@ class RetryConfig(BaseModel):
     max_delay_ms: Optional[float] = Field(default=None, ge=0, description="Maximum delay in ms (for exponential)")
     jitter_mode: Optional[JitterMode] = Field(default=None, description="Jitter mode (for jittered backoff)")
     
+    # Client-Side Resilience (Wrapper) options
+    budget_ratio: Optional[float] = Field(default=None, ge=0, le=1, description="Retry budget ratio (e.g. 0.1)")
+    
+    cb_failure_threshold: Optional[float] = Field(default=None, ge=0, le=1, description="Circuit breaker failure rate threshold")
+    cb_window_size: int = Field(default=100, ge=1, description="Circuit breaker window size")
+    
     @field_validator('delay_ms')
     @classmethod
     def validate_fixed_delay(cls, v, info):
@@ -242,6 +248,7 @@ class ClientConfigYAML(BaseModel):
     name: str = Field(description="Client name")
     workload: WorkloadConfig
     retry: Optional[RetryConfig] = Field(default=None, description="Client-side retry policy")
+    timeout: Optional[TimeoutConfig] = Field(default=None, description="Client-side timeout policy")
 
 # ============================================================================
 # Experiment Configuration
@@ -264,6 +271,8 @@ class ExperimentConfig(BaseModel):
     output_csv: str = Field(default="output.csv", description="Output CSV file path")
     fault_events_json: Optional[str] = Field(default=None, description="Fault events JSON file path")
     granularity_s: float = Field(default=1.0, gt=0, description="Metrics granularity in seconds")
+    
+    plotting_script: Optional[str] = Field(default=None, description="Path to custom plotting script")
     
     @field_validator('services')
     @classmethod

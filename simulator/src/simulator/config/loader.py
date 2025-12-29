@@ -13,7 +13,8 @@ from simulator.utils.time import s_to_ns, ms_to_ns
 from simulator.policies.retry import (
     RetryPolicy, NoRetryPolicy, FixedBackoffRetryPolicy,
     ExponentialBackoffRetryPolicy, ExponentialBackoffWithJitterRetryPolicy,
-    JitterMode as PolicyJitterMode
+    JitterMode as PolicyJitterMode,
+    RetryBudgetPolicy, CircuitBreakerPolicy
 )
 from simulator.policies.timeout import Timeout, StaticTimeout
 from simulator.policies.load_limiter import (
@@ -130,8 +131,24 @@ class ConfigLoader:
                 jitter_mode=jitter_mode_map.get(cfg.jitter_mode, PolicyJitterMode.FULL)
             )
         
-        else:
             raise ValueError(f"Unknown retry policy type: {cfg.type}")
+            
+        # Wrap with Circuit Breaker if configured
+        if cfg.cb_failure_threshold is not None:
+            policy = CircuitBreakerPolicy(
+                inner=policy,
+                failure_rate_threshold=cfg.cb_failure_threshold,
+                window_size=cfg.cb_window_size
+            )
+
+        # Wrap with Retry Budget if configured (Outer layer, checks tokens first)
+        if cfg.budget_ratio is not None:
+            policy = RetryBudgetPolicy(
+                inner=policy,
+                budget_ratio=cfg.budget_ratio
+            )
+            
+        return policy
     
     @staticmethod
     def build_timeout_policy(cfg: Optional[TimeoutConfig]) -> Optional[Timeout]:
@@ -424,7 +441,8 @@ class ConfigLoader:
             for client_cfg_yaml in config.clients:
                 # Create client
                 c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, sim.rng())
-                c_cfg = ClientConfig(name=client_cfg_yaml.name, retry=c_retry_policy)
+                c_timeout_policy = ConfigLoader.build_timeout_policy(client_cfg_yaml.timeout)
+                c_cfg = ClientConfig(name=client_cfg_yaml.name, retry=c_retry_policy, timeout=c_timeout_policy)
                 client_runtime = ClientRuntime(cfg=c_cfg, service=entry_service)
                 clients.append(client_runtime)
                 

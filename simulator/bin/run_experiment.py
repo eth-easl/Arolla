@@ -145,11 +145,9 @@ Examples:
             metrics = client.metrics()
             
             # Determine client-specific CSV path
-            if len(clients) > 1:
-                # Inject client name into filename: output.csv -> output_clientName.csv
-                c_csv_path = csv_path.parent / f"{csv_path.stem}_{client.cfg.name}{csv_path.suffix}"
-            else:
-                c_csv_path = csv_path
+            # Always match output_{client}.csv pattern for consistency
+            # This ensures plotting scripts (like reproduce_figures.py) can reliably parse client names
+            c_csv_path = csv_path.parent / f"{csv_path.stem}_{client.cfg.name}{csv_path.suffix}"
                 
             metrics.export_csv(str(c_csv_path), granularity_s=config.granularity_s)
             
