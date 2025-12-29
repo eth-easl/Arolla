@@ -94,7 +94,11 @@ def plot_reproduction(clients, output_dir, input_dir):
         granularity = df['timepoint'].diff().mode()[0] if len(df) > 1 else 0.01
         
         rps = attempts / granularity
-        rel_rps = (rps / TARGET_RPS) * 100
+        # Apply rolling mean to smooth out Poisson noise
+        # Window size 10 * granularity (e.g. 1.0s window for 0.1s granularity)
+        rps_smoothed = rps.rolling(window=10, min_periods=1, center=True).mean()
+        
+        rel_rps = (rps_smoothed / TARGET_RPS) * 100
         
         ax.plot(df['timepoint'], rel_rps, label=name, color=palette.get(name, 'black'), linewidth=2)
         
