@@ -100,11 +100,15 @@ def plot_reproduction(clients, output_dir, input_dir):
         # Calculate success rate per bucket (Uptime)
         # Use completed attempts and actual successes (success_root)
         # This accurately reflects the ratio of successful attempts vs total attempts finished in that bucket
-        total_completed = df['completed']
+        # Calculate success rate based on ROOTS (User Experience)
+        # Denominator should be Total Roots Completed = Success Roots + Failure Roots
+        # Using 'completed' (Total Attempts) was incorrect as it included retries.
         successful = df['success_root']
+        failed = df['failure_root']
+        total_finished_roots = successful + failed
         
         # Avoid div by zero
-        success_rate = successful / total_completed
+        success_rate = successful / total_finished_roots
         success_rate = success_rate.fillna(1.0) # If no attempts, assume 100% uptime?
         
         ax.plot(df['timepoint'], success_rate * 100, label=name, color=palette.get(name, 'black'), linewidth=2)
