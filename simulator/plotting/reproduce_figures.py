@@ -38,6 +38,21 @@ def get_fault_range(input_dir):
         print(f"Error reading fault settings: {e}")
     return None, None
 
+def get_granularity(input_dir):
+    # Try to find yaml config
+    yaml_files = glob.glob(os.path.join(input_dir, "*.yaml"))
+    if not yaml_files:
+        return 0.1 # Default fallback
+        
+    try:
+        with open(yaml_files[0], 'r') as f:
+            for line in f:
+                if "granularity_s:" in line:
+                    return float(line.split(":")[1].strip())
+    except Exception as e:
+        print(f"Error reading granularity: {e}")
+    return 0.1
+
 def plot_reproduction(clients, output_dir, input_dir):
     # Dynamic Palette
     # Use tab10 colormap
@@ -45,14 +60,15 @@ def plot_reproduction(clients, output_dir, input_dir):
     unique_clients = sorted(clients.keys())
     palette = {name: colors[i % len(colors)] for i, name in enumerate(unique_clients)}
 
-    # Setup Grid: 1 Row x 2 Cols (Server Uptime, RPS Amplification)
+    # Get configuration
+    outage_start, outage_end = get_fault_range(input_dir)
+    granularity = get_granularity(input_dir)
+    print(f"Using granularity: {granularity}s")
+
+    # Setup Grid: 1 Row x 2 Cols (Client Success Rate, RPS Amplification)
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
     
-    # Get outage range from file
-    outage_start, outage_end = get_fault_range(input_dir)
-    # Fallback/Empty if not found (don't break plotting)
-    
-    # 1. Server Uptime (%)
+    # 1. Client Success Rate (%)
     ax = axes[0]
     for name, df in clients.items():
         if df is None: continue
@@ -77,12 +93,10 @@ def plot_reproduction(clients, output_dir, input_dir):
     if outage_start is not None and outage_end is not None:
         ax.axvspan(outage_start, outage_end, color='red', alpha=0.1, label="Outage")
         ax.legend() # Update legend to include outage
-
+    
     # 2. Server RPS Amplification
     ax = axes[1]
     TARGET_RPS = 100 # Default fallback
-    # Try to infer target RPS from pre-outage data? or assume base?
-    # For now keep 100 or making it relative to max?
     
     for name, df in clients.items():
         if df is None: continue
@@ -91,18 +105,22 @@ def plot_reproduction(clients, output_dir, input_dir):
         else:
             attempts = df['total_attempts'] if 'total_attempts' in df.columns else df['total_request']
             
-        granularity = df['timepoint'].diff().mode()[0] if len(df) > 1 else 0.01
+        # Use configured granularity
         
         rps = attempts / granularity
         # Apply rolling mean to smooth out Poisson noise
-        # Window size 10 * granularity (e.g. 1.0s window for 0.1s granularity)
-        rps_smoothed = rps.rolling(window=10, min_periods=1, center=True).mean()
+        # Target a 1.0s smoothing window regardless of granularity
+        window_size = int(1.0 / granularity)
+        window_size = max(1, window_size)
+        
+        rps_smoothed = rps.rolling(window=window_size, min_periods=1, center=True).mean()
         
         rel_rps = (rps_smoothed / TARGET_RPS) * 100
         
         ax.plot(df['timepoint'], rel_rps, label=name, color=palette.get(name, 'black'), linewidth=2)
         
     ax.set_title("Server RPS Amplification")
+
     ax.set_ylabel("Relative Server RPS (%)")
     ax.set_xlabel("Time (s)")
     
