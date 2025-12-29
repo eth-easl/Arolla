@@ -1,6 +1,7 @@
 import argparse
 import glob
 import os
+import json
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -13,27 +14,43 @@ def load_data(input_dir):
         # Extract client name from filename: output_CLIENTNAME.csv
         basename = os.path.basename(f)
         if basename == "output.csv":
-             continue # Skip default if specific exists? Or name it "default"
+             continue 
         
         client_name = basename.replace("output_", "").replace(".csv", "")
         df = pd.read_csv(f)
         clients[client_name] = df
     return clients
 
-def plot_reproduction(clients, output_dir):
-    # Palette matching the blog/user image
-    palette = {
-        'retry-3x': 'tab:blue', 
-        'retry-2x': 'tab:blue',
-        'jittered': 'tab:red'
-    }
+def get_fault_range(input_dir):
+    # Try to find faults.json or demo_faults.json
+    fault_files = glob.glob(os.path.join(input_dir, "*fault*.json"))
+    if not fault_files:
+        return None, None
+        
+    try:
+        with open(fault_files[0], 'r') as f:
+            events = json.load(f)
+            # Find the first partial failure event
+            for e in events:
+                if e['event_type'] == 'partial_failure':
+                    return e['start_time_s'], e['end_time_s']
+    except Exception as e:
+        print(f"Error reading fault settings: {e}")
+    return None, None
+
+def plot_reproduction(clients, output_dir, input_dir):
+    # Dynamic Palette
+    # Use tab10 colormap
+    colors = plt.cm.tab10.colors
+    unique_clients = sorted(clients.keys())
+    palette = {name: colors[i % len(colors)] for i, name in enumerate(unique_clients)}
 
     # Setup Grid: 1 Row x 2 Cols (Server Uptime, RPS Amplification)
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
     
-    # Common settings
-    outage_start = 0.5
-    outage_end = 1.0
+    # Get outage range from file
+    outage_start, outage_end = get_fault_range(input_dir)
+    # Fallback/Empty if not found (don't break plotting)
     
     # 1. Server Uptime (%)
     ax = axes[0]
@@ -55,24 +72,25 @@ def plot_reproduction(clients, output_dir):
     ax.set_ylabel("Server Uptime (%)")
     ax.set_xlabel("Time (s)")
     ax.set_ylim(-5, 105)
+    
     # Add vertical lines for outage
-    ax.vlines([outage_start, outage_end], 0, 100, colors='gray', linestyles='dashed', alpha=0.5)
+    if outage_start is not None and outage_end is not None:
+        ax.axvspan(outage_start, outage_end, color='red', alpha=0.1, label="Outage")
+        ax.legend() # Update legend to include outage
 
     # 2. Server RPS Amplification
     ax = axes[1]
-    TARGET_RPS = 100 # From YAML
+    TARGET_RPS = 100 # Default fallback
+    # Try to infer target RPS from pre-outage data? or assume base?
+    # For now keep 100 or making it relative to max?
     
     for name, df in clients.items():
         if df is None: continue
-        # total_request is cumulative! Use root_requests + retries for instantaneous rate.
-        # Check if columns exist
         if 'root_requests' in df.columns and 'retries' in df.columns:
             attempts = df['root_requests'] + df['retries']
         else:
-            # Fallback (though we know they exist from previous steps)
             attempts = df['total_attempts'] if 'total_attempts' in df.columns else df['total_request']
             
-        # Granularity is 0.01s (from yaml) determine it from data?
         granularity = df['timepoint'].diff().mode()[0] if len(df) > 1 else 0.01
         
         rps = attempts / granularity
@@ -83,12 +101,16 @@ def plot_reproduction(clients, output_dir):
     ax.set_title("Server RPS Amplification")
     ax.set_ylabel("Relative Server RPS (%)")
     ax.set_xlabel("Time (s)")
+    
     # Add vertical lines for outage
-    ax.vlines([outage_start, outage_end], 0, 400, colors='gray', linestyles='dashed', alpha=0.5)
+    if outage_start is not None and outage_end is not None:
+        ax.axvspan(outage_start, outage_end, color='red', alpha=0.1)
     
     # Legend
     handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=2)
+    # Remove duplicate labels (e.g. from multiple outage spans if we had them, or just ensuring cleanliness)
+    by_label = dict(zip(labels, handles))
+    fig.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=len(by_label))
     
     plt.tight_layout()
     output_path = os.path.join(output_dir, "reproduced_figures_3x.png")
@@ -105,4 +127,4 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     
     clients = load_data(args.input_dir)
-    plot_reproduction(clients, output_dir)
+    plot_reproduction(clients, output_dir, args.input_dir)
