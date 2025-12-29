@@ -247,6 +247,7 @@ class ClientConfigYAML(BaseModel):
     """Configuration for a client"""
     name: str = Field(description="Client name")
     workload: WorkloadConfig
+    target_service: Optional[str] = Field(default=None, description="Name of target service")
     retry: Optional[RetryConfig] = Field(default=None, description="Client-side retry policy")
     timeout: Optional[TimeoutConfig] = Field(default=None, description="Client-side timeout policy")
 

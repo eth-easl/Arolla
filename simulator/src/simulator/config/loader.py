@@ -441,9 +441,19 @@ class ConfigLoader:
             for client_cfg_yaml in config.clients:
                 # Create client
                 c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, sim.rng())
+                if isinstance(c_retry_policy, ExponentialBackoffRetryPolicy):
+                    print(f"DEBUG: Created ExpBackoff for {client_cfg_yaml.name}: initial={c_retry_policy.initial_delay}ns, max={c_retry_policy.max_delay}ns")
+                
                 c_timeout_policy = ConfigLoader.build_timeout_policy(client_cfg_yaml.timeout)
                 c_cfg = ClientConfig(name=client_cfg_yaml.name, retry=c_retry_policy, timeout=c_timeout_policy)
-                client_runtime = ClientRuntime(cfg=c_cfg, service=entry_service)
+                
+                target_svc = entry_service
+                if client_cfg_yaml.target_service:
+                    target_svc = services.get(client_cfg_yaml.target_service)
+                    if not target_svc:
+                         raise ValueError(f"Target service {client_cfg_yaml.target_service} not found for client {client_cfg_yaml.name}")
+                
+                client_runtime = ClientRuntime(cfg=c_cfg, service=target_svc)
                 clients.append(client_runtime)
                 
                 # Create workload

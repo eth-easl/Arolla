@@ -13,7 +13,8 @@ import random
 from simulator.policies.retry import (
     RetryPolicy, RetryContext, NoRetryPolicy,
     FixedBackoffRetryPolicy, ExponentialBackoffRetryPolicy,
-    ExponentialBackoffWithJitterRetryPolicy, JitterMode
+    ExponentialBackoffWithJitterRetryPolicy, JitterMode,
+    RetryBudgetPolicy, CircuitBreakerPolicy
 )
 from simulator.utils.time import ms_to_ns
 
@@ -245,6 +246,161 @@ def test_all_policies_return_tuple():
     print("✓ All policies return correct tuple format")
 
 
+
+
+
+def test_retry_budget_basic():
+    """Test basic retry budget behavior"""
+    # Ratio 0.1 means 1 retry for every 10 successes.
+    # Cost = 100, Reward = 10.
+    # Max tokens = 3000 (30 * 100).
+    # Start: 3000 tokens.
+    
+    # Inner policy always allows retry
+    inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
+    policy = RetryBudgetPolicy(inner=inner, budget_ratio=0.1)
+    
+    # Should allow retry initially (tokens=3000)
+    ctx = RetryContext(attempt=1)
+    should, delay = policy.next_delay(ctx)
+    assert should == True
+    assert policy._tokens == 2900 # 3000 - 100
+    
+    print("✓ RetryBudgetPolicy basic allowance works")
+
+
+def test_retry_budget_exhaustion():
+    """Test retry budget exhaustion"""
+    # Use a small starting token count for testing?
+    # Hard to change internal state without hacking.
+    # Let's perform enough retries to drain it.
+    # Start 3000. Cost 100.
+    # Should allow 30 retries.
+    
+    inner = FixedBackoffRetryPolicy(max_attempts=1000, delay=ms_to_ns(10))
+    policy = RetryBudgetPolicy(inner=inner, budget_ratio=0.1)
+    
+    # Burn through 30 retries
+    for i in range(30):
+        ctx = RetryContext(attempt=1)
+        should, _ = policy.next_delay(ctx)
+        assert should == True, f"Should verify iteration {i}"
+        
+    assert policy._tokens == 0
+    
+    # Next one should fail
+    ctx = RetryContext(attempt=1)
+    should, _ = policy.next_delay(ctx)
+    assert should == False
+    
+    print("✓ RetryBudgetPolicy exhaustion works")
+
+
+def test_retry_budget_replenishment():
+    """Test token replenishment"""
+    inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
+    policy = RetryBudgetPolicy(inner=inner, budget_ratio=0.5)
+    # Ratio 0.5 -> cost 100, reward 50.
+    
+    # Drain some tokens
+    policy._tokens = 50 # Manually set low
+    
+    # Try next -> fail (need 100)
+    ctx = RetryContext(attempt=1)
+    should, _ = policy.next_delay(ctx)
+    assert should == False
+    
+    # Record success -> +50 tokens -> total 100
+    policy.record_attempt(ctx, success=True)
+    assert policy._tokens == 100
+    
+    # Now should succeed
+    should, _ = policy.next_delay(ctx)
+    assert should == True
+    assert policy._tokens == 0
+    
+    print("✓ RetryBudgetPolicy replenishment works")
+
+
+def test_circuit_breaker_basic():
+    """Test circuit breaker basic behavior"""
+    inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
+    policy = CircuitBreakerPolicy(
+        inner=inner,
+        failure_rate_threshold=0.5,
+        window_size=10
+    )
+    
+    # Initially empty history -> should allow
+    ctx = RetryContext(attempt=1)
+    should, _ = policy.next_delay(ctx)
+    assert should == True
+    
+    print("✓ CircuitBreakerPolicy basic allowance works")
+
+
+def test_circuit_breaker_open():
+    """Test circuit breaker opening on failures"""
+    inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
+    policy = CircuitBreakerPolicy(
+        inner=inner,
+        failure_rate_threshold=0.5,
+        window_size=4
+    )
+    
+    # Fill with 2 failures, 2 successes -> 50% failure rate -> should open?
+    # Logic: if rate >= threshold -> Open
+    
+    ctx = RetryContext(attempt=1)
+    
+    # Add 2 failures
+    policy.record_attempt(ctx, success=False)
+    policy.record_attempt(ctx, success=False)
+    # Add 2 successes
+    policy.record_attempt(ctx, success=True)
+    policy.record_attempt(ctx, success=True)
+    
+    # History: [F, F, S, S]. Failures=2. Total=4. Rate=0.5.
+    # Should open (block)
+    should, _ = policy.next_delay(ctx)
+    assert should == False
+    
+    print("✓ CircuitBreakerPolicy opens correctly")
+
+
+def test_circuit_breaker_closes():
+    """Test circuit breaker closing (recovering)"""
+    inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
+    policy = CircuitBreakerPolicy(
+        inner=inner,
+        failure_rate_threshold=0.5,
+        window_size=4
+    )
+    
+    # Start open: [F, F, S, S]
+    policy._history = [True, True, False, False] # True=Failure
+    policy._failures = 2
+    
+    should, _ = policy.next_delay(RetryContext(1))
+    assert should == False
+    
+    # Record a success (maybe from another ongoing request)
+    # New history: [T, F, F, S] -> [True, False, False, False] 
+    # Wait, pop(0) removes the oldest.
+    # append adds to the end.
+    
+    policy.record_attempt(RetryContext(1), success=True)
+    # History became: [T, F, F, F(success=False, failure=True)] ? No success=True means failure=False.
+    # Old: [T, T, F, F] (Indices 0,1,2,3)
+    # Pop 0 (T). New: [T, F, F]. Append F (success).
+    # New: [T, F, F, F]. Failures = 1. Rate = 0.25.
+    
+    should, _ = policy.next_delay(RetryContext(1))
+    assert should == True
+    
+    print("✓ CircuitBreakerPolicy closes correctly")
+
+
 if __name__ == "__main__":
     print("Running retry policy tests...\n")
     test_no_retry_policy()
@@ -257,4 +413,14 @@ if __name__ == "__main__":
     test_jittered_backoff_max_attempts()
     test_retry_context_with_now()
     test_all_policies_return_tuple()
+    
+    # New tests
+    test_retry_budget_basic()
+    test_retry_budget_exhaustion()
+    test_retry_budget_replenishment()
+    test_circuit_breaker_basic()
+    test_circuit_breaker_open()
+    test_circuit_breaker_closes()
+    
     print("\n✅ All retry policy tests passed!")
+

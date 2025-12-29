@@ -1,25 +1,53 @@
-name: reproduce_figures
+name: demo_exponential
 seed: 42
 
 services:
-  # 1. Service with 0.5-1.0s Outage
-  - name: svc
-    latency: {median_ms: 15, lognorm_sigma: 0}
-    workers: 40
-    queue_capacity: null
-    partial_failures: [{type: partial_failure, start_s: 50, end_s: 100, p_fail: 1.0}]
+  - name: svc-fixed-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    # Increased workers to handle 1000 RPS (approx 40-50 needed for 10ms processing)
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 1.0
 
-plotting_script: plotting/reproduce_figures.py
+  - name: svc-exp-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 1.0
 
 clients:
-  # "retry-3x"
-  # 3 Retries -> 4 Total Attempts
-  # Expect 400% amplification
-  - name: retry-3x
-    target_service: svc
-    retry: {type: fixed, max_attempts: 4, delay_ms: 0} 
-    timeout: {global_ms: 100}
-    workload: {base_rps: 100, duration_s: 200, rng_seed: 1}
+  - name: client-fixed
+    target_service: svc-fixed-target
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: client-exp
+    target_service: svc-exp-target
+    retry: 
+      type: exponential
+      max_attempts: 4
+      initial_delay_ms: 50
+      max_delay_ms: 1000
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
 
 output_csv: output.csv
-granularity_s: 1
+fault_events_json: faults.json
+granularity_s: 0.05 # Match reference 20ms buckets (50Hz)
+plotting_script: plotting/reproduce_figures.py
