@@ -49,12 +49,6 @@ class RetryConfig(BaseModel):
     max_delay_ms: Optional[float] = Field(default=None, ge=0, description="Maximum delay in ms (for exponential)")
     jitter_mode: Optional[JitterMode] = Field(default=None, description="Jitter mode (for jittered backoff)")
     
-    # Client-Side Resilience (Wrapper) options
-    budget_ratio: Optional[float] = Field(default=None, ge=0, le=1, description="Retry budget ratio (e.g. 0.1)")
-    
-    cb_failure_threshold: Optional[float] = Field(default=None, ge=0, le=1, description="Circuit breaker failure rate threshold")
-    cb_window_size: int = Field(default=100, ge=1, description="Circuit breaker window size")
-    
     @field_validator('delay_ms')
     @classmethod
     def validate_fixed_delay(cls, v, info):
@@ -87,7 +81,7 @@ class CircuitBreakerConfig(BaseModel):
     """Configuration for circuit breaker"""
     type: CircuitBreakerType
     failure_threshold: float = Field(description="Failure threshold (ratio or count)")
-    success_threshold: float = Field(description="Success threshold (ratio or count)")
+    success_threshold: Optional[float] = Field(default=None, description="Success threshold (ratio or count)")
     half_open_delay_ms: float = Field(ge=0, description="Delay before half-open state in ms")
     
     # Count-based specific
@@ -250,6 +244,8 @@ class ClientConfigYAML(BaseModel):
     target_service: Optional[str] = Field(default=None, description="Name of target service")
     retry: Optional[RetryConfig] = Field(default=None, description="Client-side retry policy")
     timeout: Optional[TimeoutConfig] = Field(default=None, description="Client-side timeout policy")
+    circuit_breaker: Optional[CircuitBreakerConfig] = Field(default=None, description="Client-side circuit breaker")
+    retry_budget: Optional[RetryBudgetConfig] = Field(default=None, description="Client-side retry budget")
 
 # ============================================================================
 # Experiment Configuration

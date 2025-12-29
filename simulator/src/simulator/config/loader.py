@@ -14,14 +14,14 @@ from simulator.policies.retry import (
     RetryPolicy, NoRetryPolicy, FixedBackoffRetryPolicy,
     ExponentialBackoffRetryPolicy, ExponentialBackoffWithJitterRetryPolicy,
     JitterMode as PolicyJitterMode,
-    RetryBudgetPolicy, CircuitBreakerPolicy
+    RetryBudgetPolicy, TimeBasedCircuitBreakerPolicy
 )
 from simulator.policies.timeout import Timeout, StaticTimeout
 from simulator.policies.load_limiter import (
     LoadLimiter, NoLoadLimiter, CountBasedCircuitBreakerPolicy,
-    TimeBasedCircuitBreakerPolicy, LeakyRateLimiterPolicy,
-    BurstyRateLimiterPolicy, FixedWindowBurstyLimiterPolicy,
-    RetryBudgetPolicy
+    LimiterTimeBasedCircuitBreakerPolicy, LimiterRetryBudgetPolicy,
+    LeakyRateLimiterPolicy,
+    BurstyRateLimiterPolicy, FixedWindowBurstyLimiterPolicy
 )
 from simulator.policies.server_retry_budget import GlobalRetryBudget
 from simulator.policies.aimd_retry_budget import AIMDGlobalRetryBudget
@@ -116,7 +116,7 @@ class ConfigLoader:
                 max_delay=ms_to_ns(cfg.max_delay_ms)
             )
         
-        elif cfg.type == RetryPolicyType.JITTERED:
+        if cfg.type == RetryPolicyType.JITTERED:
             # Map schema jitter mode to policy jitter mode
             jitter_mode_map = {
                 JitterMode.FULL: PolicyJitterMode.FULL,
@@ -131,24 +131,7 @@ class ConfigLoader:
                 jitter_mode=jitter_mode_map.get(cfg.jitter_mode, PolicyJitterMode.FULL)
             )
         
-            raise ValueError(f"Unknown retry policy type: {cfg.type}")
-            
-        # Wrap with Circuit Breaker if configured
-        if cfg.cb_failure_threshold is not None:
-            policy = CircuitBreakerPolicy(
-                inner=policy,
-                failure_rate_threshold=cfg.cb_failure_threshold,
-                window_size=cfg.cb_window_size
-            )
-
-        # Wrap with Retry Budget if configured (Outer layer, checks tokens first)
-        if cfg.budget_ratio is not None:
-            policy = RetryBudgetPolicy(
-                inner=policy,
-                budget_ratio=cfg.budget_ratio
-            )
-            
-        return policy
+        raise ValueError(f"Unknown retry policy type: {cfg.type}")
     
     @staticmethod
     def build_timeout_policy(cfg: Optional[TimeoutConfig]) -> Optional[Timeout]:
@@ -171,6 +154,8 @@ class ConfigLoader:
             return None
         
         if cfg.type == CircuitBreakerType.COUNT_BASED:
+            if cfg.success_threshold is None:
+                 raise ValueError("success_threshold is required for count_based circuit breaker")
             # Convert failure_threshold to (failures, total) tuple
             failure_count = int(cfg.failure_threshold * cfg.failure_window_size)
             success_count = int(cfg.success_threshold * cfg.success_window_size)
@@ -182,7 +167,7 @@ class ConfigLoader:
             )
         
         elif cfg.type == CircuitBreakerType.TIME_BASED:
-            return TimeBasedCircuitBreakerPolicy(
+            return LimiterTimeBasedCircuitBreakerPolicy(
                 failure_threshold_rate=cfg.failure_threshold,
                 success_threshold_rate=cfg.success_threshold,
                 min_requests=cfg.min_requests,
@@ -228,7 +213,7 @@ class ConfigLoader:
         if cfg is None:
             return None
         
-        return RetryBudgetPolicy(
+        return LimiterRetryBudgetPolicy(
             budget_ratio=cfg.budget_ratio,
             max_retries=cfg.max_retries
         )
@@ -441,6 +426,31 @@ class ConfigLoader:
             for client_cfg_yaml in config.clients:
                 # Create client
                 c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, sim.rng())
+                
+                # Apply Client-Side Resilience Wrappers (Top-level)
+                if c_retry_policy is not None:
+                    # 1. Circuit Breaker
+                    if client_cfg_yaml.circuit_breaker is not None:
+                        # Instantiate the robust TimeBasedCircuitBreakerPolicy
+                        cb_cfg = client_cfg_yaml.circuit_breaker
+                        print(f"DEBUG: Using TimeBasedCircuitBreakerPolicy from {TimeBasedCircuitBreakerPolicy.__module__} at {TimeBasedCircuitBreakerPolicy}")
+                        import inspect
+                        print(f"DEBUG: Init signature: {inspect.signature(TimeBasedCircuitBreakerPolicy.__init__)}")
+                        c_retry_policy = TimeBasedCircuitBreakerPolicy(
+                            inner=c_retry_policy,
+                            failure_rate_threshold=cb_cfg.failure_threshold,
+                            window_duration=ms_to_ns(cb_cfg.window_duration_ms if cb_cfg.window_duration_ms else 5000), 
+                            min_window_size=cb_cfg.min_requests if cb_cfg.min_requests else 100,
+                            wait_duration_in_open_state=ms_to_ns(cb_cfg.half_open_delay_ms) if cb_cfg.half_open_delay_ms else ms_to_ns(1000)
+                        )
+                    
+                    # 2. Retry Budget
+                    if client_cfg_yaml.retry_budget is not None:
+                        c_retry_policy = RetryBudgetPolicy(
+                            inner=c_retry_policy,
+                            budget_ratio=client_cfg_yaml.retry_budget.budget_ratio,
+                            max_retries=client_cfg_yaml.retry_budget.max_retries
+                        )
                 c_timeout_policy = ConfigLoader.build_timeout_policy(client_cfg_yaml.timeout)
                 c_cfg = ClientConfig(name=client_cfg_yaml.name, retry=c_retry_policy, timeout=c_timeout_policy)
                 

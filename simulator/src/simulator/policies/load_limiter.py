@@ -103,7 +103,7 @@ class CountBasedCircuitBreakerPolicy(LoadLimiter):
 
 
 @dataclass
-class TimeBasedCircuitBreakerPolicy(LoadLimiter):
+class LimiterTimeBasedCircuitBreakerPolicy(LoadLimiter):
     failure_threshold_rate: float  # percentage of failures to open the circuit
     success_threshold_rate: float  # percentage of successes to close the circuit
     min_requests: int  # Minimum requests in the window to evaluate
@@ -179,7 +179,7 @@ class LeakyRateLimiterPolicy(LoadLimiter):
 
 
 @dataclass
-class RetryBudgetPolicy(LoadLimiter):
+class LimiterRetryBudgetPolicy(LoadLimiter):
     budget_ratio: (
         float  # retries can be at most this ratio of successes (e.g., 0.1 for 10%)
     )

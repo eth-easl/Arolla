@@ -135,6 +135,13 @@ class ClientRuntime:
         
         # If success, we are done
         if success:
+            if self.cfg.retry:
+                retry_ctx = RetryContext(
+                    attempt=len(ctx.root.attempts),
+                    now=sim.timestep
+                )
+                self.cfg.retry.record_attempt(retry_ctx, True)
+            
             self._on_root_done(ctx)
             return
             
