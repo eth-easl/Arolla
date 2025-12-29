@@ -136,7 +136,7 @@ def plot_reproduction(clients, output_dir, input_dir):
         
         rps = attempts / granularity
         # Smoothing disabled (User verification confirm High RPS provides natural smoothing)
-        # rps_smoothed = rps.rolling(window=window_size, min_periods=1, center=True).mean()
+        # rps_smoothed = rps.rolling(window=10, min_periods=1, center=True).mean()
         rps_smoothed = rps
         
         target_rps = float(client_rps_map.get(name, 100.0))
@@ -160,7 +160,7 @@ def plot_reproduction(clients, output_dir, input_dir):
     fig.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=len(by_label))
     
     plt.tight_layout()
-    output_path = os.path.join(output_dir, "reproduced_figures_3x.png")
+    output_path = os.path.join(output_dir, "reproduced_blog_figures.png")
     plt.savefig(output_path, bbox_inches='tight')
     print(f"Saved to {output_path}")
 

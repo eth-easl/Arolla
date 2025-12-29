@@ -10,7 +10,7 @@ services:
     partial_failures:
       - type: partial_failure
         start_s: 0.5
-        end_s: 1.0
+        end_s: 1.5
         p_fail: 1.0
 
   - name: svc-exp-target
@@ -20,7 +20,17 @@ services:
     partial_failures:
       - type: partial_failure
         start_s: 0.5
-        end_s: 1.0
+        end_s: 1.5
+        p_fail: 1.0
+
+  - name: svc-jitter-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.5
         p_fail: 1.0
 
 clients:
@@ -42,6 +52,19 @@ clients:
       max_attempts: 4
       initial_delay_ms: 50
       max_delay_ms: 1000
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: client-jitter
+    target_service: svc-jitter-target
+    retry: 
+      type: jittered
+      max_attempts: 4
+      initial_delay_ms: 50
+      max_delay_ms: 1000
+      jitter_mode: full
     workload: 
       base_rps: 10000
       duration_s: 2
