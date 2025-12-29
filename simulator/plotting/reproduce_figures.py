@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import yaml
 
 def load_data(input_dir):
     # Match specific pattern for reproducibility
@@ -20,6 +21,28 @@ def load_data(input_dir):
         df = pd.read_csv(f)
         clients[client_name] = df
     return clients
+
+def get_client_rps(input_dir):
+    # Try to find yaml config
+    yaml_files = glob.glob(os.path.join(input_dir, "*.yaml"))
+    
+    client_rps = {}
+    if not yaml_files:
+        return client_rps
+        
+    try:
+        with open(yaml_files[0], 'r') as f:
+            config = yaml.safe_load(f)
+            
+            if 'clients' in config:
+                for client in config['clients']:
+                    name = client.get('name', 'client')
+                    workload = client.get('workload', {})
+                    client_rps[name] = workload.get('base_rps', 100.0)
+    except Exception as e:
+        print(f"Error reading client RPS: {e}")
+        
+    return client_rps
 
 def get_fault_range(input_dir):
     # Try to find faults.json or demo_faults.json
@@ -48,7 +71,9 @@ def get_granularity(input_dir):
         with open(yaml_files[0], 'r') as f:
             for line in f:
                 if "granularity_s:" in line:
-                    return float(line.split(":")[1].strip())
+                    # Handle comments: "granularity_s: 0.05 # comment" -> "granularity_s: 0.05 "
+                    val_part = line.split('#')[0] 
+                    return float(val_part.split(":")[1].strip())
     except Exception as e:
         print(f"Error reading granularity: {e}")
     return 0.1
@@ -96,7 +121,9 @@ def plot_reproduction(clients, output_dir, input_dir):
     
     # 2. Server RPS Amplification
     ax = axes[1]
-    TARGET_RPS = 100 # Default fallback
+    
+    client_rps_map = get_client_rps(input_dir)
+    print(f"Client Target RPS map: {client_rps_map}")
     
     for name, df in clients.items():
         if df is None: continue
@@ -108,14 +135,12 @@ def plot_reproduction(clients, output_dir, input_dir):
         # Use configured granularity
         
         rps = attempts / granularity
-        # Apply rolling mean to smooth out Poisson noise
-        # Target a 1.0s smoothing window regardless of granularity
-        window_size = int(1.0 / granularity)
-        window_size = max(1, window_size)
+        # Smoothing disabled (User verification confirm High RPS provides natural smoothing)
+        # rps_smoothed = rps.rolling(window=window_size, min_periods=1, center=True).mean()
+        rps_smoothed = rps
         
-        rps_smoothed = rps.rolling(window=window_size, min_periods=1, center=True).mean()
-        
-        rel_rps = (rps_smoothed / TARGET_RPS) * 100
+        target_rps = float(client_rps_map.get(name, 100.0))
+        rel_rps = (rps_smoothed / target_rps) * 100
         
         ax.plot(df['timepoint'], rel_rps, label=name, color=palette.get(name, 'black'), linewidth=2)
         
