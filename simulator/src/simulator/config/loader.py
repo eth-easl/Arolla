@@ -441,9 +441,6 @@ class ConfigLoader:
             for client_cfg_yaml in config.clients:
                 # Create client
                 c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, sim.rng())
-                if isinstance(c_retry_policy, ExponentialBackoffRetryPolicy):
-                    print(f"DEBUG: Created ExpBackoff for {client_cfg_yaml.name}: initial={c_retry_policy.initial_delay}ns, max={c_retry_policy.max_delay}ns")
-                
                 c_timeout_policy = ConfigLoader.build_timeout_policy(client_cfg_yaml.timeout)
                 c_cfg = ClientConfig(name=client_cfg_yaml.name, retry=c_retry_policy, timeout=c_timeout_policy)
                 
