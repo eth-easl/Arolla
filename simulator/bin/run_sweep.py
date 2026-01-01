@@ -12,6 +12,7 @@ import yaml
 import copy
 import itertools
 import pandas as pd
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Any, Generator, Tuple
 
@@ -112,11 +113,85 @@ def run_simulation_instance(config: ExperimentConfig, output_dir: Path, verbose:
         sim.run(until=s_to_ns(max_duration))
         sim.run() # Drain
         
-        # Save per-run artifacts
+        # Collect metrics and merge CSVs by client base name
+        results = []
+        
+        # Group clients by base name (e.g. "client.0" -> "client")
+        clients_by_base = defaultdict(list)
         for client in clients:
-            metrics = client.metrics()
-            csv_path = output_dir / f"output_{client.cfg.name}.csv"
-            metrics.export_csv(str(csv_path))
+            # Check if name ends with .<digits> usually added by replicas logic
+            parts = client.cfg.name.rsplit('.', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                base_name = parts[0]
+                replica_id = int(parts[1])
+            else:
+                base_name = client.cfg.name
+                replica_id = 0
+                
+            clients_by_base[base_name].append((client, replica_id))
+
+        for base_name, group in clients_by_base.items():
+            # Determine if we should merge
+            # If group size > 1, we merge.
+            if len(group) > 1:
+                 dfs = []
+                 for client, rid in group:
+                     try:
+                         df = client.metrics().to_dataframe()
+                         if not df.empty:
+                             df['replica_id'] = rid
+                             dfs.append(df)
+                     except Exception as e:
+                         print(f"Error getting metrics for {client.cfg.name}: {e}")
+                 
+                 if dfs:
+                     merged_df = pd.concat(dfs, ignore_index=True)
+                     csv_path = output_dir / f"output_{base_name}_merged.csv"
+                     merged_df.to_csv(csv_path, index=False)
+                 else:
+                     csv_path = None
+                 
+                 # Create results entries pointing to the merged file
+                 for client, rid in group:
+                     metrics = client.metrics()
+                     summary = metrics.summary()
+                     goodput = summary.succeeded / max_duration if max_duration > 0 else 0
+                     
+                     res = {
+                        "client_name": base_name, # Use base name for grouping
+                        "replica_id": rid,
+                        "total_requests": summary.total,
+                        "success_rate": (summary.succeeded / summary.total) if summary.total > 0 else 0.0,
+                        "mean_latency_ms": summary.mean,
+                        "p50_latency_ms": summary.p50,
+                        "p99_latency_ms": summary.p99,
+                        "goodput_rps": goodput,
+                        "raw_csv_path": str(csv_path) if csv_path else "" 
+                     }
+                     results.append(res)
+                     
+            else:
+                # Single client fallback
+                client, rid = group[0]
+                metrics = client.metrics()
+                csv_path = output_dir / f"output_{client.cfg.name}.csv"
+                metrics.export_csv(str(csv_path))
+                
+                summary = metrics.summary()
+                goodput = summary.succeeded / max_duration if max_duration > 0 else 0
+                
+                res = {
+                    "client_name": base_name,
+                    "replica_id": rid,
+                    "total_requests": summary.total,
+                    "success_rate": (summary.succeeded / summary.total) if summary.total > 0 else 0.0,
+                    "mean_latency_ms": summary.mean,
+                    "p50_latency_ms": summary.p50,
+                    "p99_latency_ms": summary.p99,
+                    "goodput_rps": goodput,
+                    "raw_csv_path": str(csv_path)
+                }
+                results.append(res)
 
         # Fault events
         if fault_tracker:
@@ -126,30 +201,6 @@ def run_simulation_instance(config: ExperimentConfig, output_dir: Path, verbose:
     except Exception as e:
         print(f"Error running simulation: {e}", file=sys.stderr)
         return []
-        
-    # Collect metrics
-    results = []
-    for client in clients:
-        metrics = client.metrics()
-        summary = metrics.summary()
-        
-        # Calculate derived metrics
-        goodput = summary.succeeded / max_duration if max_duration > 0 else 0
-        
-        # Track path for reorganization
-        csv_path = output_dir / f"output_{client.cfg.name}.csv"
-        
-        res = {
-            "client_name": client.cfg.name,
-            "total_requests": summary.total,
-            "success_rate": (summary.succeeded / summary.total) if summary.total > 0 else 0.0,
-            "mean_latency_ms": summary.mean,
-            "p50_latency_ms": summary.p50,
-            "p99_latency_ms": summary.p99,
-            "goodput_rps": goodput,
-            "raw_csv_path": str(csv_path) # Internal use
-        }
-        results.append(res)
         
     return results
 
@@ -286,9 +337,14 @@ def main():
         )
         
         # Copy raw CSVs
+        copied_destinations = set()
         for _, row in client_df.iterrows():
             if "raw_csv_path" in row and "run_dir" in row:
-                src = Path(row["raw_csv_path"])
+                raw_path = str(row["raw_csv_path"])
+                if not raw_path: 
+                    continue
+                    
+                src = Path(raw_path)
                 if src.exists():
                      # Construct meaningful filename from parameters
                      # e.g. p_fail_0.1.csv
@@ -299,7 +355,12 @@ def main():
                          run_subdir_name = run_subdir_name[4:]
                          
                      dest_name = f"{run_subdir_name}.csv"
+                     
+                     if dest_name in copied_destinations:
+                         continue
+                         
                      shutil.copy(src, client_dir / dest_name)
+                     copied_destinations.add(dest_name)
 
     # 4b. Cleanup run folders
     # detailed runs are now duplicated in by_client, so we can remove the run_ folders

@@ -246,6 +246,7 @@ class ClientConfigYAML(BaseModel):
     timeout: Optional[TimeoutConfig] = Field(default=None, description="Client-side timeout policy")
     circuit_breaker: Optional[CircuitBreakerConfig] = Field(default=None, description="Client-side circuit breaker")
     retry_budget: Optional[RetryBudgetConfig] = Field(default=None, description="Client-side retry budget")
+    replicas: Union[int, List[int]] = Field(default=1, description="Number of replica clients to spawn (or list for sweep)")
 
 # ============================================================================
 # Sweep Configuration
