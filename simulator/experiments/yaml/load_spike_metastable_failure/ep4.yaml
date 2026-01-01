@@ -1,0 +1,42 @@
+# Experiment 4 - Dynamic Global Budget (Prevention)
+# Same as ep2, but with AIMD Global Retry Budget
+
+name: load_spike_ep4_aimd
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 10000
+    
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    
+    timeout:
+      attempt_ms: 192
+    
+    # AIMD Global Retry Budget
+    aimd_global_retry_budget:
+      min_rps: 10
+      max_rps: 300
+      initial_rps: 100
+      failure_threshold: 0.1
+      window_ms: 1000.0
+
+workload:
+  base_rps: 188
+  duration_s: 90
+  load_spikes:
+    - type: load_spike
+      start_s: 20
+      end_s: 30
+      rps_multiplier: 3.0
+
+output_csv: results/load_spike_ep4/output.csv
+fault_events_json: results/load_spike_ep4/fault_events.json
+granularity_s: 1.0

@@ -1,0 +1,34 @@
+# Experiment 1 - Safe Baseline (No Metastability)
+# Configuration that handles the spike without entering metastable failure (by not retrying)
+
+name: load_spike_ep1_safe
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 10000
+    
+    retry:
+      type: fixed
+      max_attempts: 1     # NO RETRIES (1 attempt total)
+      delay_ms: 0
+    
+    timeout:
+      attempt_ms: 192     # P99 timeout
+
+workload:
+  base_rps: 188
+  duration_s: 90
+  load_spikes:
+    - type: load_spike
+      start_s: 20
+      end_s: 30           # 10s spike
+      rps_multiplier: 3.0 # 600 RPS (187.5% utilization)
+
+output_csv: results/load_spike_ep1/output.csv
+fault_events_json: results/load_spike_ep1/fault_events.json
+granularity_s: 1.0

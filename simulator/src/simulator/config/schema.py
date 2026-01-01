@@ -81,7 +81,7 @@ class CircuitBreakerConfig(BaseModel):
     """Configuration for circuit breaker"""
     type: CircuitBreakerType
     failure_threshold: float = Field(description="Failure threshold (ratio or count)")
-    success_threshold: float = Field(description="Success threshold (ratio or count)")
+    success_threshold: Optional[float] = Field(default=None, description="Success threshold (ratio or count)")
     half_open_delay_ms: float = Field(ge=0, description="Delay before half-open state in ms")
     
     # Count-based specific
@@ -165,7 +165,7 @@ class PartialFailureConfig(BaseModel):
     type: Literal[FaultType.PARTIAL_FAILURE] = FaultType.PARTIAL_FAILURE
     start_s: float = Field(ge=0, description="Start time in seconds")
     end_s: float = Field(ge=0, description="End time in seconds")
-    p_fail: float = Field(ge=0, le=1, description="Probability of failure")
+    p_fail: Union[float, List[float]] = Field(default=0.0, description="Probability of failure (0.0 to 1.0) or list of values for sweep")
     
     @field_validator('end_s')
     @classmethod
@@ -205,7 +205,7 @@ class ServiceConfigYAML(BaseModel):
     queue_capacity: Optional[int] = Field(default=None, ge=0, description="Queue capacity (None = unbounded)")
     
     # Policies
-    retry: Optional[RetryConfig] = None
+    # retry: Optional[RetryConfig] = None # MOVED TO CLIENT
     timeout: Optional[TimeoutConfig] = None
     circuit_breaker: Optional[CircuitBreakerConfig] = None
     rate_limiter: Optional[RateLimiterConfig] = None
@@ -234,6 +234,57 @@ class WorkloadConfig(BaseModel):
 
 
 # ============================================================================
+# Client Configuration
+# ============================================================================
+
+class ClientConfigYAML(BaseModel):
+    """Configuration for a client"""
+    name: str = Field(description="Client name")
+    workload: WorkloadConfig
+    target_service: Optional[str] = Field(default=None, description="Name of target service")
+    retry: Optional[RetryConfig] = Field(default=None, description="Client-side retry policy")
+    timeout: Optional[TimeoutConfig] = Field(default=None, description="Client-side timeout policy")
+    circuit_breaker: Optional[CircuitBreakerConfig] = Field(default=None, description="Client-side circuit breaker")
+    retry_budget: Optional[RetryBudgetConfig] = Field(default=None, description="Client-side retry budget")
+    replicas: Union[int, List[int]] = Field(default=1, description="Number of replica clients to spawn (or list for sweep)")
+
+# ============================================================================
+# Sweep Configuration
+# ============================================================================
+
+class SweepRange(BaseModel):
+    """Configuration for a numerical range sweep"""
+    start: float = Field(description="Start value")
+    stop: float = Field(description="Stop value (inclusive)")
+    step: float = Field(description="Step size")
+
+class SweepConfig(BaseModel):
+    """Configuration for a parameter sweep"""
+    parameter: Optional[str] = Field(default=None, description="Single parameter path")
+    parameters: Optional[List[str]] = Field(default=None, description="List of parameter paths (lockstep sweep)")
+    label: Optional[str] = Field(default=None, description="Label for plots (e.g. 'Failure Rate')")
+    values: Optional[List[Union[float, int, str]]] = Field(default=None, description="Explicit list of values")
+    range: Optional[SweepRange] = Field(default=None, description="Numerical range")
+
+    @field_validator('parameters')
+    @classmethod
+    def validate_param_or_params(cls, v, info):
+        if v is not None and info.data.get('parameter') is not None:
+             raise ValueError("Cannot specify both 'parameter' and 'parameters'")
+        if v is None and info.data.get('parameter') is None:
+             raise ValueError("Must specify either 'parameter' or 'parameters'")
+        return v
+
+    @field_validator('range')
+    @classmethod
+    def validate_values_or_range(cls, v, info):
+        if v is None and info.data.get('values') is None:
+             raise ValueError("Must specify either 'values' or 'range'")
+        if v is not None and info.data.get('values') is not None:
+             raise ValueError("Cannot specify both 'values' and 'range'")
+        return v
+
+# ============================================================================
 # Experiment Configuration
 # ============================================================================
 
@@ -243,12 +294,20 @@ class ExperimentConfig(BaseModel):
     seed: int = Field(default=42, description="Simulator RNG seed")
     
     services: List[ServiceConfigYAML] = Field(min_length=1, description="List of services")
-    workload: WorkloadConfig
+    
+    # Workload configuration (Single Client Mode)
+    workload: Optional[WorkloadConfig] = Field(default=None, description="Global workload (legacy/single-client)")
+    
+    # Multiple Clients Mode
+    clients: List[ClientConfigYAML] = Field(default_factory=list, description="List of clients")
     
     # Output configuration
     output_csv: str = Field(default="output.csv", description="Output CSV file path")
     fault_events_json: Optional[str] = Field(default=None, description="Fault events JSON file path")
     granularity_s: float = Field(default=1.0, gt=0, description="Metrics granularity in seconds")
+    
+    plotting_script: Optional[str] = Field(default=None, description="Path to custom plotting script")
+    sweeps: List[SweepConfig] = Field(default_factory=list, description="List of parameter sweeps")
     
     @field_validator('services')
     @classmethod
@@ -259,6 +318,27 @@ class ExperimentConfig(BaseModel):
             if svc.dependency and svc.dependency not in service_names:
                 raise ValueError(f"Service {svc.name} depends on unknown service {svc.dependency}")
         return services
+
+    @field_validator('clients')
+    @classmethod
+    def validate_workload_configuration(cls, v, info):
+        """Ensure either workload (single) or clients (multi) is specified"""
+        # Note: We can't easily access 'workload' field here because of validation order/context quirks in Pydantic v2/v1
+        # But we can check at the model level via a root validator if needed.
+        # For simple field validation, we'll just leave this pass and rely on logic below or root validator.
+        return v
+    
+    # Pydantic v2 root validator equivalent (model_validator) is preferred, 
+    # but assuming v1 style or mix based on imports. 
+    # Let's add a generic check in __init__ or use root_validator if available.
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.workload and not self.clients:
+            raise ValueError("Must specify either 'workload' (single client) or 'clients' (multiple clients)")
+        if self.workload and self.clients:
+            raise ValueError("Cannot specify both 'workload' and 'clients'. Choose one.")
+
     
     def get_service_by_name(self, name: str) -> Optional[ServiceConfigYAML]:
         """Get service configuration by name"""

@@ -1,0 +1,151 @@
+# https://medium.com/yandex/good-retry-bad-retry-an-incident-story-648072d3cee6#28fc
+
+name: demo_exponential
+seed: 42
+
+services:
+  - name: svc-no-retry
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
+  - name: svc-fixed-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    # Increased workers to handle 1000 RPS (approx 40-50 needed for 10ms processing)
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
+  - name: svc-exp-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
+  - name: svc-jitter-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
+  - name: svc-cb-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
+  - name: svc-budget-target
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0.5
+        end_s: 1.0
+        p_fail: 0.3
+
+clients:
+  - name: no-retry
+    target_service: svc-no-retry
+    retry: 
+      type: fixed
+      max_attempts: 1
+      delay_ms: 0
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: fixed
+    target_service: svc-fixed-target
+    retry: 
+      type: fixed
+      max_attempts: 2
+      delay_ms: 0
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: exponential
+    target_service: svc-exp-target
+    retry: 
+      type: exponential
+      max_attempts: 2
+      initial_delay_ms: 50
+      max_delay_ms: 1000
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: exponential-jitter
+    target_service: svc-jitter-target
+    retry: 
+      type: jittered
+      max_attempts: 2
+      initial_delay_ms: 50
+      max_delay_ms: 1000
+      jitter_mode: full
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: circuit_breaker
+    target_service: svc-cb-target
+    retry: 
+      type: fixed
+      max_attempts: 2
+      delay_ms: 0
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 200
+      min_requests: 100
+      half_open_delay_ms: 500
+
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+  - name: retry_budget
+    target_service: svc-budget-target
+    retry: 
+      type: fixed
+      max_attempts: 2
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
+    workload: 
+      base_rps: 10000
+      duration_s: 2
+      rng_seed: 1
+
+output_csv: output.csv
+fault_events_json: faults.json
+granularity_s: 0.05 # Match reference 20ms buckets (50Hz)
+plotting_script: plotting/reproduce_figures.py

@@ -8,11 +8,15 @@ from simulator.utils.time import s_to_ns
 from simulator.core.engine import Simulator
 from simulator.runtime.service import ServiceRuntime
 from simulator.metrics.collector import Metrics
+from simulator.policies.retry import RetryPolicy, RetryContext
+from simulator.policies.timeout import Timeout
 
 
 @dataclass(frozen=True)
 class ClientConfig:
-    passme: str = "client"
+    name: str = "client"
+    retry: Optional['RetryPolicy'] = None
+    timeout: Optional['Timeout'] = None
 
 
 @dataclass
@@ -52,7 +56,11 @@ class ClientRuntime:
         root_req = RootRequest()
 
         global_timeout = None
-        if self.service.cfg.timeout is not None:
+        
+        # Priority: Client config > Service config
+        if self.cfg.timeout is not None:
+             global_timeout = self.cfg.timeout.get_global_timeout()
+        elif self.service.cfg.timeout is not None:
             global_timeout = self.service.cfg.timeout.get_global_timeout()
 
         if global_timeout is not None:
@@ -65,15 +73,27 @@ class ClientRuntime:
         )
         ctx = AttemptCtx(root=root_req, req=dummy_req, last_delay=0, total_delay=0)
 
-        on_attempt_done = partial(self._on_attempt_done_from_service, ctx, sim)
-        on_root_done = partial(self._on_root_done, ctx)
+        # Trigger the first attempt
+        self._make_attempt(sim, ctx, is_retry=False)
 
-        # Call service once
+    def _make_attempt(self, sim: Simulator, ctx: AttemptCtx, is_retry: bool):
+        # Update request interval for this specific attempt
+        # (Start time is now)
+        # Note: We create a dummy request object here just to signal intent, 
+        # but the Service will create the actual context.
+        # However, for our own tracking in _on_attempt_done_from_service, we'll verify timings.
+        
+        on_attempt_done = partial(self._on_attempt_done_from_service, ctx, sim)
+        
+        # Pass no-op for on_root_done because WE manage the root lifecycle now.
+        # The Service calls on_root_done when IT thinks the request is finished (e.g. after 1 try).
+        on_root_done = lambda: None
+        
         self.service.submit_request(
             sim,
             on_attempt_done=on_attempt_done,
             on_root_done=on_root_done,
-            global_deadline=root_req.global_deadline,
+            global_deadline=ctx.root.global_deadline,
         )
 
     def _on_attempt_done_from_service(
@@ -107,6 +127,54 @@ class ClientRuntime:
         request_latency = req.interval.end - req.interval.begin
         if self.service.cfg.timeout is not None:
             self.service.cfg.timeout.record_result(success, request_latency)
+            self.service.cfg.timeout.record_result(success, request_latency)
+
+        # --------------------------------------------------------------------
+        # Client-Side Retry Logic
+        # --------------------------------------------------------------------
+        
+        # If success, we are done
+        if success:
+            if self.cfg.retry:
+                retry_ctx = RetryContext(
+                    attempt=len(ctx.root.attempts),
+                    now=sim.timestep
+                )
+                self.cfg.retry.record_attempt(retry_ctx, True)
+            
+            self._on_root_done(ctx)
+            return
+            
+        # If failure, check policy
+        if self.cfg.retry is None:
+            # No retry policy -> Fail immediately
+            self._on_root_done(ctx)
+            return
+
+        # Prepare context for policy
+        retry_ctx = RetryContext(
+             attempt=len(ctx.root.attempts), # 1-based count because we just added the failed attempt
+             now=sim.timestep
+        )
+        
+        if self.cfg.retry:
+            self.cfg.retry.record_attempt(retry_ctx, success)
+        
+        should_retry, delay = self.cfg.retry.next_delay(retry_ctx)
+        
+        if should_retry:
+            # Check global deadline
+            next_start = sim.timestep + delay
+            if ctx.root.global_deadline is not None and next_start >= ctx.root.global_deadline:
+                # Deadline exceeded -> give up
+                self._on_root_done(ctx)
+                return
+            
+            # Schedule retry
+            sim.schedule(next_start, partial(self._make_attempt, sim, ctx, is_retry=True))
+        else:
+            # Policy says stop
+            self._on_root_done(ctx)
 
     def _on_root_done(self, ctx: AttemptCtx):
         if not ctx.root.done:

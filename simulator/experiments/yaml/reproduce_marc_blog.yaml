@@ -1,0 +1,168 @@
+name: brooker_repro
+seed: 42
+
+services:
+  # Isolated service for No Retry client
+  - name: svc-no-retry
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0
+        end_s: 60
+        # Use inline list with anchor for lockstep sweep
+        p_fail: &fails [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+
+  # Isolated service for Fixed Retry client
+  - name: svc-fixed
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0
+        end_s: 60
+        p_fail: *fails # Use anchor to ensuring exact same object logic for lockstep
+
+  # Isolated service for Circuit Breaker client
+  - name: svc-cb
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0
+        end_s: 60
+        p_fail: *fails
+
+  # Isolated service for Retry Budget client
+  - name: svc-budget
+    latency: {median_ms: 10, lognorm_sigma: 0}
+    workers: 1000
+    queue_capacity: 10000
+    partial_failures:
+      - type: partial_failure
+        start_s: 0
+        end_s: 60
+        p_fail: *fails
+
+clients:
+  - name: no-retry
+    target_service: svc-no-retry
+    retry: 
+      type: none
+    workload: &default_workload
+      base_rps: 100
+      duration_s: 10
+      rng_seed: 1
+
+  - name: fixed-3
+    target_service: svc-fixed
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    workload: *default_workload
+
+  - name: circuit-breaker
+    target_service: svc-cb
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 2000
+      min_requests: 10
+      half_open_delay_ms: 500
+    workload: *default_workload
+
+  - name: retry-budget
+    target_service: svc-budget
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
+    workload: *default_workload
+
+# No explicit sweeps section needed now!
+# sweeps: ...
+
+output_csv: output.csv
+granularity_s: 1.0
+plotting_script: plotting/brooker_plots.py
+
+
+# name: scale_clients
+# seed: 42
+
+# services:
+#   - name: server-cb
+#     latency:
+#       median_ms: 10
+#       lognorm_sigma: 0.2
+#     workers: 150  # 15k RPS capacity > 10k Load
+#     queue_capacity: 5000
+#     partial_failures:
+#       - start_s: 0
+#         end_s: 10
+#         # Sweep probability of failure (Anchor for lockstep)
+#         p_fail: &fails [0.0, 0.05, 0.1]
+
+#   - name: server-rb
+#     latency:
+#       median_ms: 10
+#       lognorm_sigma: 0.2
+#     workers: 150
+#     queue_capacity: 5000
+#     partial_failures:
+#       - start_s: 0
+#         end_s: 10
+#         p_fail: *fails
+
+
+# # Clients
+# # We want to sweep the number of replicas for BOTH clients in lockstep.
+# clients:
+#   - name: circuit-breaker
+#     # Inline sweep with anchor
+#     replicas: &num_clients [10, 100, 1000]
+#     workload:
+#       base_rps: 10 # 10 RPS per client * N clients
+#       duration_s: 10
+#     retry:
+#       type: exponential
+#       max_attempts: 3
+#       initial_delay_ms: 10
+#       max_delay_ms: 100
+#       jitter_mode: full
+#     circuit_breaker:
+#       type: time_based
+#       failure_threshold: 0.1
+#       window_duration_ms: 2000
+#       min_requests: 10
+#       half_open_delay_ms: 500
+#     target_service: server-cb
+
+#   - name: retry-budget
+#     replicas: *num_clients
+#     workload:
+#       base_rps: 10
+#       duration_s: 10
+#     retry:
+#       type: exponential
+#       max_attempts: 3
+#       initial_delay_ms: 10
+#       max_delay_ms: 100
+#       jitter_mode: full
+#     retry_budget:
+#       budget_ratio: 0.1
+#       max_retries: 10
+#     target_service: server-rb
+
+# plotting_script: plotting/brooker_plots_scale.py 
