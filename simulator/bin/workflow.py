@@ -39,6 +39,7 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         0 on success, 1 on failure
     """
     yaml_path = Path(yaml_file)
+    script_dir = Path(__file__).parent.resolve()
     
     # Validate YAML file exists
     if not yaml_path.exists():
@@ -67,33 +68,81 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     print(f"Output directory: {output_dir}")
     print()
     
-    # Step 1: Run simulation
-    print("Step 1/2: Running simulation...")
+     # Step 0: Check for sweeps
     print("-" * 70)
+    ran_sweep = False
     
-    # Locate run_experiment.py relative to this script (workflow.py)
-    # Both are in the same 'bin' directory
-    script_dir = Path(__file__).parent.resolve()
-    run_experiment_script = script_dir / "run_experiment.py"
-
-    cmd = [
-        sys.executable,
-        str(run_experiment_script),
-        str(yaml_file),
-        "--output", str(output_dir)
-    ]
-    
-    if verbose:
-        cmd.append("--verbose")
-    
+    # Load config to check for sweeps (inline or legacy)
     try:
-        result = subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"\n❌ Simulation failed with exit code {e.returncode}")
-        return 1
-    
-    print(f"\n✓ Simulation completed")
-    # print(f"  CSV output: {csv_file}") # csv_file depends on run now
+         # Import detection logic from run_sweep to ensure consistency
+         import importlib.util
+         spec = importlib.util.spec_from_file_location("run_sweep", script_dir / "run_sweep.py")
+         run_sweep_module = importlib.util.module_from_spec(spec)
+         spec.loader.exec_module(run_sweep_module)
+         
+         # Load raw yaml to check for lists
+         import yaml
+         with open(yaml_file, 'r') as f:
+             raw_config = yaml.safe_load(f)
+             
+         sweeps = run_sweep_module.find_sweeps(raw_config)
+         
+         # Also check legacy sweeps field for backward compat (though we removed it from plan)
+         legacy_sweeps = raw_config.get('sweeps')
+         
+         if sweeps or legacy_sweeps:
+             count = len(sweeps) if sweeps else len(legacy_sweeps)
+             print(f"Detected {count} sweep dimensions. Switching to Sweep Mode.")
+             print(f"Delegating to bin/run_sweep.py...")
+             
+             run_sweep_script = script_dir / "run_sweep.py"
+             cmd = [
+                sys.executable,
+                str(run_sweep_script),
+                str(yaml_file),
+                "--target-dir", str(output_dir)
+             ]
+             if verbose:
+                 cmd.append("--verbose")
+                 
+             try:
+                subprocess.run(cmd, check=True)
+                ran_sweep = True
+             except subprocess.CalledProcessError as e:
+                print(f"\n❌ Sweep failed with exit code {e.returncode}")
+                return 1
+    except Exception as e:
+         print(f"Warning: Could not check for sweeps: {e}")
+
+    # Step 1: Run simulation (only if not running sweep)
+    if not ran_sweep:
+        print("Step 1/2: Running simulation...")
+        print("-" * 70)
+        
+        # Locate run_experiment.py relative to this script (workflow.py)
+        # Both are in the same 'bin' directory
+        run_experiment_script = script_dir / "run_experiment.py"
+
+        cmd = [
+            sys.executable,
+            str(run_experiment_script),
+            str(yaml_file),
+            "--output", str(output_dir)
+        ]
+        
+        if verbose:
+            cmd.append("--verbose")
+        
+        try:
+            result = subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"\n❌ Simulation failed with exit code {e.returncode}")
+            return 1
+        
+        print(f"\n✓ Simulation completed")
+        # print(f"  CSV output: {csv_file}") # csv_file depends on run now
+    else:
+        print("Skipping single simulation step (Sweep Mode active).")
     
     # Step 2: Generate plots
     if plot:

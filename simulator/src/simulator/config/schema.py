@@ -165,7 +165,7 @@ class PartialFailureConfig(BaseModel):
     type: Literal[FaultType.PARTIAL_FAILURE] = FaultType.PARTIAL_FAILURE
     start_s: float = Field(ge=0, description="Start time in seconds")
     end_s: float = Field(ge=0, description="End time in seconds")
-    p_fail: float = Field(ge=0, le=1, description="Probability of failure")
+    p_fail: Union[float, List[float]] = Field(default=0.0, description="Probability of failure (0.0 to 1.0) or list of values for sweep")
     
     @field_validator('end_s')
     @classmethod
@@ -248,6 +248,42 @@ class ClientConfigYAML(BaseModel):
     retry_budget: Optional[RetryBudgetConfig] = Field(default=None, description="Client-side retry budget")
 
 # ============================================================================
+# Sweep Configuration
+# ============================================================================
+
+class SweepRange(BaseModel):
+    """Configuration for a numerical range sweep"""
+    start: float = Field(description="Start value")
+    stop: float = Field(description="Stop value (inclusive)")
+    step: float = Field(description="Step size")
+
+class SweepConfig(BaseModel):
+    """Configuration for a parameter sweep"""
+    parameter: Optional[str] = Field(default=None, description="Single parameter path")
+    parameters: Optional[List[str]] = Field(default=None, description="List of parameter paths (lockstep sweep)")
+    label: Optional[str] = Field(default=None, description="Label for plots (e.g. 'Failure Rate')")
+    values: Optional[List[Union[float, int, str]]] = Field(default=None, description="Explicit list of values")
+    range: Optional[SweepRange] = Field(default=None, description="Numerical range")
+
+    @field_validator('parameters')
+    @classmethod
+    def validate_param_or_params(cls, v, info):
+        if v is not None and info.data.get('parameter') is not None:
+             raise ValueError("Cannot specify both 'parameter' and 'parameters'")
+        if v is None and info.data.get('parameter') is None:
+             raise ValueError("Must specify either 'parameter' or 'parameters'")
+        return v
+
+    @field_validator('range')
+    @classmethod
+    def validate_values_or_range(cls, v, info):
+        if v is None and info.data.get('values') is None:
+             raise ValueError("Must specify either 'values' or 'range'")
+        if v is not None and info.data.get('values') is not None:
+             raise ValueError("Cannot specify both 'values' and 'range'")
+        return v
+
+# ============================================================================
 # Experiment Configuration
 # ============================================================================
 
@@ -270,6 +306,7 @@ class ExperimentConfig(BaseModel):
     granularity_s: float = Field(default=1.0, gt=0, description="Metrics granularity in seconds")
     
     plotting_script: Optional[str] = Field(default=None, description="Path to custom plotting script")
+    sweeps: List[SweepConfig] = Field(default_factory=list, description="List of parameter sweeps")
     
     @field_validator('services')
     @classmethod

@@ -107,8 +107,20 @@ class RetryBudgetPolicy(RetryPolicy):
         self.success_reward = int(self.budget_ratio * self.retry_cost)
         self._max_tokens = self.retry_cost * self.max_retries
         self._tokens = self._max_tokens # Start full
+        self._last_refill_time = 0
 
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
+        # Refill based on time
+        now = context.now if context.now is not None else 0
+        if self._last_refill_time > 0 and now > self._last_refill_time:
+             # Elapsed seconds
+             elapsed_s = (now - self._last_refill_time) / 1e9
+             refill = elapsed_s * self.min_retries_per_sec * self.retry_cost
+             if refill > 0:
+                 self._tokens = min(self._max_tokens, self._tokens + refill)
+        
+        self._last_refill_time = now
+
         if self._tokens < self.retry_cost:
              return False, 0
         
@@ -165,6 +177,7 @@ class TimeBasedCircuitBreakerPolicy(RetryPolicy):
         self.window_duration = window_duration
         self.min_window_size = min_window_size
         self.wait_duration_in_open_state = wait_duration_in_open_state
+        self.permitted_half_open_calls = min_window_size # Set permitted calls to min window size for fast feedback
         self.__post_init__()
     
     def __post_init__(self):
