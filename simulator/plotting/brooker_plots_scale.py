@@ -90,16 +90,6 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.savefig(output_dir / "scale_success_rate.png")
     print(f"Saved {output_dir}/scale_success_rate.png")
-    
-    # Plot 2: Total Goodput vs Failure
-    plt.figure(figsize=(10, 6))
-    sns.lineplot(data=agg_df, x=fail_col, y='goodput_rps', hue='Variant', marker='o')
-    plt.title('Total System Goodput vs Failure Rate (Scaled)')
-    plt.ylabel('Total Goodput (RPS)')
-    plt.xlabel('Server Failure Probability')
-    plt.grid(True, alpha=0.3)
-    plt.savefig(output_dir / "scale_goodput.png")
-    print(f"Saved {output_dir}/scale_goodput.png")
 
 if __name__ == "__main__":
     main()
