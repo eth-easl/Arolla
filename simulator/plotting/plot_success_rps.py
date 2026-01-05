@@ -28,7 +28,8 @@ CLIENT_COLORS = {
 
 def plot_success_rps(df, output_path, fault_events=None, line_color=None, 
                      legend_loc='lower left', legend_bbox=None, legend_order=None,
-                     legend_size=None, line_width=2.0, no_legend_frame=False, figsize=None):
+                     legend_size=None, line_width=2.0, no_legend_frame=False, figsize=None,
+                     y_label="Successful RPS"):
     """Plot Successful RPS (success_root per second) over time."""
     
     # Use provided figsize or let setup_plot use default
@@ -36,10 +37,13 @@ def plot_success_rps(df, output_path, fault_events=None, line_color=None,
     if figsize:
         kwargs['figsize'] = figsize
         
-    fig = setup_plot("", "Time (s)", "Successful RPS", **kwargs)
+    fig = setup_plot("", "Time (s)", kwargs.get('y_label', "Successful RPS"), **kwargs)
+    
+    # ... (skipping frame styling for brevity in match, but included in file) ...
+    # Re-fetch ax in case setup_plot changed it
+    ax = plt.gca()
     
     # Custom Frame Styling (User Request: Frame same color as grid)
-    ax = plt.gca()
     # Get grid color (setup_plot enables grid)
     grid_lines = ax.get_xgridlines()
     if grid_lines:
@@ -62,20 +66,17 @@ def plot_success_rps(df, output_path, fault_events=None, line_color=None,
         color_map = CLIENT_COLORS.copy()
     
     if line_color:
+        # ... (same parsing) ...
         import json
         import ast
         from cycler import cycler
         
         parsed = None
-        # Try JSON first
         try:
-            parsed = json.loads(line_color)
-        except json.JSONDecodeError:
-            # Try AST literal eval (handles single quotes typical in YAML/Python)
-            try:
-                parsed = ast.literal_eval(line_color)
-            except (ValueError, SyntaxError):
-                pass
+             parsed = json.loads(line_color)
+        except:
+             try: parsed = ast.literal_eval(line_color)
+             except: pass
         
         if parsed is not None:
              if isinstance(parsed, dict):
@@ -83,16 +84,12 @@ def plot_success_rps(df, output_path, fault_events=None, line_color=None,
              elif isinstance(parsed, list):
                 plt.rcParams['axes.prop_cycle'] = cycler(color=parsed)
         else:
-            # Not structured, treat as string fallback
-            # Check for comma-separated list without brackets
             if ',' in line_color and '[' not in line_color:
                 colors = [c.strip() for c in line_color.split(',')]
                 plt.rcParams['axes.prop_cycle'] = cycler(color=colors)
-            else:
-                # Single color string
-                pass
-
+    
     t = df['timepoint']
+    y_col = 'calculated_metric' if 'calculated_metric' in df.columns else 'success_root'
     
     if 'client_id' in df.columns and df['client_id'].nunique() > 1:
         # Multi-client comparison
@@ -120,9 +117,6 @@ def plot_success_rps(df, output_path, fault_events=None, line_color=None,
                 kwargs['color'] = color_map[client]
             # Apply single color override if strictly single string provided and NO cycle set
             elif line_color and not color_map and ',' not in line_color:
-                 # Check if we successfully parsed a list earlier (prop_cycle set)
-                 # If prop_cycle was set, we don't need to do anything here.
-                 # If it wasn't set, and it's a single string, apply it (all lines same color)
                  is_json_list = False
                  try: 
                      if isinstance(json.loads(line_color), list): is_json_list = True
@@ -131,25 +125,20 @@ def plot_success_rps(df, output_path, fault_events=None, line_color=None,
                  if not is_json_list:
                      kwargs['color'] = line_color
             
-            plt.plot(subset['timepoint'], subset['success_root'], **kwargs)
+            plt.plot(subset['timepoint'], subset[y_col], **kwargs)
             
-    elif 'success_root' in df.columns:
+    elif y_col in df.columns:
         # Single client or aggregated
-        kwargs = {'label': 'Successful RPS', 'linewidth': line_width}
+        kwargs = {'label': 'Metric', 'linewidth': line_width}
         if line_color:
-             # Basic handling: just pass the string (or whatever it is) to color
-             # If it was a list/dict, they might fail here if not handled, 
-             # but for single line we expect single color.
-             # If user passed a list for a single line, matplotlib might complain or cycle.
-             # Let's trust the user or the prop_cycle we set above.
              if not (line_color.strip().startswith('[') or line_color.strip().startswith('{') or ',' in line_color):
                  kwargs['color'] = line_color
         else:
              kwargs['color'] = 'green'
              
-        plt.plot(t, df['success_root'], **kwargs)
+        plt.plot(t, df[y_col], **kwargs)
     else:
-        print("⚠ 'success_root' column missing.")
+        print(f"⚠ '{y_col}' column missing.")
         return
 
     add_fault_events(fault_events)
@@ -208,6 +197,8 @@ def main():
                        help='Legend text size')
     parser.add_argument('--no-legend-frame', action='store_true',
                        help='Remove legend frame')
+    parser.add_argument('--metric', choices=['rps', 'success_rate'], default='rps',
+                       help='Metric to plot: "rps" (Success RPS) or "success_rate" (Success Rate %)')
     
     args = parser.parse_args()
     
@@ -227,7 +218,40 @@ def main():
         # Check for multi-client data
         if 'client_id' in raw_df.columns and raw_df['client_id'].nunique() > 1:
             print(f"  Detected multiple clients: {raw_df['client_id'].unique()}")
-            df = raw_df # Keep all rows, let plot function handle grouping
+            
+            # Helper to extract base name
+            def get_base_name(name):
+                parts = name.rsplit('.', 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    return parts[0]
+                return name
+
+            raw_df['base_client'] = raw_df['client_id'].apply(get_base_name)
+            
+            # Check if aggregation is needed
+            if raw_df['base_client'].nunique() < raw_df['client_id'].nunique():
+                print("  Consolidating replicas (summing metrics)...")
+                
+                # Metrics to sum
+                sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
+                            'failure_root', 'failure_retry', 'failure_queue_full', 
+                            'failure_deadline', 'failure_server', 'total_request', 'total_failure']
+                
+                # Filter to existing columns
+                agg_dict = {c: 'sum' for c in sum_cols if c in raw_df.columns}
+                
+                if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum'
+                if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
+                
+                # Perform Groupby
+                df = raw_df.groupby(['timepoint', 'base_client']).agg(agg_dict).reset_index()
+                
+                # Rename base_client back to client_id so the plotting function uses the group name
+                df.rename(columns={'base_client': 'client_id'}, inplace=True)
+                
+                print(f"  Merged {raw_df['client_id'].nunique()} clients into {df['client_id'].nunique()} groups: {df['client_id'].unique()}")
+            else:
+                df = raw_df # Keep all rows, let plot function handle grouping
         elif raw_df['timepoint'].duplicated().any():
             print("  Detected multiple entries per timepoint (unknown source). Aggregating...")
             
@@ -251,6 +275,20 @@ def main():
         else:
             df = raw_df
             print(f"✓ Loaded {len(df)} time buckets")
+
+        # Calculate Metric
+        if args.metric == 'success_rate':
+            # success_rate = success_root / (success_root + failure_root)
+            # We use summing of success/failure columns from aggregation
+            df['total_finished'] = df['success_root'] + df['failure_root']
+            df['calculated_metric'] = df.apply(
+                lambda row: (row['success_root'] / row['total_finished'] * 100.0) if row['total_finished'] > 0 else 0.0, 
+                axis=1
+            )
+            y_label = "Success Rate (%)"
+        else:
+            df['calculated_metric'] = df['success_root']
+            y_label = "Successful RPS"
             
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -332,7 +370,8 @@ def main():
                      legend_size=args.legend_size,
                      line_width=args.line_width,
                      no_legend_frame=args.no_legend_frame,
-                     figsize=figsize_tuple)
+                     figsize=figsize_tuple,
+                     y_label=y_label)
     
     return 0
 
