@@ -180,6 +180,18 @@ def run_workflow(yaml_file: str, output_base: str = "results",
                 str(output_dir), # Pass output dir as first arg
                 "-o", str(plots_dir)
              ]
+             
+             # Append configurable arguments from YAML
+             if config and config.plotting_script_args:
+                 print(f"  With args: {config.plotting_script_args}")
+                 for key, value in config.plotting_script_args.items():
+                     flag = f"--{key.replace('_', '-')}"
+                     if isinstance(value, bool):
+                         if value:
+                             cmd.append(flag)
+                     else:
+                         cmd.append(flag)
+                         cmd.append(str(value))
              try:
                 subprocess.run(cmd, check=True)
                 print(f"\n✓ Custom plots generated in {plots_dir}/")

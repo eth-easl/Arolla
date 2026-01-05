@@ -308,6 +308,7 @@ class ExperimentConfig(BaseModel):
     granularity_s: float = Field(default=1.0, gt=0, description="Metrics granularity in seconds")
     
     plotting_script: Optional[str] = Field(default=None, description="Path to custom plotting script")
+    plotting_script_args: Optional[dict] = Field(default=None, description="Arguments for the plotting script (key-value pairs)")
     sweeps: List[SweepConfig] = Field(default_factory=list, description="List of parameter sweeps")
     
     @field_validator('services')

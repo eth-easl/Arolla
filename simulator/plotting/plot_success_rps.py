@@ -57,6 +57,8 @@ def main():
                        help='JSON file with fault events (optional)')
     parser.add_argument('--time-range',
                        help='Time range to plot (e.g., "0-60")')
+    parser.add_argument('--smoothing-window', type=int, default=1,
+                       help='Window size for rolling average smoothing (default: 10, set 1 to disable)')
     parser.add_argument('--figsize', default='10,6',
                        help='Figure size as "width,height" (default: 10,6)')
     
@@ -115,6 +117,29 @@ def main():
         except ValueError:
             print(f"Error: Invalid time range: {args.time_range}")
             return 1
+
+    # Optional Smoothing
+    if args.smoothing_window > 1:
+        print(f"Applying smoothing (window={args.smoothing_window})...")
+        # Identify numeric columns to smooth
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        # Exclude structural columns
+        exclude = ['timepoint', 'rng_seed', 'replica_id']
+        cols_to_smooth = [c for c in numeric_cols if c not in exclude]
+        
+        try:
+            if 'client_id' in df.columns:
+                # Group by client to smooth safely without mixing data across boundaries
+                # usage of transform keeps index alignment
+                df[cols_to_smooth] = df.groupby('client_id')[cols_to_smooth].transform(
+                    lambda x: x.rolling(window=args.smoothing_window, min_periods=1).mean()
+                )
+            else:
+                df[cols_to_smooth] = df[cols_to_smooth].rolling(
+                    window=args.smoothing_window, min_periods=1
+                ).mean()
+        except Exception as e:
+            print(f"Warning: Smoothing failed: {e}")
 
     # Set figsize if needed
     try:

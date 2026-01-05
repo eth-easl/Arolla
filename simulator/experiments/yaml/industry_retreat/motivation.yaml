@@ -5,23 +5,80 @@ name: client_storm_test
 seed: 43232
 
 services:
+  - name: svc-no-retry
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 30
+        p_fail: 0.5
+  
   - name: svc-retry
     latency:
       median_ms: 60
       lognorm_sigma: 0.5
     workers: 16
     queue_capacity: 1000
-    # CRITICAL: Service-side timeout REMOVED to verify Client Active Timeout
-    # timeout:
-    #   attempt_ms: 192
-      
     partial_failures:
       - type: partial_failure
-        start_s: 30
-        end_s: 40
+        start_s: 20
+        end_s: 30
+        p_fail: 0.5
+  
+  - name: svc-exponential-backoff-jitter
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 30
         p_fail: 0.5
 
+  - name: svc-cb-target
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 30
+        p_fail: 0.5  
+
+  - name: svc-budget-target
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 30
+        p_fail: 0.5  
+
 clients:
+  - name: no-retry
+    target_service: svc-no-retry
+    retry:
+      type: fixed
+      max_attempts: 1
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 188
+      duration_s: 60
+      rng_seed: 1
+
   - name: retry
     target_service: svc-retry
     retry:
@@ -35,8 +92,58 @@ clients:
       duration_s: 60
       rng_seed: 1
 
+  - name: exponential-backoff-jitter
+    target_service: svc-exponential-backoff-jitter
+    retry: 
+      type: jittered
+      max_attempts: 4
+      initial_delay_ms: 100
+      max_delay_ms: 2000
+      jitter_mode: full
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 188
+      duration_s: 60
+      rng_seed: 1
+ 
+  - name: circuit_breaker
+    target_service: svc-cb-target
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 1000
+      min_requests: 20
+      half_open_delay_ms: 500
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 188
+      duration_s: 60
+      rng_seed: 1
+
+  - name: retry_budget
+    target_service: svc-budget-target
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
+    workload: 
+      base_rps: 188
+      duration_s: 60
+      rng_seed: 1
+
 # Output configuration
 output_csv: output.csv
 fault_events_json: fault_events.json
 granularity_s: 1.0
-# plotting_script: plotting/plot_success_rps.py
+plotting_script: plotting/plot_success_rps.py
+plotting_script_args:
+  smoothing_window: 1
