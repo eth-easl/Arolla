@@ -192,6 +192,13 @@ def run_workflow(yaml_file: str, output_base: str = "results",
                      else:
                          cmd.append(flag)
                          cmd.append(str(value))
+             
+             # Append fault events if file exists (Automatic highlighting)
+             fault_events_file = output_dir / "fault_events.json"
+             if fault_events_file.exists():
+                 cmd.append("--fault-events")
+                 cmd.append(str(fault_events_file))
+
              try:
                 subprocess.run(cmd, check=True)
                 print(f"\n✓ Custom plots generated in {plots_dir}/")
