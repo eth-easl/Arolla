@@ -78,13 +78,21 @@ class ServiceRuntime:
 
     dependency: Optional[ServiceRuntime] = None
     _middleware_chain: Optional[MiddlewareChain] = field(default=None, init=False, repr=False)
+    _rng: Optional[random.Random] = field(default=None, init=False, repr=False)
 
-    def bind(self):
+    def bind(self, seed: Optional[int] = None):
         self.in_flight = 0
         self.queue.clear()
         self._seq = 0
         # Build middleware chain once during initialization
         self._middleware_chain = self._build_middleware_chain()
+        
+        # Initialize isolated RNG
+        # Fallback to 0 if no seed provided (though loader should provide one)
+        initial_seed = seed if seed is not None else 0
+        import random
+        self._rng = random.Random(initial_seed)
+        
         return self
 
     def submit_request(
@@ -151,7 +159,9 @@ class ServiceRuntime:
         Lognormal with given median (exp(mu)) and sigma.
         If median=0, fall back to small constant.
         """
-        rng = sim.rng()
+        # ISO-FIX: Use PRIVATE isolated RNG, not global sim.rng()
+        rng = self._rng if self._rng else sim.rng()
+        
         median = max(1, self.cfg.latency_median)
         sigma = max(1e-6, self.cfg.latency_lognorm_sigma)
         mu = math.log(median)  # since median = exp(mu)
@@ -160,7 +170,9 @@ class ServiceRuntime:
         return max(MIN_SERVICE_TIME_NS, adj)
 
     def _fails_now(self, t: TimePoint, sim: Simulator) -> bool:
-        rng = sim.rng()
+        # ISO-FIX: Use PRIVATE isolated RNG, not global sim.rng()
+        rng = self._rng if self._rng else sim.rng()
+        
         p_fail = 0.0
         for pf in self.cfg.partial_failures:
             if pf.active(t):

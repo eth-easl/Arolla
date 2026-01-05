@@ -328,14 +328,19 @@ class ConfigLoader:
     def build_service(
         cfg: ServiceConfigYAML,
         sim: Simulator,
-        dependency: Optional[ServiceRuntime] = None
+        dependency: Optional[ServiceRuntime] = None,
+        seed: Optional[int] = None
     ) -> ServiceRuntime:
         """Build ServiceRuntime from configuration"""
         
+        # ISO-FIX: Create private RNG for policy construction using the same seed
+        initial_seed = seed if seed is not None else 0
+        svc_rng = random.Random(initial_seed)
+
         # Build policies
         # NOTE: Retry policy is technically Client-side in new schema, but for legacy support
         # and complex service chains, we allow Service-side retry if configured.
-        retry_policy = ConfigLoader.build_retry_policy(cfg.retry, sim.rng())
+        retry_policy = ConfigLoader.build_retry_policy(cfg.retry, svc_rng)
         timeout_policy = ConfigLoader.build_timeout_policy(cfg.timeout)
         load_limiter = ConfigLoader.build_load_limiter(
             cfg.circuit_breaker,
@@ -364,7 +369,7 @@ class ConfigLoader:
         )
         
         # Create service runtime
-        return ServiceRuntime(cfg=service_cfg, dependency=dependency).bind()
+        return ServiceRuntime(cfg=service_cfg, dependency=dependency).bind(seed=seed)
     
     @staticmethod
     def build_workload(cfg: WorkloadConfig) -> Workload:
@@ -402,10 +407,19 @@ class ConfigLoader:
         # Registry for shared budgets {id: Policy}
         shared_budgets: Dict[str, RetryBudgetPolicy] = {}
         
+        # Helper to generate stable seed
+        def get_stable_seed(base_seed: int, name: str) -> int:
+            import hashlib
+            # Use deterministic hash
+            h = hashlib.md5(f"{base_seed}:{name}".encode('utf-8')).hexdigest()
+            # Convert to int, mask to 32/64 bit
+            return int(h, 16) & 0xFFFFFFFF
+
         # First pass: build services without dependencies
         for svc_cfg in config.services:
             if svc_cfg.dependency is None:
-                services[svc_cfg.name] = ConfigLoader.build_service(svc_cfg, sim)
+                svc_seed = get_stable_seed(config.seed, svc_cfg.name)
+                services[svc_cfg.name] = ConfigLoader.build_service(svc_cfg, sim, seed=svc_seed)
         
         # Second pass: build services with dependencies
         for svc_cfg in config.services:
@@ -413,7 +427,9 @@ class ConfigLoader:
                 dependency = services.get(svc_cfg.dependency)
                 if dependency is None:
                     raise ValueError(f"Dependency {svc_cfg.dependency} not found for service {svc_cfg.name}")
-                services[svc_cfg.name] = ConfigLoader.build_service(svc_cfg, sim, dependency)
+                
+                svc_seed = get_stable_seed(config.seed, svc_cfg.name)
+                services[svc_cfg.name] = ConfigLoader.build_service(svc_cfg, sim, dependency, seed=svc_seed)
         
         # Register fault events
         for svc_name, svc_runtime in services.items():
@@ -439,7 +455,11 @@ class ConfigLoader:
                         client_name = f"{client_name}.{i}"
                         
                     # Create client
-                    c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, sim.rng())
+                    # ISO-FIX: Generate stable seed for client policy RNG
+                    client_seed = get_stable_seed(config.seed, client_name)
+                    client_rng = random.Random(client_seed)
+                    
+                    c_retry_policy = ConfigLoader.build_retry_policy(client_cfg_yaml.retry, client_rng)
                     
                     # Apply Client-Side Resilience Wrappers (Top-level)
                     if c_retry_policy is not None:
