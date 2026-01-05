@@ -140,20 +140,42 @@ Examples:
         if args.verbose:
             print(f"Exporting results...")
         
-        # Export metrics for each client
+        if args.verbose:
+            print(f"Exporting results...")
+        
+        # Merge metrics from all clients into a single DataFrame
+        import pandas as pd
+        
+        all_dfs = []
         for client in clients:
             metrics = client.metrics()
+            # Use to_dataframe (assuming granularity_s is supported or handled inside)
+            # Metrics.to_dataframe creates buckets. 
+            # We need to ensure granularity is passed if the method supports it, or use export logic.
+            # Checking Collector code previously: export_csv calls bucketing. 
+            # I should use the Logic from run_sweep.py which handled this manually or used a helper.
+            # Actually, let's look at how run_sweep did it. 
+            # It called metrics.to_dataframe(granularity_s).
             
-            # Determine client-specific CSV path
-            # Always match output_{client}.csv pattern for consistency
-            # This ensures plotting scripts (like reproduce_figures.py) can reliably parse client names
-            c_csv_path = csv_path.parent / f"{csv_path.stem}_{client.cfg.name}{csv_path.suffix}"
+            df = metrics.to_dataframe(granularity_s=config.granularity_s)
+            
+            # Add client identifier
+            # Use config name which includes replica suffix if applicable
+            df['client_id'] = client.cfg.name
+            
+            # Identify base name and replica id
+            # Name format: "client" or "client.0"
+            if '.' in client.cfg.name and client.cfg.name.split('.')[-1].isdigit():
+                parts = client.cfg.name.rsplit('.', 1)
+                df['client_name'] = parts[0]
+                df['replica_id'] = int(parts[1])
+            else:
+                df['client_name'] = client.cfg.name
+                df['replica_id'] = 0
                 
-            metrics.export_csv(str(c_csv_path), granularity_s=config.granularity_s)
+            all_dfs.append(df)
             
             if args.verbose:
-                print(f"  ✓ Exported {client.cfg.name} to {c_csv_path}")
-                
                 # Print summary for this client
                 summary = metrics.summary()
                 print(f"\nSummary for {client.cfg.name}:")
@@ -166,6 +188,19 @@ Examples:
                 print(f"  P50 latency: {summary.p50:.2f}ms")
                 print(f"  P99 latency: {summary.p99:.2f}ms")
                 print(f"  Retries per request: {summary.retries_per_root:.2f}")
+
+        if all_dfs:
+            final_df = pd.concat(all_dfs, ignore_index=True)
+            
+            # Ensure output csv path is strictly what user requested
+            # If user said "results/output.csv", we write to "results/output.csv"
+            # No suffixes.
+            final_df.to_csv(csv_path, index=False)
+            
+            if args.verbose:
+                print(f"  ✓ Exported combined metrics to {csv_path}")
+        else:
+            print("Warning: No metrics to export.")
 
         # Export fault events (global)
         if fault_json_path:

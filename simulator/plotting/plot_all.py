@@ -288,8 +288,42 @@ Examples:
     # Load data
     try:
         print(f"Loading data from {args.csv_file}...")
-        df = load_csv(args.csv_file)
-        print(f"✓ Loaded {len(df)} time buckets")
+        raw_df = load_csv(args.csv_file)
+        print(f"✓ Loaded {len(raw_df)} rows")
+        
+        # Aggregate by timepoint if multiple rows per timepoint (e.g. multiple clients)
+        # Check if 'client_id' or similar exists, or simply check duplicate timepoints
+        if raw_df['timepoint'].duplicated().any():
+            print("  Detected multiple entries per timepoint (multi-client). Aggregating...")
+            
+            # Define aggregation rules
+            # Sum counts
+            sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
+                        'failure_root', 'failure_retry', 'failure_queue_full', 
+                        'failure_deadline', 'failure_server', 'total_request', 'total_failure']
+            sum_cols = [c for c in sum_cols if c in raw_df.columns]
+            
+            # Mean for queue if it represents size/state
+            # Max for latencies (conservative) or Mean? 
+            # Usually we want either overall P99 (hard to exact from sub-p99s) or just visualize average P99.
+            # Let's take Mean for queue and Max for latencies to show worst case.
+            
+            agg_dict = {c: 'sum' for c in sum_cols}
+            
+            if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum' # Total queue size across all
+            if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
+            
+            latency_cols = ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']
+            for lc in latency_cols:
+                if lc in raw_df.columns:
+                    agg_dict[lc] = 'max' # Show worst client latency
+            
+            df = raw_df.groupby('timepoint').agg(agg_dict).reset_index()
+            print(f"✓ Aggregated to {len(df)} time buckets")
+        else:
+            df = raw_df
+            print(f"✓ Loaded {len(df)} time buckets")
+            
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         return 1

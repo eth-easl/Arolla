@@ -333,8 +333,9 @@ class ConfigLoader:
         """Build ServiceRuntime from configuration"""
         
         # Build policies
-        # NOTE: Retry policy is now Client-side. Service gets None.
-        retry_policy = None 
+        # NOTE: Retry policy is technically Client-side in new schema, but for legacy support
+        # and complex service chains, we allow Service-side retry if configured.
+        retry_policy = ConfigLoader.build_retry_policy(cfg.retry, sim.rng())
         timeout_policy = ConfigLoader.build_timeout_policy(cfg.timeout)
         load_limiter = ConfigLoader.build_load_limiter(
             cfg.circuit_breaker,
@@ -398,6 +399,9 @@ class ConfigLoader:
         # Build services (resolve dependencies)
         services: Dict[str, ServiceRuntime] = {}
         
+        # Registry for shared budgets {id: Policy}
+        shared_budgets: Dict[str, RetryBudgetPolicy] = {}
+        
         # First pass: build services without dependencies
         for svc_cfg in config.services:
             if svc_cfg.dependency is None:
@@ -453,11 +457,30 @@ class ConfigLoader:
                         
                         # 2. Retry Budget
                         if client_cfg_yaml.retry_budget is not None:
-                            c_retry_policy = RetryBudgetPolicy(
-                                inner=c_retry_policy,
-                                budget_ratio=client_cfg_yaml.retry_budget.budget_ratio,
-                                max_retries=client_cfg_yaml.retry_budget.max_retries
-                            )
+                            budget_cfg = client_cfg_yaml.retry_budget
+                            
+                            # Check for shared budget
+                            if budget_cfg.shared_budget_id:
+                                if budget_cfg.shared_budget_id in shared_budgets:
+                                    # Reuse existing policy instance
+                                    c_retry_policy = shared_budgets[budget_cfg.shared_budget_id]
+                                else:
+                                    # Create new and cache
+                                    new_budget = RetryBudgetPolicy(
+                                        inner=c_retry_policy,
+                                        budget_ratio=budget_cfg.budget_ratio,
+                                        max_retries=budget_cfg.max_retries
+                                    )
+                                    shared_budgets[budget_cfg.shared_budget_id] = new_budget
+                                    c_retry_policy = new_budget
+                            else:
+                                # Local budget (default)
+                                c_retry_policy = RetryBudgetPolicy(
+                                    inner=c_retry_policy,
+                                    budget_ratio=budget_cfg.budget_ratio,
+                                    max_retries=budget_cfg.max_retries
+                                )
+
                     c_timeout_policy = ConfigLoader.build_timeout_policy(client_cfg_yaml.timeout)
                     c_cfg = ClientConfig(name=client_name, retry=c_retry_policy, timeout=c_timeout_policy)
                     

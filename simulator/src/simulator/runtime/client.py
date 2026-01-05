@@ -85,15 +85,67 @@ class ClientRuntime:
         
         on_attempt_done = partial(self._on_attempt_done_from_service, ctx, sim)
         
-        # Pass no-op for on_root_done because WE manage the root lifecycle now.
-        # The Service calls on_root_done when IT thinks the request is finished (e.g. after 1 try).
-        on_root_done = lambda: None
+        # Determine who manages root lifecycle
+        if self.cfg.retry is None:
+            # Legacy/Simple Mode: We trust the Service to tell us when Root is done.
+            on_root_done = partial(self._on_root_done, ctx)
+        else:
+            # Modern Mode: Client manages retries.
+            on_root_done = lambda: None
         
+        # Schedule Local Timeout (Projected "Walking Away")
+        # If client has a timeout configured, we schedule an event to fire at deadline.
+        attempt_timeout = None
+        if self.cfg.timeout:
+            at = self.cfg.timeout.get_attempt_timeout()
+            if at:
+                attempt_timeout = sim.timestep + at
+        
+        # Use existing attempt_deadline logic on context if needed, but here we need a callback
+        # We store the "active attempt ID" matching logic by closure or state?
+        # Simpler: The `ctx` is per-attempt? No, `ctx` is per-Root.
+        # We need a per-attempt flag.
+        attempt_id = len(ctx.root.attempts)
+        
+        if attempt_timeout:
+             sim.schedule(
+                 attempt_timeout,
+                 partial(self._on_local_timeout, ctx, sim, attempt_id)
+             )
+
+        # Submit to service
         self.service.submit_request(
             sim,
             on_attempt_done=on_attempt_done,
             on_root_done=on_root_done,
             global_deadline=ctx.root.global_deadline,
+        )
+
+    def _on_local_timeout(self, ctx: AttemptCtx, sim: Simulator, attempt_id: int):
+        """Handler for client-side local timeout (active interrupt)"""
+        # If root is already done, or we've moved to a new attempt, ignore.
+        if ctx.root.done:
+            return
+        # How to check if THIS attempt is already done?
+        # `ctx.root.attempts` contains COMPLETED attempts.
+        # If len(attempts) <= attempt_id, it means we are still waiting for this attempt?
+        # Wait, attempt_id = len(attempts) at start.
+        if len(ctx.root.attempts) > attempt_id:
+            # Request already finished (success or service-error)
+            return
+            
+        # If we are here, the attempt is still in-flight at the service (Zombie).
+        # We fail it locally.
+        
+        # FAKE the callback parameters
+        self._on_attempt_done_from_service(
+            ctx, sim, 
+            success=False, 
+            svc_time=0, 
+            drop_reason=DropReason.DEADLINE, 
+            queue_size=-1, 
+            begin_time=sim.timestep, # Approximate
+            attempt_deadline=sim.timestep # Now
         )
 
     def _on_attempt_done_from_service(
@@ -107,8 +159,24 @@ class ClientRuntime:
         begin_time: TimePoint,
         attempt_deadline: Optional[TimePoint],
     ):
+        # ACTIVE TIMEOUT CHECK
+        # If the root is already broken/done (by local timeout), we ignore this late response.
+        # UNLESS we are in Legacy Mode where Service drives.
         if ctx.root.done:
-            raise RuntimeError("Root request was already done!")
+            # Late arrival (Zombie response)
+            return
+
+        # Check if we moved past this attempt? 
+        # AttemptCtx is shared.
+        
+        # Logic proceeds...
+        if ctx.root.done:
+            # If we are in Legacy Mode, the Service might call on_root_done BEFORE on_attempt_done
+            # (though normally it's the other way around).
+            # Or if multiple callbacks fire. We log/ignore to be safe, or raise if strictly impossible.
+            # For now, let's allow it but warn/return to avoid corruption.
+            return 
+            # raise RuntimeError("Root request was already done!")
 
         self.attempts_total += 1
         req = Request(
@@ -127,13 +195,12 @@ class ClientRuntime:
         request_latency = req.interval.end - req.interval.begin
         if self.service.cfg.timeout is not None:
             self.service.cfg.timeout.record_result(success, request_latency)
-            self.service.cfg.timeout.record_result(success, request_latency)
 
         # --------------------------------------------------------------------
         # Client-Side Retry Logic
         # --------------------------------------------------------------------
         
-        # If success, we are done
+        # If success, we are done (unless we want to verify something?)
         if success:
             if self.cfg.retry:
                 retry_ctx = RetryContext(
@@ -141,14 +208,19 @@ class ClientRuntime:
                     now=sim.timestep
                 )
                 self.cfg.retry.record_attempt(retry_ctx, True)
-            
-            self._on_root_done(ctx)
+                self._on_root_done(ctx)
+            else:
+                # Legacy Mode: If success, we just wait for on_root_done from Service.
+                # Do NOT call self._on_root_done(ctx) here.
+                pass
             return
             
         # If failure, check policy
         if self.cfg.retry is None:
-            # No retry policy -> Fail immediately
-            self._on_root_done(ctx)
+            # No retry policy -> Legacy Mode.
+            # We fail/retry based entirely on Service's logic.
+            # So we do NOTHING here. If Service is done, it calls on_root_done.
+            # If Service retries, it calls nothing yet.
             return
 
         # Prepare context for policy
