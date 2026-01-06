@@ -16,6 +16,15 @@ from plotting.core import load_csv, get_time_range
 from plotting.core.style import add_fault_events
 import matplotlib.pyplot as plt
 
+# Default color mapping (matching plot_success_rps.py)
+CLIENT_COLORS = {
+    'no_retries': 'grey',
+    'three_retries': 'cornflowerblue',
+    'exponential_backoff_jitter': 'green',
+    'circuit_breaker': 'purple',
+    'retry_budget': 'orange'
+}
+
 
 def plot_latency(df, output_dir, fault_events=None, **kwargs):
     """Plot latency percentiles over time."""
@@ -166,7 +175,7 @@ def plot_success_rate(df, output_dir, fault_events=None, **kwargs):
         print("⚠ Skipping success rate plot: required columns not found")
         return
     
-    setup_plot("Success Rate over Time", "Time (s)", "Success Rate (%)")
+    setup_plot("", "Time (s)", "Success Rate (%)")
     
     t = df['timepoint']
     lw = kwargs.get('line_width', 2.0)
@@ -183,6 +192,68 @@ def plot_success_rate(df, output_dir, fault_events=None, **kwargs):
     plt.legend(**legend_kwargs)
     fmt = kwargs.get('format', 'png')
     save_plot(output_dir / f'success_rate.{fmt}')
+    plt.close()
+
+
+def plot_success_rate_comparison(df, output_dir, fault_events=None, **kwargs):
+    """Plot success rate comparison for multiple clients on one chart."""
+    from plotting.core import setup_plot, save_plot
+    
+    # Check key columns
+    if 'base_client' not in df.columns:
+        return
+
+    setup_plot("", "Time (s)", "Success Rate (%)")
+    
+    clients = sorted(df['base_client'].unique())
+
+    # Apply custom sort order if provided
+    legend_order = kwargs.get('legend_order')
+    if legend_order:
+        priority_list = [c.strip() for c in legend_order.split(',')]
+        def sort_key(name):
+            try:
+                return (0, priority_list.index(name))
+            except ValueError:
+                return (1, name)
+        clients = sorted(clients, key=sort_key)
+        
+    lw = kwargs.get('line_width', 2.0)
+    
+    for client in clients:
+        subset = df[df['base_client'] == client].sort_values('timepoint')
+        t = subset['timepoint']
+        
+        # Calculate success rate for this client
+        # success_rate = success_root / (root_requests) * 100? or (success + failure)?
+        # Using (success + failure) is safer for strict "processed" rate
+        processed = subset['success_root'] + subset['failure_root']
+        rate = (subset['success_root'] / processed.replace(0, 1)) * 100
+        rate = rate.fillna(0.0)
+        
+        # Determine color
+        color = CLIENT_COLORS.get(client, None)
+        
+        # Determine label
+        label = client
+        if 'legend_labels' in kwargs and kwargs['legend_labels']:
+            labels_map = kwargs['legend_labels']
+            if client in labels_map:
+                label = labels_map[client]
+        
+        plt.plot(t, rate, label=label, linewidth=lw, color=color)
+
+    plt.ylim(0, 105)
+    add_fault_events(fault_events)
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'success_rate_comparison.{fmt}')
     plt.close()
 
 
@@ -362,6 +433,10 @@ Examples:
                        help='Legend text size')
     parser.add_argument('--no-legend-frame', action='store_true',
                        help='Remove legend frame')
+    parser.add_argument('--legend-order',
+                       help='Comma-separated list of client names to order legend')
+    parser.add_argument('--legend-labels',
+                       help='Mapping of client names to labels (e.g. "client_a=Label A,client_b=Label B")')
     
     args = parser.parse_args()
     
@@ -441,8 +516,21 @@ Examples:
         'legend_loc': args.legend_loc,
         'legend_size': args.legend_size,
         'no_legend_frame': args.no_legend_frame,
-        'format': args.format
+        'format': args.format,
+        'legend_order': args.legend_order
     }
+    
+    if args.legend_labels:
+        try:
+            # Parse "k=v,k2=v2"
+            label_map = {}
+            for pair in args.legend_labels.split(','):
+                if '=' in pair:
+                    k, v = pair.split('=', 1)
+                    label_map[k.strip()] = v.strip()
+            style_kwargs['legend_labels'] = label_map
+        except Exception as e:
+            print(f"Warning: Failed to parse legend_labels: {e}")
     
     if args.legend_bbox:
         try:
@@ -506,7 +594,13 @@ Examples:
     print(f"\nGenerating plots in {output_dir}/...")
 
     # 3. Generate Global Plots
+    print("  Generating Global/Compound plots...")
     generate_plot_set(df_global, output_dir, "Global")
+    
+    # New: Comparative Success Rate
+    if 'base_client' in df_by_client.columns:
+        print("  Generating Success Rate Comparison...")
+        plot_success_rate_comparison(df_by_client, output_dir, args.fault_events, **style_kwargs)
 
     # 4. Generate Per-Client Plots
     for client in clients:

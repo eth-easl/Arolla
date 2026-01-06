@@ -140,7 +140,7 @@ plotting_script_args:
   line_width: 3.0
   no_legend_frame: true
   legend_size: 18
-  figsize: "14,6"
+  figsize: "12,6"
   legend_loc: "center left"
   legend_bbox: "1.02, 0.5"
   legend_order: "no_retries,three_retries,exponential_backoff_jitter,circuit_breaker,retry_budget"
