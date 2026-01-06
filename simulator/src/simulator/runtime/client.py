@@ -119,6 +119,7 @@ class ClientRuntime:
             on_attempt_done=on_attempt_done,
             on_root_done=on_root_done,
             global_deadline=ctx.root.global_deadline,
+            is_retry=is_retry,
         )
 
     def _on_local_timeout(self, ctx: AttemptCtx, sim: Simulator, attempt_id: int):

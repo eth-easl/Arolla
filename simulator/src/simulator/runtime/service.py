@@ -16,7 +16,12 @@ from simulator.policies.timeout import Timeout
 
 from simulator.middleware.base import AttemptContext, MiddlewareChain
 from simulator.middleware.retry import RetryMiddleware, NoRetryMiddleware
+from simulator.middleware.base import AttemptContext, MiddlewareChain
+from simulator.middleware.retry import RetryMiddleware, NoRetryMiddleware
 from simulator.middleware.load_limiter import LoadLimiterMiddleware
+from simulator.policies.aimd_retry_budget import AIMDGlobalRetryBudget
+from simulator.policies.retry import RetryBudgetPolicy
+from simulator.policies.server_retry_budget import GlobalRetryBudget
 
 
 @dataclass(frozen=True)
@@ -103,7 +108,35 @@ class ServiceRuntime:
         ],
         on_root_done: Callable[[], None],
         global_deadline: Optional[TimePoint] = None,
+        is_retry: bool = False,
     ):
+        # Admission Control: Check Load Limiters (Server-Side Shedding)
+        if self.cfg.load_limiter is not None:
+            should_check = False
+            # Check if limiter applies to this request
+            if is_retry:
+                # Retry budgets always check retries
+                if isinstance(self.cfg.load_limiter, (AIMDGlobalRetryBudget, GlobalRetryBudget, RetryBudgetPolicy)):
+                    should_check = True
+            
+            # Rate limiters check EVERYTHING (not just retries) - assuming generic RateLimiter logic if needed
+            # For now, we only focus on the requested AIMD/Budget behavior.
+            
+            if should_check:
+                # Create context for check (attempt 1 is fine as placeholder, budget policies ignore it usually)
+                check_ctx = RetryContext(attempt=1, now=sim.timestep)
+                allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
+                
+                if not allowed:
+                    # Reject admission
+                    on_attempt_done(
+                        False, 0, DropReason.SERVER_FAILURE, len(self.queue), sim.timestep, None
+                    )
+                    # We treat this as a quick failure. 
+                    # Note: We do NOT call on_root_done here because the caller (Client or Upstream) 
+                    # expects on_attempt_done to fire, and THEY handle root completion or retries.
+                    return
+
         ctx = _SrvRetryCtx(
             attempt=0,
             global_deadline=global_deadline,
@@ -143,7 +176,9 @@ class ServiceRuntime:
         on_done = partial(
             self._on_single_attempt_done, sim, ctx, begin_time, attempt_deadline
         )
-        self.submit_attempt(sim, on_done, attempt_deadline=attempt_deadline)
+        # Verify if this internal attempt is a retry (attempt > 1)
+        is_retry = ctx.attempt > 1
+        self.submit_attempt(sim, on_done, attempt_deadline=attempt_deadline, is_retry=is_retry)
 
     def _adjust_latency(self, t: TimePoint, base: TimeDuration) -> TimeDuration:
         mult: int = 1
@@ -191,6 +226,7 @@ class ServiceRuntime:
             [bool, TimeDuration, DropReason, int], None
         ],  # success, service_time, whydropped, queue_size
         attempt_deadline: Optional[TimePoint] = None,
+        is_retry: bool = False,
     ):
         """
         Enqueue an attempt for this service.
@@ -205,7 +241,7 @@ class ServiceRuntime:
             on_done(False, 0, DropReason.DEADLINE, len(self.queue))
             raise Exception("Attempt already expired at submission time")
 
-        start_cb = partial(self._begin_service, sim, on_done, attempt_deadline)
+        start_cb = partial(self._begin_service, sim, on_done, attempt_deadline, is_retry)
 
         if self.in_flight < self.cfg.workers:
             start_cb()  # Immediately start handling if we have free worker
@@ -229,12 +265,13 @@ class ServiceRuntime:
             ),
         )
 
-    # begin_service can be called either immediately or after the request was dequeued
+    # begin_service can be called either immediately or pass request
     def _begin_service(
         self,
         sim: Simulator,
         on_done: Callable[[bool, TimeDuration, DropReason, int], None],
         attempt_deadline: Optional[TimePoint],
+        is_retry: bool,
     ):
         # If the attempt expired while waiting in the queue, drop immediately without
         # consuming a worker. We make sure we are not scheduling an event in the past.
@@ -277,6 +314,7 @@ class ServiceRuntime:
                 on_attempt_done=downstream_done,
                 on_root_done=lambda: None,
                 global_deadline=attempt_deadline,
+                is_retry=is_retry,
             )
             return
 
