@@ -1,0 +1,78 @@
+name: scale_clients
+seed: 42
+
+services:
+  - name: server-cb
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.2
+    workers: 150  # 15k RPS capacity > 10k Load
+    queue_capacity: 5000
+    partial_failures:
+      - start_s: 20
+        end_s: 40
+        # Sweep probability of failure (Anchor for lockstep)
+        p_fail: 1
+
+  - name: server-rb
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.2
+    workers: 150
+    queue_capacity: 5000
+    partial_failures:
+      - start_s: 20
+        end_s: 40
+        p_fail: 1
+
+
+# Clients
+# We want to sweep the number of replicas for BOTH clients in lockstep.
+clients:
+  - name: circuit-breaker
+    # Inline sweep with anchor
+    replicas: 1000
+    workload:
+      base_rps: 10 # 10 RPS per client * N clients
+      duration_s: 60
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 2000
+      min_requests: 10
+      half_open_delay_ms: 500
+    target_service: server-cb
+
+  - name: retry-budget
+    replicas: 1000
+    workload:
+      base_rps: 10
+      duration_s: 60
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 10
+    target_service: server-rb
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+plotting_script: plotting/plot_success_rps.py
+plotting_script_args:
+  smoothing_window: 3
+  font_size: 24
+  tick_size: 22
+  line_width: 3.0
+  no_legend_frame: true
+  legend_size: 18
+  figsize: "14,6"
+  legend_loc: "center left"
+  legend_bbox: "1.02, 0.5"
+  legend_order: "circuit-breaker,retry-budget"
