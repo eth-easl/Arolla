@@ -17,15 +17,15 @@ services:
         end_s: 40
         p_fail: 0.5
     
-    aimd_global_retry_budget:
-      min_rps: 5
-      max_rps: 100
-      initial_rps: 40
-      max_burst: 10
-      additive_step: 5       # Add 5 RPS per second if healthy
-      decrease_factor: 0.5   # Cut by 50% if >10% failure
-      window_ms: 1000        # Update every 1s
-      failure_threshold: 0.1
+    # aimd_global_retry_budget:
+    #   min_rps: 5
+    #   max_rps: 100
+    #   initial_rps: 40
+    #   max_burst: 10
+    #   additive_step: 5       # Add 5 RPS per second if healthy
+    #   decrease_factor: 0.5   # Cut by 50% if >10% failure
+    #   window_ms: 1000        # Update every 1s
+    #   failure_threshold: 0.1
 
 
 clients:

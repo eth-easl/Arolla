@@ -37,7 +37,7 @@ def plot_success_rps(df, output_path, fault_events=None, line_color=None,
     if figsize:
         kwargs['figsize'] = figsize
         
-    fig = setup_plot("", "Time (s)", kwargs.get('y_label', "Successful RPS"), **kwargs)
+    fig = setup_plot("", "Time (s)", y_label, **kwargs)
     
     # ... (skipping frame styling for brevity in match, but included in file) ...
     # Re-fetch ax in case setup_plot changed it
