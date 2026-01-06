@@ -1,0 +1,37 @@
+name: diversity_N200_M1
+seed: 42
+services:
+- name: service
+  latency:
+    median_ms: 60
+    lognorm_sigma: 0.5
+  workers: 1600
+  queue_capacity: 20000
+  timeout:
+    attempt_ms: 192
+  partial_failures:
+  - type: partial_failure
+    start_s: 30
+    end_s: 40
+    p_fail: 0.5
+clients:
+- name: group_0
+  replicas: 200
+  target_service: service
+  workload:
+    base_rps: 188
+    duration_s: 100
+    rng_seed: 123
+  retry:
+    type: jittered
+    max_attempts: 4
+    initial_delay_ms: 13
+    max_delay_ms: 1063
+    jitter_mode: full
+  retry_budget:
+    budget_ratio: 0.08673377807052143
+    max_retries: 18
+    shared_budget_id: global_budget
+output_csv: output.csv
+granularity_s: 1.0
+fault_events_json: faults.json

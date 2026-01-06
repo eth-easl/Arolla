@@ -111,8 +111,9 @@ class RateLimiterConfig(BaseModel):
 
 class RetryBudgetConfig(BaseModel):
     """Configuration for local/legacy retry budget"""
-    budget_ratio: float = Field(ge=0, le=1, description="Retry budget as ratio of successes (e.g., 0.1 = 10%)")
+    budget_ratio: float = Field(ge=0, description="Retry budget as ratio of successes (e.g., 0.1 = 10%)")
     max_retries: int = Field(ge=1, description="Maximum consecutive retries")
+    shared_budget_id: Optional[str] = Field(default=None, description="ID for sharing budget across multiple clients")
 
 
 class GlobalRetryBudgetConfig(BaseModel):
@@ -205,7 +206,7 @@ class ServiceConfigYAML(BaseModel):
     queue_capacity: Optional[int] = Field(default=None, ge=0, description="Queue capacity (None = unbounded)")
     
     # Policies
-    # retry: Optional[RetryConfig] = None # MOVED TO CLIENT
+    retry: Optional[RetryConfig] = None # RESTORED FOR LEGACY SUPPORT
     timeout: Optional[TimeoutConfig] = None
     circuit_breaker: Optional[CircuitBreakerConfig] = None
     rate_limiter: Optional[RateLimiterConfig] = None
@@ -307,6 +308,7 @@ class ExperimentConfig(BaseModel):
     granularity_s: float = Field(default=1.0, gt=0, description="Metrics granularity in seconds")
     
     plotting_script: Optional[str] = Field(default=None, description="Path to custom plotting script")
+    plotting_script_args: Optional[dict] = Field(default=None, description="Arguments for the plotting script (key-value pairs)")
     sweeps: List[SweepConfig] = Field(default_factory=list, description="List of parameter sweeps")
     
     @field_validator('services')

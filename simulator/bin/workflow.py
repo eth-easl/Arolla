@@ -24,7 +24,8 @@ from simulator.config.loader import ConfigLoader
 
 def run_workflow(yaml_file: str, output_base: str = "results", 
                  verbose: bool = False, plot: bool = True,
-                 time_range: str = None, plotting_script: str = None):
+                 time_range: str = None, plotting_script: str = None,
+                 use_timestamp_subdir: bool = True):
     """
     Run complete experiment workflow.
     
@@ -34,6 +35,8 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         verbose: Enable verbose output
         plot: Generate plots after simulation
         time_range: Optional time range for plots (e.g., "0-60")
+        use_timestamp_subdir: If True, create scenario_timestamp subdir. 
+                              If False, create scenario subdir directly in output_base.
     
     Returns:
         0 on success, 1 on failure
@@ -49,14 +52,16 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     # Extract scenario name from YAML filename (without .yaml extension)
     scenario_name = yaml_path.stem
     
-    # Create timestamped output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(output_base) / f"{scenario_name}_{timestamp}"
+    # Determine output directory
+    if use_timestamp_subdir:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(output_base) / f"{scenario_name}_{timestamp}"
+    else:
+        output_dir = Path(output_base) / scenario_name
+        
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Archive config file
-    shutil.copy(yaml_path, output_dir / yaml_path.name)
-    
     shutil.copy(yaml_path, output_dir / yaml_path.name)
     
     plots_dir = output_dir / "plots"
@@ -160,11 +165,14 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         if config and config.plotting_script:
              custom_script = config.plotting_script
         
-        # CLI override
         if plotting_script:
              custom_script = plotting_script
              
         if custom_script:
+             # Check if script exists, fallback to plotting/ dir
+             if not Path(custom_script).exists() and (Path("plotting") / custom_script).exists():
+                 custom_script = str(Path("plotting") / custom_script)
+                 
              print(f"Detected custom plotting script: {custom_script}")
              cmd = [
                 sys.executable,
@@ -172,6 +180,25 @@ def run_workflow(yaml_file: str, output_base: str = "results",
                 str(output_dir), # Pass output dir as first arg
                 "-o", str(plots_dir)
              ]
+             
+             # Append configurable arguments from YAML
+             if config and config.plotting_script_args:
+                 print(f"  With args: {config.plotting_script_args}")
+                 for key, value in config.plotting_script_args.items():
+                     flag = f"--{key.replace('_', '-')}"
+                     if isinstance(value, bool):
+                         if value:
+                             cmd.append(flag)
+                     else:
+                         cmd.append(flag)
+                         cmd.append(str(value))
+             
+             # Append fault events if file exists (Automatic highlighting)
+             fault_events_file = output_dir / "fault_events.json"
+             if fault_events_file.exists():
+                 cmd.append("--fault-events")
+                 cmd.append(str(fault_events_file))
+
              try:
                 subprocess.run(cmd, check=True)
                 print(f"\n✓ Custom plots generated in {plots_dir}/")
@@ -281,41 +308,70 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     return 0
 
 
+def run_batch(directory: str, max_workers: int = 4, output_base: str = "results", **kwargs):
+    """Run workflow for all YAMLs in directory."""
+    dir_path = Path(directory)
+    yamls = sorted(list(dir_path.glob("*.yaml")))
+    
+    if not yamls:
+        print(f"No YAML files found in {directory}")
+        return 0
+        
+    # Create unified batch output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dir_name = dir_path.name # e.g., "diversity"
+    batch_output_dir = Path(output_base) / f"{dir_name}_{timestamp}"
+    batch_output_dir.mkdir(parents=True, exist_ok=True)
+        
+    print(f"Found {len(yamls)} config files in {directory}")
+    print(f"Batch Output Directory: {batch_output_dir}")
+    print(f"Running with {max_workers} concurrent workers...")
+    
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    failed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Pass use_timestamp_subdir=False so run_workflow writes directly to batch_output_dir/scenario_name
+        futures = {
+            executor.submit(run_workflow, str(y), output_base=str(batch_output_dir), 
+                            use_timestamp_subdir=False, **kwargs): y.name 
+            for y in yamls
+        }
+        
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                if future.result() != 0:
+                    print(f"❌ {name} failed")
+                    failed += 1
+                else:
+                    print(f"✓ {name} completed")
+            except Exception as e:
+                print(f"❌ {name} raised exception: {e}")
+                failed += 1
+                
+    return failed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Run experiment workflow: simulation + plotting',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Run default experiment with plots
+  # Run batch of experiments
+  python bin/workflow.py experiments/yaml/diversity/
+  
+  # Run single file
   python bin/workflow.py experiments/yaml/default.yaml
   
   # Custom output location
   python bin/workflow.py experiments/yaml/default.yaml -o my_results/
-  
-  # Skip plotting
-  python bin/workflow.py experiments/yaml/default.yaml --no-plot
-  
-  # Plot specific time range
-  python bin/workflow.py experiments/yaml/default.yaml --time-range 0-60
-  
-  # Verbose output
-  python bin/workflow.py experiments/yaml/default.yaml --verbose
-
-Output Structure:
-  results/
-  └── {scenario}_{timestamp}/
-      ├── output.csv          # Simulation data
-      └── plots/              # Visualizations
-          ├── latency.png
-          ├── qps.png
-          ├── failures.png
-          └── success_rate.png
         '''
     )
     
-    parser.add_argument('yaml_file', 
-                       help='YAML experiment configuration file')
+    parser.add_argument('input', 
+                       help='YAML file or Directory containing YAMLs')
     parser.add_argument('-o', '--output', default='results',
                        help='Base output directory (default: results/)')
     parser.add_argument('--verbose', action='store_true',
@@ -326,17 +382,32 @@ Output Structure:
                        help='Time range for plots (e.g., "0-60")')
     parser.add_argument('--plotting-script',
                        help='Path to custom plotting script (overrides YAML)')
+    parser.add_argument('--workers', type=int, default=4,
+                       help='Number of parallel workers for batch mode')
     
     args = parser.parse_args()
     
-    return run_workflow(
-        args.yaml_file,
-        output_base=args.output,
-        verbose=args.verbose,
-        plot=not args.no_plot,
-        time_range=args.time_range,
-        plotting_script=args.plotting_script
-    )
+    input_path = Path(args.input)
+    
+    if input_path.is_dir():
+        return run_batch(
+            str(input_path),
+            max_workers=args.workers,
+            output_base=args.output,
+            verbose=args.verbose,
+            plot=not args.no_plot,
+            time_range=args.time_range,
+            plotting_script=args.plotting_script
+        )
+    else:
+        return run_workflow(
+            str(input_path),
+            output_base=args.output,
+            verbose=args.verbose,
+            plot=not args.no_plot,
+            time_range=args.time_range,
+            plotting_script=args.plotting_script
+        )
 
 
 if __name__ == '__main__':

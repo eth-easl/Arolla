@@ -161,6 +161,7 @@ def run_simulation_instance(config: ExperimentConfig, output_dir: Path, verbose:
                         "client_name": base_name, # Use base name for grouping
                         "replica_id": rid,
                         "total_requests": summary.total,
+                        "total_attempts": summary.attempts_total,
                         "success_rate": (summary.succeeded / summary.total) if summary.total > 0 else 0.0,
                         "mean_latency_ms": summary.mean,
                         "p50_latency_ms": summary.p50,
@@ -184,6 +185,7 @@ def run_simulation_instance(config: ExperimentConfig, output_dir: Path, verbose:
                     "client_name": base_name,
                     "replica_id": rid,
                     "total_requests": summary.total,
+                    "total_attempts": summary.attempts_total,
                     "success_rate": (summary.succeeded / summary.total) if summary.total > 0 else 0.0,
                     "mean_latency_ms": summary.mean,
                     "p50_latency_ms": summary.p50,

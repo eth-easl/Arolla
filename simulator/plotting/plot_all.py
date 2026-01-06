@@ -16,52 +16,81 @@ from plotting.core import load_csv, get_time_range
 from plotting.core.style import add_fault_events
 import matplotlib.pyplot as plt
 
+# Default color mapping (matching plot_success_rps.py)
+CLIENT_COLORS = {
+    'no_retries': 'grey',
+    'three_retries': 'cornflowerblue',
+    'exponential_backoff_jitter': 'green',
+    'circuit_breaker': 'purple',
+    'retry_budget': 'orange'
+}
 
-def plot_latency(df, output_dir, fault_events=None):
+
+def plot_latency(df, output_dir, fault_events=None, **kwargs):
     """Plot latency percentiles over time."""
     from plotting.core import setup_plot, save_plot
     
     setup_plot("Latency over Time", "Time (s)", "Latency (ms)")
     
     t = df['timepoint']
+    lw = kwargs.get('line_width', 2.0)
+    
     if 'p50' in df.columns:
-        plt.plot(t, df['p50'], label='P50', linewidth=2)
+        plt.plot(t, df['p50'], label='P50', linewidth=lw)
     if 'p90' in df.columns:
-        plt.plot(t, df['p90'], label='P90', linewidth=2)
+        plt.plot(t, df['p90'], label='P90', linewidth=lw)
     if 'p95' in df.columns:
-        plt.plot(t, df['p95'], label='P95', linewidth=2)
+        plt.plot(t, df['p95'], label='P95', linewidth=lw)
     if 'p99' in df.columns:
-        plt.plot(t, df['p99'], label='P99', linewidth=2)
+        plt.plot(t, df['p99'], label='P99', linewidth=lw)
     if 'Max' in df.columns:
-        plt.plot(t, df['Max'], label='Max', linewidth=1, alpha=0.7)
+        plt.plot(t, df['Max'], label='Max', linewidth=max(1.0, lw*0.5), alpha=0.7)
     
     add_fault_events(fault_events)
-    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
-    save_plot(output_dir / 'latency.png')
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'latency.{fmt}')
     plt.close()
 
 
-def plot_qps(df, output_dir, fault_events=None):
+def plot_qps(df, output_dir, fault_events=None, **kwargs):
     """Plot QPS (requests, retries, failures) over time."""
     from plotting.core import setup_plot, save_plot
     
-    setup_plot("QPS over Time", "Time (s)", "Requests per Second")
+    setup_plot("", "Time (s)", "Requests per Second")
     
     t = df['timepoint']
+    lw = kwargs.get('line_width', 2.0)
+    
     if 'root_requests' in df.columns:
-        plt.plot(t, df['root_requests'], label='Root Requests', linewidth=2)
+        plt.plot(t, df['root_requests'], label='Root Requests', linewidth=lw, color='gray')
     if 'retries' in df.columns:
-        plt.plot(t, df['retries'], label='Retries', linewidth=2)
+        plt.plot(t, df['retries'], label='Retries', linewidth=lw, color='orange')
     if 'failure_root' in df.columns:
-        plt.plot(t, df['failure_root'], label='Failures', linewidth=2)
+        plt.plot(t, df['failure_root'], label='Failures', linewidth=lw, color='red')
+    
     
     add_fault_events(fault_events)
-    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
-    save_plot(output_dir / 'qps.png')
+    
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+                     
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'qps.{fmt}')
     plt.close()
 
 
-def plot_queue(df, output_dir, fault_events=None):
+def plot_queue(df, output_dir, fault_events=None, **kwargs):
     """Plot queue size over time."""
     from plotting.core import setup_plot, save_plot
     
@@ -79,15 +108,24 @@ def plot_queue(df, output_dir, fault_events=None):
     setup_plot("Queue Size over Time", "Time (s)", "Average Queue Size")
     
     t = df['timepoint']
-    plt.plot(t, df[queue_col], label='Queue Size', linewidth=2)
+    lw = kwargs.get('line_width', 2.0)
+    plt.plot(t, df[queue_col], label='Queue Size', linewidth=lw)
     
     add_fault_events(fault_events)
-    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
-    save_plot(output_dir / 'queue.png')
+    
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'queue.{fmt}')
     plt.close()
 
 
-def plot_failures(df, output_dir, fault_events=None):
+def plot_failures(df, output_dir, fault_events=None, **kwargs):
     """Plot failure breakdown over time."""
     from plotting.core import setup_plot, save_plot
     
@@ -95,15 +133,16 @@ def plot_failures(df, output_dir, fault_events=None):
     
     t = df['timepoint']
     plotted = False
+    lw = kwargs.get('line_width', 2.0)
     
     if 'failure_queue' in df.columns:
-        plt.plot(t, df['failure_queue'], label='Queue Full', linewidth=2)
+        plt.plot(t, df['failure_queue'], label='Queue Full', linewidth=lw)
         plotted = True
     if 'failure_deadline' in df.columns:
-        plt.plot(t, df['failure_deadline'], label='Deadline', linewidth=2)
+        plt.plot(t, df['failure_deadline'], label='Deadline', linewidth=lw)
         plotted = True
     if 'failure_server' in df.columns:
-        plt.plot(t, df['failure_server'], label='Server Failure', linewidth=2)
+        plt.plot(t, df['failure_server'], label='Server Failure', linewidth=lw)
         plotted = True
     
     if not plotted:
@@ -112,12 +151,22 @@ def plot_failures(df, output_dir, fault_events=None):
         return
     
     add_fault_events(fault_events)
-    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
-    save_plot(output_dir / 'failures.png')
+    
+    
+    # helper for legend
+    # helper for legend
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'failures.{fmt}')
     plt.close()
 
 
-def plot_success_rate(df, output_dir, fault_events=None):
+def plot_success_rate(df, output_dir, fault_events=None, **kwargs):
     """Plot success rate over time."""
     from plotting.core import setup_plot, save_plot, calculate_success_rate
     
@@ -126,19 +175,89 @@ def plot_success_rate(df, output_dir, fault_events=None):
         print("⚠ Skipping success rate plot: required columns not found")
         return
     
-    setup_plot("Success Rate over Time", "Time (s)", "Success Rate (%)")
+    setup_plot("", "Time (s)", "Success Rate (%)")
     
     t = df['timepoint']
-    plt.plot(t, success_rate, label='Success Rate', linewidth=2, color='green')
+    lw = kwargs.get('line_width', 2.0)
+    plt.plot(t, success_rate, label='Success Rate', linewidth=lw, color='green')
     plt.ylim(0, 105)  # 0-100% with some headroom
     
     add_fault_events(fault_events)
-    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
-    save_plot(output_dir / 'success_rate.png')
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'success_rate.{fmt}')
     plt.close()
 
 
-def plot_failure_breakdown(df, output_dir, fault_events=None):
+def plot_success_rate_comparison(df, output_dir, fault_events=None, **kwargs):
+    """Plot success rate comparison for multiple clients on one chart."""
+    from plotting.core import setup_plot, save_plot
+    
+    # Check key columns
+    if 'base_client' not in df.columns:
+        return
+
+    setup_plot("", "Time (s)", "Success Rate (%)")
+    
+    clients = sorted(df['base_client'].unique())
+
+    # Apply custom sort order if provided
+    legend_order = kwargs.get('legend_order')
+    if legend_order:
+        priority_list = [c.strip() for c in legend_order.split(',')]
+        def sort_key(name):
+            try:
+                return (0, priority_list.index(name))
+            except ValueError:
+                return (1, name)
+        clients = sorted(clients, key=sort_key)
+        
+    lw = kwargs.get('line_width', 2.0)
+    
+    for client in clients:
+        subset = df[df['base_client'] == client].sort_values('timepoint')
+        t = subset['timepoint']
+        
+        # Calculate success rate for this client
+        # success_rate = success_root / (root_requests) * 100? or (success + failure)?
+        # Using (success + failure) is safer for strict "processed" rate
+        processed = subset['success_root'] + subset['failure_root']
+        rate = (subset['success_root'] / processed.replace(0, 1)) * 100
+        rate = rate.fillna(0.0)
+        
+        # Determine color
+        color = CLIENT_COLORS.get(client, None)
+        
+        # Determine label
+        label = client
+        if 'legend_labels' in kwargs and kwargs['legend_labels']:
+            labels_map = kwargs['legend_labels']
+            if client in labels_map:
+                label = labels_map[client]
+        
+        plt.plot(t, rate, label=label, linewidth=lw, color=color)
+
+    plt.ylim(0, 105)
+    add_fault_events(fault_events)
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'success_rate_comparison.{fmt}')
+    plt.close()
+
+
+def plot_failure_breakdown(df, output_dir, fault_events=None, **kwargs):
     """Plot failure breakdown as stacked area chart."""
     from plotting.core import setup_plot, save_plot
     
@@ -185,12 +304,20 @@ def plot_failure_breakdown(df, output_dir, fault_events=None):
     plt.ylim(0, 100)
     # Add fault events AFTER (blends with underlying colors to create purple)
     add_fault_events(fault_events)
-    plt.legend(loc='upper left', bbox_to_anchor=(0, 1.0))
-    save_plot(output_dir / 'failure_breakdown.png')
+    
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'upper left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'failure_breakdown.{fmt}')
     plt.close()
 
 
-def plot_request_amplification(df, output_dir, fault_events=None):
+def plot_request_amplification(df, output_dir, fault_events=None, **kwargs):
     """Plot request amplification over time."""
     from plotting.core import setup_plot, save_plot
     
@@ -202,21 +329,29 @@ def plot_request_amplification(df, output_dir, fault_events=None):
     setup_plot("Request Amplification Over Time", "Time (s)", "Amplification (%)")
     
     t = df['timepoint']
+    lw = kwargs.get('line_width', 2.0)
     
     # Calculate amplification as additional load percentage (0% = no retries, 25% = 1.25x load)
     amplification = (df['retries'] / df['root_requests'].replace(0, 1)) * 100
     amplification = amplification.fillna(0.0)
     
-    plt.plot(t, amplification, label='Request amplification', linewidth=2, color='#1f77b4')
+    plt.plot(t, amplification, label='Request amplification', linewidth=lw, color='#1f77b4')
     
     # Add max sustainable amplification line (max additional load = 25%, total = 125%)
-    plt.axhline(y=125, color='red', linestyle='--', linewidth=2, 
+    plt.axhline(y=125, color='red', linestyle='--', linewidth=lw, 
                 label='Max Sustainable (125%)', alpha=0.7)
     
     plt.ylim(0, max(amplification.max() * 1.1, 350))
     add_fault_events(fault_events)
-    plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
-    save_plot(output_dir / 'amplification.png')
+    
+    legend_kwargs = {'loc': kwargs.get('legend_loc', 'lower left'), 
+                     'frameon': not kwargs.get('no_legend_frame', False)}
+    if kwargs.get('legend_bbox'): legend_kwargs['bbox_to_anchor'] = kwargs.get('legend_bbox')
+    if kwargs.get('legend_size'): legend_kwargs['prop'] = {'size': kwargs.get('legend_size')}
+    
+    plt.legend(**legend_kwargs)
+    fmt = kwargs.get('format', 'png')
+    save_plot(output_dir / f'amplification.{fmt}')
     plt.close()
 
 
@@ -244,6 +379,8 @@ def plot_success_rate_detailed(df, output_dir, fault_events=None):
     plt.ylim(0, 105)
     add_fault_events(fault_events)
     plt.legend(loc='lower left', bbox_to_anchor=(0, 0.05))
+    # Note: This function doesn't take kwargs yet in definitions above, so skipping dynamic format, keeping png
+    # Wait, I should probably update it too if it's used. But it's not called in generate_plot_set.
     save_plot(output_dir / 'success_rate_detailed.png')
     plt.close()
 
@@ -276,8 +413,30 @@ Examples:
                        help='JSON file with fault events (optional)')
     parser.add_argument('--time-range',
                        help='Time range to plot (e.g., "0-60" for first 60s)')
+    parser.add_argument('--smoothing-window', type=int, default=1,
+                       help='Window size for rolling average smoothing (default: 1, disabled)')
     parser.add_argument('--figsize', default='10,6',
                        help='Figure size as "width,height" (default: 10,6)')
+    parser.add_argument('--font-size', type=int,
+                       help='Global font size')
+    parser.add_argument('--tick-size', type=int,
+                       help='Tick label size')
+    parser.add_argument('--format', default='png', choices=['png', 'pdf', 'svg', 'jpg'],
+                       help='Output format (default: png)')
+    parser.add_argument('--line-width', type=float, default=2.0,
+                       help='Line width (default: 2.0)')
+    parser.add_argument('--legend-loc', default='lower left',
+                       help='Legend location (default: lower left)')
+    parser.add_argument('--legend-bbox',
+                       help='Legend bbox_to_anchor (x,y)')
+    parser.add_argument('--legend-size', type=int,
+                       help='Legend text size')
+    parser.add_argument('--no-legend-frame', action='store_true',
+                       help='Remove legend frame')
+    parser.add_argument('--legend-order',
+                       help='Comma-separated list of client names to order legend')
+    parser.add_argument('--legend-labels',
+                       help='Mapping of client names to labels (e.g. "client_a=Label A,client_b=Label B")')
     
     args = parser.parse_args()
     
@@ -287,24 +446,143 @@ Examples:
     
     # Load data
     try:
-        print(f"Loading data from {args.csv_file}...")
-        df = load_csv(args.csv_file)
-        print(f"✓ Loaded {len(df)} time buckets")
+        input_path = Path(args.csv_file)
+        if input_path.is_dir():
+             print(f"Input is directory, looking for output.csv in {input_path}...")
+             csv_file_path = input_path / "output.csv"
+        else:
+             csv_file_path = input_path
+
+        print(f"Loading data from {csv_file_path}...")
+        raw_df = load_csv(str(csv_file_path))
+        print(f"✓ Loaded {len(raw_df)} rows")
+        
+        # Helper to extract base name
+        def get_base_name(name):
+            if not isinstance(name, str): return str(name)
+            parts = name.rsplit('.', 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                return parts[0]
+            return name
+
+        # 1. Pre-process: Aggregate Replicas (if client_id exists)
+        if 'client_id' in raw_df.columns:
+            raw_df['base_client'] = raw_df['client_id'].apply(get_base_name)
+            
+            # Aggregate replicas into base clients
+            print("  Consolidating replicas into base clients...")
+            sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
+                        'failure_root', 'failure_retry', 'failure_queue_full', 
+                        'failure_deadline', 'failure_server', 'total_request', 'total_failure']
+            sum_cols = [c for c in sum_cols if c in raw_df.columns]
+            
+            agg_dict = {c: 'sum' for c in sum_cols}
+            if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum'
+            if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
+            
+            latency_cols = ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']
+            for lc in latency_cols:
+                if lc in raw_df.columns: agg_dict[lc] = 'max'
+
+            # Multi-client DF (By Base Client)
+            df_by_client = raw_df.groupby(['timepoint', 'base_client']).agg(agg_dict).reset_index()
+            clients = sorted(df_by_client['base_client'].unique())
+            print(f"  identified clients: {clients}")
+        else:
+            df_by_client = raw_df
+            df_by_client['base_client'] = 'unknown'
+            clients = []
+
+        # 2. Global Aggregation (System View)
+        print("  Aggregating global stats...")
+        sum_cols_global = [c for c in df_by_client.columns if c not in ['timepoint', 'base_client', 'client_id'] and df_by_client[c].dtype.kind in 'biufc']
+        # Recalculate agg dict for global
+        agg_dict_global = {c: 'sum' for c in sum_cols_global}
+        # exceptions
+        if 'queue_avg_at_attempt_end' in agg_dict_global: agg_dict_global['queue_avg_at_attempt_end'] = 'mean'
+        for lc in ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']:
+            if lc in agg_dict_global: agg_dict_global[lc] = 'max'
+            
+        df_global = df_by_client.groupby('timepoint').agg(agg_dict_global).reset_index()
+            
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
         return 1
     
-    # Apply time range filter
-    if args.time_range:
-        try:
-            start, end = map(float, args.time_range.split('-'))
-            df = get_time_range(df, start, end)
-            print(f"✓ Filtered to time range {start}-{end}s ({len(df)} buckets)")
-        except ValueError:
-            print(f"Error: Invalid time range format: {args.time_range}")
-            print("Use format: START-END (e.g., 0-60)")
-            return 1
     
+    # Prepare style kwargs
+    style_kwargs = {
+        'line_width': args.line_width,
+        'legend_loc': args.legend_loc,
+        'legend_size': args.legend_size,
+        'no_legend_frame': args.no_legend_frame,
+        'format': args.format,
+        'legend_order': args.legend_order
+    }
+    
+    if args.legend_labels:
+        try:
+            # Parse "k=v,k2=v2"
+            label_map = {}
+            for pair in args.legend_labels.split(','):
+                if '=' in pair:
+                    k, v = pair.split('=', 1)
+                    label_map[k.strip()] = v.strip()
+            style_kwargs['legend_labels'] = label_map
+        except Exception as e:
+            print(f"Warning: Failed to parse legend_labels: {e}")
+    
+    if args.legend_bbox:
+        try:
+             style_kwargs['legend_bbox'] = tuple(map(float, args.legend_bbox.split(',')))
+        except ValueError:
+             print(f"Warning: Invalid legend_bbox: {args.legend_bbox}")
+    
+    # Apply global font settings
+    if args.font_size:
+        plt.rcParams.update({'font.size': args.font_size})
+    if args.tick_size:
+        plt.rcParams.update({
+             'xtick.labelsize': args.tick_size,
+             'ytick.labelsize': args.tick_size
+        })
+
+    # helper for generating plot set
+    def generate_plot_set(df, out_dir, prefix=""):
+        # Time range filter
+        if args.time_range:
+            try:
+                start, end = map(float, args.time_range.split('-'))
+                df = get_time_range(df, start, end)
+            except ValueError:
+                pass
+        
+        # Apply Smoothing
+        if args.smoothing_window > 1:
+            print(f"  Applying smoothing (window={args.smoothing_window}) to {prefix}...")
+            # Identify numeric columns to smooth
+            numeric_cols = df.select_dtypes(include=['number']).columns
+            # Exclude structural columns
+            exclude = ['timepoint', 'rng_seed', 'replica_id']
+            cols_to_smooth = [c for c in numeric_cols if c not in exclude]
+            
+            try:
+                # Use simple rolling mean for all numeric columns
+                df[cols_to_smooth] = df[cols_to_smooth].rolling(
+                    window=args.smoothing_window, min_periods=1
+                ).mean()
+            except Exception as e:
+                print(f"  Warning: Smoothing failed: {e}")
+
+        plot_latency(df, out_dir, args.fault_events, **style_kwargs)
+        plot_qps(df, out_dir, args.fault_events, **style_kwargs)
+        plot_queue(df, out_dir, args.fault_events, **style_kwargs)
+        plot_failures(df, out_dir, args.fault_events, **style_kwargs)
+        plot_success_rate(df, out_dir, args.fault_events, **style_kwargs)
+        plot_failure_breakdown(df, out_dir, args.fault_events, **style_kwargs)
+        plot_request_amplification(df, out_dir, args.fault_events, **style_kwargs)
+        print(f"  ✓ Generated plots for {prefix} in {out_dir}")
+
     # Set figure size
     try:
         width, height = map(int, args.figsize.split(','))
@@ -313,23 +591,26 @@ Examples:
     except ValueError:
         print(f"Warning: Invalid figsize format: {args.figsize}, using default")
     
-    # Generate all plots
     print(f"\nGenerating plots in {output_dir}/...")
+
+    # 3. Generate Global Plots
+    print("  Generating Global/Compound plots...")
+    generate_plot_set(df_global, output_dir, "Global")
     
-    plot_latency(df, output_dir, args.fault_events)
-    plot_qps(df, output_dir, args.fault_events)
-    plot_queue(df, output_dir, args.fault_events)
-    
-    # Additional analysis plots
-    plot_failure_breakdown(df, output_dir, args.fault_events)
-    plot_request_amplification(df, output_dir, args.fault_events)
+    # New: Comparative Success Rate
+    if 'base_client' in df_by_client.columns:
+        print("  Generating Success Rate Comparison...")
+        plot_success_rate_comparison(df_by_client, output_dir, args.fault_events, **style_kwargs)
+
+    # 4. Generate Per-Client Plots
+    for client in clients:
+        client_dir = output_dir / client
+        client_dir.mkdir(exist_ok=True)
+        subset = df_by_client[df_by_client['base_client'] == client]
+        print(f"Processing client: {client}...")
+        generate_plot_set(subset, client_dir, f"Client: {client}")
     
     print(f"\n✅ All plots generated in {output_dir}/")
-    print(f"   - latency.png")
-    print(f"   - qps.png")
-    print(f"   - queue.png (if available)")
-    print(f"   - failure_breakdown.png (if available)")
-    print(f"   - amplification.png (if available)")
 
 
 
