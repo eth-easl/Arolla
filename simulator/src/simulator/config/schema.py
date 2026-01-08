@@ -75,6 +75,7 @@ class CircuitBreakerType(str, Enum):
     """Types of circuit breakers"""
     COUNT_BASED = "count_based"
     TIME_BASED = "time_based"
+    RETRY_CIRCUIT_BREAKER = "retry_circuit_breaker"
 
 
 class CircuitBreakerConfig(BaseModel):

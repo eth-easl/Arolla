@@ -152,11 +152,77 @@ class CircuitBreakerRequest:
     is_ok: bool
 
 @dataclass
+class RetryCircuitBreakerPolicy(RetryPolicy):
+    """
+    Implements a stateless, window-based circuit breaker (Retry Circuit Breaker).
+    Ref Logic: "On success or failure, it updates statistics... If failure rate > threshold, don't retry."
+    """ 
+    inner: RetryPolicy
+    failure_rate_threshold: float
+    window_duration: TimeDuration
+    min_requests: int
+    wait_duration_in_open_state: TimeDuration 
+    
+    # Internal State
+    requests_window: Deque[CircuitBreakerRequest] = None
+    window_failed_req_count: int = 0
+
+    def __init__(self, inner: RetryPolicy, failure_rate_threshold: float, window_duration: TimeDuration, 
+                 min_window_size: int, wait_duration_in_open_state: TimeDuration):
+        self.inner = inner
+        self.failure_rate_threshold = failure_rate_threshold
+        self.window_duration = window_duration
+        self.min_window_size = min_window_size
+        self.wait_duration_in_open_state = wait_duration_in_open_state
+        self.__post_init__()
+    
+    def __post_init__(self):
+        self.requests_window = deque()
+        self.window_failed_req_count = 0
+
+    def _is_failure_threshold_reached(self) -> bool:
+        if len(self.requests_window) < self.min_window_size:
+            return False
+        return (self.window_failed_req_count / len(self.requests_window)) >= self.failure_rate_threshold
+
+    def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
+        now = context.now if context.now is not None else 0
+        
+        # Prune old
+        while self.requests_window and (now - self.requests_window[0].timepoint > self.window_duration):
+            popped = self.requests_window.popleft()
+            if not popped.is_ok:
+                self.window_failed_req_count -= 1
+
+        # Check threshold
+        if self._is_failure_threshold_reached():
+             return False, 0
+        
+        return self.inner.next_delay(context)
+
+    def record_attempt(self, context: RetryContext, success: bool):
+        self.inner.record_attempt(context, success)
+        
+        now = context.now if context.now is not None else 0
+        
+        # Add to window
+        self.requests_window.append(CircuitBreakerRequest(now, success))
+        if not success:
+            self.window_failed_req_count += 1
+            
+        # Prune old
+        while self.requests_window and (now - self.requests_window[0].timepoint > self.window_duration):
+            popped = self.requests_window.popleft()
+            if not popped.is_ok:
+                self.window_failed_req_count -= 1
+
+
+@dataclass
 class TimeBasedCircuitBreakerPolicy(RetryPolicy):
     """
     Implements a time-based circuit breaker with states (CLOSED, OPEN, HALF_OPEN).
     Matches reference implementation logic.
-    """ # Intentionally left empty or removed as it was duplicating docs
+    """
     inner: RetryPolicy
     failure_rate_threshold: float
     window_duration: TimeDuration
@@ -177,7 +243,7 @@ class TimeBasedCircuitBreakerPolicy(RetryPolicy):
         self.window_duration = window_duration
         self.min_window_size = min_window_size
         self.wait_duration_in_open_state = wait_duration_in_open_state
-        self.permitted_half_open_calls = min_window_size # Set permitted calls to min window size for fast feedback
+        self.permitted_half_open_calls = min_window_size 
         self.__post_init__()
     
     def __post_init__(self):
@@ -200,15 +266,7 @@ class TimeBasedCircuitBreakerPolicy(RetryPolicy):
         )
 
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
-        # Circuit Breaker Logic determines if we even TRY.
-        # However, next_delay is usually called for retries. 
-        # Ideally CB logic should wrap the *initial* request too, but simulator architecture 
-        # typically nests policies inside the retry loop.
-        # Assuming this policy is used as a wrapper for retries:
-        
-        now = context.now if context.now is not None else 0 # We need 'now' in context!
-        # If context.now is missing, we can't do time-based logic properly.
-        # But for now let's implement the logic assuming 'now' is available or 0.
+        now = context.now if context.now is not None else 0
         
         # State Machine Logic
         if self.state == CircuitBreakerState.CLOSED:
@@ -220,48 +278,29 @@ class TimeBasedCircuitBreakerPolicy(RetryPolicy):
              if (now - self.last_open_time) < self.wait_duration_in_open_state:
                  return False, 0
              self._set_state(CircuitBreakerState.HALF_OPEN, now)
-             # Fall through to allow this probe
              
         elif self.state == CircuitBreakerState.HALF_OPEN:
-            # Reference Logic:
-            # 1. If we haven't collected enough probing samples yet, allow operation.
             if len(self.requests_window) < self.permitted_half_open_calls:
-                 pass # Fall through to inner.next_delay
-                 
-            # 2. Once we have enough samples (len >= permitted), we make a decision.
+                 pass 
             else: 
                 if self._is_failure_threshold_reached():
-                    # Failure rate too high -> Re-open
                     self._set_state(CircuitBreakerState.OPEN, now)
                     return False, 0
                 else:
-                    # Failure rate acceptable -> Close
                     self._set_state(CircuitBreakerState.CLOSED, now)
-                    # Proceed to allow this request (as we are now CLOSED)
                     pass
 
-        # If allowed by CB, delegate to inner policy
         return self.inner.next_delay(context)
 
     def record_attempt(self, context: RetryContext, success: bool):
         self.inner.record_attempt(context, success)
-        # Assuming context.now is available
         now = context.now if context.now is not None else 0
         
-        # Add to window
         self.requests_window.append(CircuitBreakerRequest(now, success))
         if not success:
             self.window_failed_req_count += 1
             
-        # Prune old
         while self.requests_window and (now - self.requests_window[0].timepoint > self.window_duration):
             popped = self.requests_window.popleft()
             if not popped.is_ok:
                 self.window_failed_req_count -= 1
-        
-        # State transitions (Feedback Loop)
-        # Note: Reference implementation handles transition logic in 'is_request_allowed' 
-        # mostly, but simplified here.
-        # For simulation accuracy, we need to replicate the exact behavior.
-        # But 'next_delay' is effectively 'is_request_allowed'.
-        pass

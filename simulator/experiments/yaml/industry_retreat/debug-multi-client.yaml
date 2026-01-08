@@ -1,0 +1,107 @@
+name: scale_clients
+seed: 42
+
+services:
+  - name: server-cb
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.2
+    workers: 150  # 15k RPS capacity > 10k Load
+    queue_capacity: 5000
+    partial_failures:
+      - start_s: 0
+        end_s: 10
+        # Sweep probability of failure (Anchor for lockstep)
+        # p_fail: &fails  [0.0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0]
+        p_fail: &fails  [0.0, 0.025, 0.05, 0.075, 0.1]
+
+  - name: server-rb
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.2
+    workers: 150
+    queue_capacity: 5000
+    partial_failures:
+      - start_s: 0
+        end_s: 10
+        p_fail: *fails
+  
+  - name: server
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.2
+    workers: 150
+    queue_capacity: 5000
+    partial_failures:
+      - start_s: 0
+        end_s: 10
+        p_fail: *fails
+  
+  - name: server-retries
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.2
+    workers: 150
+    queue_capacity: 5000
+    partial_failures:
+      - start_s: 0
+        end_s: 10
+        p_fail: *fails
+
+
+# Clients
+# We want to sweep the number of replicas for BOTH clients in lockstep.
+clients:
+  - name: circuit-breaker
+    # Inline sweep with anchor
+    # replicas: &num_clients [1, 10, 100, 1000]
+    replicas: &num_clients [100]
+    workload:
+      base_rps: 10 # 10 RPS per client * N clients
+      duration_s: 10
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    circuit_breaker:
+      type: retry_circuit_breaker
+      failure_threshold: 0.1
+      window_duration_ms: 2000
+      min_requests: 10
+      half_open_delay_ms: 500
+    target_service: server-cb
+
+  - name: retry-budget
+    replicas: *num_clients
+    workload:
+      base_rps: 10
+      duration_s: 10
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 10
+    target_service: server-rb
+  
+
+  - name: no-retries
+    replicas: *num_clients
+    workload:
+      base_rps: 10
+      duration_s: 10
+    target_service: server
+  
+  - name: three-retries
+    replicas: *num_clients
+    workload:
+      base_rps: 10
+      duration_s: 10
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    target_service: server-retries
+
+plotting_script: plotting/brooker_plots_scale.py 

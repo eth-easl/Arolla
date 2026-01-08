@@ -14,7 +14,7 @@ from simulator.policies.retry import (
     RetryPolicy, NoRetryPolicy, FixedBackoffRetryPolicy,
     ExponentialBackoffRetryPolicy, ExponentialBackoffWithJitterRetryPolicy,
     JitterMode as PolicyJitterMode,
-    RetryBudgetPolicy, TimeBasedCircuitBreakerPolicy
+    RetryBudgetPolicy, TimeBasedCircuitBreakerPolicy, RetryCircuitBreakerPolicy
 )
 from simulator.policies.timeout import Timeout, StaticTimeout
 from simulator.policies.load_limiter import (
@@ -173,6 +173,36 @@ class ConfigLoader:
                 min_requests=cfg.min_requests,
                 window_duration=ms_to_ns(cfg.window_duration_ms),
                 half_open_delay=ms_to_ns(cfg.half_open_delay_ms)
+            )
+
+        elif cfg.type == CircuitBreakerType.RETRY_CIRCUIT_BREAKER:
+            return RetryCircuitBreakerPolicy(
+                inner=None, # Will be set by caller wrapper logic, or handled here if structure allows
+                # Wait, build_circuit_breaker returns a LoadLimiter which is usually a policy wrapper?
+                # Actually, check usage in build_service and build_client.
+                # In build_client (lines 468+), it uses the policy class directly wrapping the inner policy.
+                # But here we return the policy INSTANCE.
+                # The caller (build_client) reconstructs it?
+                # Let's check build_client logic in loader.py lines 460+
+                # Ah, build_circuit_breaker is called by build_service (server-side), but Client-side logic acts differently?
+                # Let's check lines 467-476 of loader.py.
+                # It does manual construction:
+                # c_retry_policy = TimeBasedCircuitBreakerPolicy(...)
+                # So for Client, we need to update that manual construction too!
+                
+                # For Server-side (ServiceRuntime), LoadLimiter is used.
+                # RetryCircuitBreakerPolicy IS A RetryPolicy, not necessarily a LoadLimiter (though they share similar signature?).
+                # LoadLimiter interface: next_delay(context) -> (bool, duration).
+                # RetryPolicy interface: next_delay(context) -> (bool, duration).
+                # They are compatible. 
+                
+                # So we can return it here for server usage.
+                failure_rate_threshold=cfg.failure_threshold,
+                window_duration=ms_to_ns(cfg.window_duration_ms),
+                min_requests=cfg.min_requests if cfg.min_requests else 100,
+                # RetryCircuitBreakerPolicy still accepts wait_duration arg for compatibility, although unused
+                wait_duration_in_open_state=ms_to_ns(cfg.half_open_delay_ms) if cfg.half_open_delay_ms else 0,
+                min_window_size=cfg.min_requests if cfg.min_requests else 100 
             )
         
         else:
@@ -465,15 +495,28 @@ class ConfigLoader:
                     if c_retry_policy is not None:
                         # 1. Circuit Breaker
                         if client_cfg_yaml.circuit_breaker is not None:
-                            # Instantiate the robust TimeBasedCircuitBreakerPolicy
                             cb_cfg = client_cfg_yaml.circuit_breaker
-                            c_retry_policy = TimeBasedCircuitBreakerPolicy(
-                                inner=c_retry_policy,
-                                failure_rate_threshold=cb_cfg.failure_threshold,
-                                window_duration=ms_to_ns(cb_cfg.window_duration_ms if cb_cfg.window_duration_ms else 5000), 
-                                min_window_size=cb_cfg.min_requests if cb_cfg.min_requests else 100,
-                                wait_duration_in_open_state=ms_to_ns(cb_cfg.half_open_delay_ms) if cb_cfg.half_open_delay_ms else ms_to_ns(1000)
-                            )
+                            
+                            if cb_cfg.type == CircuitBreakerType.RETRY_CIRCUIT_BREAKER:
+                                c_retry_policy = RetryCircuitBreakerPolicy(
+                                    inner=c_retry_policy,
+                                    failure_rate_threshold=cb_cfg.failure_threshold,
+                                    window_duration=ms_to_ns(cb_cfg.window_duration_ms if cb_cfg.window_duration_ms else 5000), 
+                                    min_window_size=cb_cfg.min_requests if cb_cfg.min_requests else 100,
+                                    wait_duration_in_open_state=ms_to_ns(cb_cfg.half_open_delay_ms) if cb_cfg.half_open_delay_ms else 0
+                                )
+                            elif cb_cfg.type == CircuitBreakerType.TIME_BASED:
+                                # Instantiate the robust TimeBasedCircuitBreakerPolicy
+                                c_retry_policy = TimeBasedCircuitBreakerPolicy(
+                                    inner=c_retry_policy,
+                                    failure_rate_threshold=cb_cfg.failure_threshold,
+                                    window_duration=ms_to_ns(cb_cfg.window_duration_ms if cb_cfg.window_duration_ms else 5000), 
+                                    min_window_size=cb_cfg.min_requests if cb_cfg.min_requests else 100,
+                                    wait_duration_in_open_state=ms_to_ns(cb_cfg.half_open_delay_ms) if cb_cfg.half_open_delay_ms else ms_to_ns(1000)
+                                )
+                            else:
+                                # Fallback or error for other types not implemented on client yet
+                                pass
                         
                         # 2. Retry Budget
                         if client_cfg_yaml.retry_budget is not None:
