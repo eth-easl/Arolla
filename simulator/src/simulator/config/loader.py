@@ -541,6 +541,7 @@ class ConfigLoader:
                                 c_retry_policy = RetryBudgetPolicy(
                                     inner=c_retry_policy,
                                     budget_ratio=budget_cfg.budget_ratio,
+                                    min_retries_per_sec=budget_cfg.min_retries_per_sec,
                                     max_retries=budget_cfg.max_retries
                                 )
 

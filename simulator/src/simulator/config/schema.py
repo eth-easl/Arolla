@@ -113,6 +113,7 @@ class RateLimiterConfig(BaseModel):
 class RetryBudgetConfig(BaseModel):
     """Configuration for local/legacy retry budget"""
     budget_ratio: float = Field(ge=0, description="Retry budget as ratio of successes (e.g., 0.1 = 10%)")
+    min_retries_per_sec: int = Field(default=10, ge=0, description="Minimum retries per second (token refill rate)")
     max_retries: int = Field(ge=1, description="Maximum consecutive retries")
     shared_budget_id: Optional[str] = Field(default=None, description="ID for sharing budget across multiple clients")
 

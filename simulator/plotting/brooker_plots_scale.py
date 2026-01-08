@@ -40,6 +40,12 @@ def main():
     parser.set_defaults(no_legend_frame=True)
     parser.add_argument('--plot-right', type=float,
                        help='Right boundary of the axes (0.0-1.0), used to fix figure width by reserving space for legend.')
+    parser.add_argument('--xticks', type=str,
+                       help='Comma-separated list of x-axis ticks (e.g. "0.0,0.2,0.4")')
+    parser.add_argument('--success-yticks', type=str,
+                       help='Comma-separated list of y-axis ticks for Success Rate (e.g. "0,20,40,60")')
+    parser.add_argument('--load-yticks', type=str,
+                       help='Comma-separated list of y-axis ticks for Load (e.g. "0,100,200")')
     
     args = parser.parse_args()
     
@@ -178,7 +184,7 @@ def main():
     }
 
     # Helper function for plotting
-    def plot_metric(y_col, ylabel, output_name, legend_loc_override=None):
+    def plot_metric(y_col, ylabel, output_name, legend_loc_override=None, custom_yticks=None):
         fig, ax = plt.subplots(figsize=figsize)
         
         plot_kwargs = {
@@ -201,6 +207,18 @@ def main():
         
         ax.set_ylabel(ylabel)
         ax.set_xlabel('Server Failure Probability') 
+        
+        # Custom Ticks
+        if args.xticks:
+            try:
+                xticks = [float(x.strip()) for x in args.xticks.split(',')]
+                ax.set_xticks(xticks)
+            except ValueError:
+                print(f"Warning: Invalid xticks format: {args.xticks}")
+
+        if custom_yticks:
+            ax.set_yticks(custom_yticks)
+
         ax.grid(True, alpha=0.3)
         
         # Custom Frame Styling (match grid color)
@@ -278,8 +296,23 @@ def main():
     else:
         load_name = "load_" + success_name
         
-    plot_metric('success_rate', 'Success Rate', success_name)
-    plot_metric('load_pct', 'Load (%)', load_name)
+    # Parse custom ticks
+    success_yticks = None
+    if args.success_yticks:
+        try:
+            success_yticks = [float(y.strip()) for y in args.success_yticks.split(',')]
+        except ValueError:
+            print(f"Warning: Invalid success_yticks format: {args.success_yticks}")
+
+    load_yticks = None
+    if args.load_yticks:
+        try:
+            load_yticks = [float(y.strip()) for y in args.load_yticks.split(',')]
+        except ValueError:
+            print(f"Warning: Invalid load_yticks format: {args.load_yticks}")
+
+    plot_metric('success_rate', 'Success Rate', success_name, custom_yticks=success_yticks)
+    plot_metric('load_pct', 'Load (%)', load_name, custom_yticks=load_yticks)
 
 if __name__ == "__main__":
     main()
