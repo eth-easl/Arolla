@@ -40,6 +40,14 @@ def main():
     parser.set_defaults(no_legend_frame=True)
     parser.add_argument('--plot-right', type=float,
                        help='Right boundary of the axes (0.0-1.0), used to fix figure width by reserving space for legend.')
+    parser.add_argument('--xticks', type=str,
+                       help='Comma-separated list of x-axis ticks (e.g. "0.0,0.2,0.4")')
+    parser.add_argument('--success-yticks', type=str,
+                       help='Comma-separated list of y-axis ticks for Success Rate (e.g. "0,20,40,60")')
+    parser.add_argument('--load-yticks', type=str,
+                       help='Comma-separated list of y-axis ticks for Load (e.g. "0,100,200")')
+    parser.add_argument('--success-ylim', type=str,
+                       help='Y-axis limits for Success Rate as "min,max" (e.g. "80,100")')
     
     args = parser.parse_args()
     
@@ -93,12 +101,19 @@ def main():
             scale_col = None
 
     fail_col = "services.0.partial_failures.0.p_fail"
+    pct_col = "failure_rate_pct"  # New column for plotting scaling
     if fail_col not in df.columns:
          candidates = [c for c in df.columns if 'p_fail' in c]
          if candidates:
              fail_col = candidates[0]
     
     print(f"Plotting Scale analysis. Scale Col: {scale_col}, Fail Col: {fail_col}")
+    
+    # Calculate percentage column
+    if fail_col and fail_col in df.columns:
+        df[pct_col] = df[fail_col] * 100.0
+    else:
+        df[pct_col] = 0.0 # Fallback
     
     # Simplify Client Names
     def get_base_name(name):
@@ -118,7 +133,7 @@ def main():
         # Update fail_col if needed? No, separate x-axis.
     
     # Update aggregation with new names
-    group_cols = [fail_col, friendly_base]
+    group_cols = [fail_col, pct_col, friendly_base]
     if scale_col:
         group_cols.append(friendly_scale)
     
@@ -133,6 +148,10 @@ def main():
         agg_cols['total_attempts'] = 'sum'
         
     agg_df = df.groupby(group_cols).agg(agg_cols).reset_index()
+
+    # Scale success_rate to percentage
+    if 'success_rate' in agg_df.columns:
+        agg_df['success_rate'] = agg_df['success_rate'] * 100.0
     
     # Calculate Load Percentage relative to p_fail=0
     # Group by [friendly_base, friendly_scale] to find baseline
@@ -178,12 +197,13 @@ def main():
     }
 
     # Helper function for plotting
-    def plot_metric(y_col, ylabel, output_name, legend_loc_override=None):
+    def plot_metric(y_col, ylabel, output_name, legend_loc_override=None, custom_yticks=None, custom_ylim=None):
         fig, ax = plt.subplots(figsize=figsize)
         
         plot_kwargs = {
             'data': agg_df,
-            'x': fail_col,
+            'data': agg_df,
+            'x': pct_col, # Use scaled column
             'y': y_col,
             'hue': friendly_base,
             'palette': custom_palette,
@@ -200,7 +220,23 @@ def main():
         sns.lineplot(**plot_kwargs)
         
         ax.set_ylabel(ylabel)
-        ax.set_xlabel('Server Failure Probability') 
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel('Server Failure Rate (%)')  
+        
+        # Custom Ticks
+        if args.xticks:
+            try:
+                xticks = [float(x.strip()) for x in args.xticks.split(',')]
+                ax.set_xticks(xticks)
+            except ValueError:
+                print(f"Warning: Invalid xticks format: {args.xticks}")
+
+        if custom_yticks:
+            ax.set_yticks(custom_yticks)
+
+        if custom_ylim:
+            ax.set_ylim(custom_ylim)
+
         ax.grid(True, alpha=0.3)
         
         # Custom Frame Styling (match grid color)
@@ -278,8 +314,30 @@ def main():
     else:
         load_name = "load_" + success_name
         
-    plot_metric('success_rate', 'Success Rate', success_name)
-    plot_metric('load_pct', 'Load (%)', load_name)
+    # Parse custom ticks
+    success_yticks = None
+    if args.success_yticks:
+        try:
+            success_yticks = [float(y.strip()) for y in args.success_yticks.split(',')]
+        except ValueError:
+            print(f"Warning: Invalid success_yticks format: {args.success_yticks}")
+
+    load_yticks = None
+    if args.load_yticks:
+        try:
+            load_yticks = [float(y.strip()) for y in args.load_yticks.split(',')]
+        except ValueError:
+            print(f"Warning: Invalid load_yticks format: {args.load_yticks}")
+
+    success_ylim = None
+    if args.success_ylim:
+        try:
+            success_ylim = tuple(map(float, args.success_ylim.split(',')))
+        except ValueError:
+            print(f"Warning: Invalid success_ylim format: {args.success_ylim}")
+
+    plot_metric('success_rate', 'Success Rate (%)', success_name, custom_yticks=success_yticks, custom_ylim=success_ylim)
+    plot_metric('load_pct', 'Load (%)', load_name, custom_yticks=load_yticks)
 
 if __name__ == "__main__":
     main()
