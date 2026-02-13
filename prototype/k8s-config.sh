@@ -13,12 +13,12 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 # ---------- Node definitions ----------
 # Master node
-MASTER_HOST="pc749.emulab.net"      # SSH-reachable address
+MASTER_HOST="pc795.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
 MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc751.emulab.net")
+WORKER_HOSTS=("pc785.emulab.net")
 WORKER_HOSTNAMES=("worker01")
 WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
 
@@ -32,6 +32,13 @@ CALICO_MANIFEST="https://raw.githubusercontent.com/projectcalico/calico/v3.29.2/
 
 # ---------- Container runtime ----------
 CRICTL_VERSION="v1.35.0"
+
+# ---------- Istio + Gateway API ----------
+ISTIO_VERSION="1.24.2"             # Istio release version
+GATEWAY_API_VERSION="v1.3.0"       # Kubernetes Gateway API CRD version
+ISTIO_PROFILE="default"            # "default" = istiod + ingress gateway; "minimal" = istiod only
+ISTIO_NAMESPACE="istio-system"     # Namespace for Istio control plane
+ISTIO_TEST_NS="istio-test"         # Namespace for demo app + Gateway (with sidecar injection)
 
 # ---------- Misc ----------
 LOG_DIR="./k8s-deploy-logs"         # Local directory for per-node log files

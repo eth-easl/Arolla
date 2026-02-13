@@ -1,0 +1,29 @@
+# Gateway: Entry point for external (north-south) traffic.
+#
+# When you apply this, Istio's gateway controller automatically:
+#   1. Spins up an Envoy proxy pod (istio-gateway-istio-*)
+#   2. Creates a Service to expose it (NodePort on bare-metal, LoadBalancer on cloud)
+#
+# The "istio" gatewayClassName references the GatewayClass that Istio
+# auto-creates at install time. No separate controller install needed.
+#
+# Ref: https://devopscube.com/istio-ingress-kubernetes-gateway-api/
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: istio-gateway
+  namespace: istio-test
+  annotations:
+    # Force NodePort since we're on bare-metal (Emulab) — no cloud LB available.
+    # On AWS/GCP/Azure, remove this annotation to get a LoadBalancer instead.
+    networking.istio.io/service-type: NodePort
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same              # Only HTTPRoutes in this namespace can attach
