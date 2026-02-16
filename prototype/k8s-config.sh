@@ -34,7 +34,7 @@ CALICO_MANIFEST="https://raw.githubusercontent.com/projectcalico/calico/v3.29.2/
 CRICTL_VERSION="v1.35.0"
 
 # ---------- Istio + Gateway API ----------
-ISTIO_VERSION="1.24.2"             # Istio release version
+ISTIO_VERSION="1.27.5"             # Istio release version (1.27+ for Gateway API v1.3 experimental conformance)
 GATEWAY_API_VERSION="v1.3.0"       # Kubernetes Gateway API CRD version
 ISTIO_PROFILE="default"            # "default" = istiod + ingress gateway; "minimal" = istiod only
 ISTIO_NAMESPACE="istio-system"     # Namespace for Istio control plane

@@ -183,12 +183,18 @@ do_deploy() {
         echo 'Waiting for gateway proxy pod…'
         sleep 15
 
+        # Re-apply XBackendTrafficPolicy after Services are up
+        # (Istio may report TargetNotFound if BTP is applied before the Service exists)
+        for f in \${M}/*traffic-policy*.yaml; do
+            [[ -f \"\$f\" ]] && kubectl apply -f \"\$f\" 2>/dev/null || true
+        done
+
         echo ''
         echo '=== Resource summary ==='
         kubectl -n ${APP_NS} get po,svc,gateway,httproute 2>/dev/null || true
         echo ''
         kubectl -n ${APP_NS} get destinationrule 2>/dev/null || true
-        kubectl -n ${APP_NS} get backendtrafficpolicy 2>/dev/null || true
+        kubectl -n ${APP_NS} get xbackendtrafficpolicies.gateway.networking.x-k8s.io 2>/dev/null || true
     "
 
     local node_port
@@ -283,7 +289,7 @@ do_status() {
         echo ''
 
         echo '--- BackendTrafficPolicy ---'
-        kubectl -n ${APP_NS} get backendtrafficpolicy 2>/dev/null || true
+        kubectl -n ${APP_NS} get xbackendtrafficpolicies.gateway.networking.x-k8s.io 2>/dev/null || true
         echo ''
 
         echo '--- Istio proxies ---'

@@ -14,7 +14,7 @@ Automated deployment of a Kubernetes cluster with Istio service mesh and Gateway
 # 1. Edit config
 vi k8s-config.sh
 
-# 2. Deploy K8s cluster
+# 2. Deploy K8s cluster (also copies kubeconfig locally)
 ./deploy-k8s.sh
 
 # 3. Install Istio + Gateway API (experimental CRDs for retry budgets)
@@ -63,6 +63,7 @@ The scripts correspond to how production teams operate:
 | 8 | Install CNI plugin (Calico/Flannel) | Master |
 | 9 | Install Metrics Server | Master |
 | 10 | Verify cluster | Master |
+| — | Copy kubeconfig to local machine | Local |
 
 ```bash
 ./deploy-k8s.sh              # Full deploy
@@ -73,6 +74,9 @@ The scripts correspond to how production teams operate:
 ./deploy-k8s.sh --verify     # Check cluster status
 ./deploy-k8s.sh --cleanup    # Tear down cluster & remove all packages
 ```
+
+After deployment, `kubectl` and `istioctl` work from your local machine (kubeconfig is
+automatically copied from the master node to `~/.kube/config`).
 
 ### Adding More Workers
 
@@ -91,9 +95,9 @@ Reference: [Setting up Istio Ingress With Kubernetes Gateway API](https://devops
 
 | Step | Description |
 |------|-------------|
-| 1 | Install `istioctl` CLI on master node |
+| 1 | Install `istioctl` CLI on master node + locally |
 | 2 | Install Kubernetes Gateway API CRDs (v1.3.0, experimental channel) |
-| 3 | Install Istio control plane (istiod) |
+| 3 | Install Istio control plane with `PILOT_ENABLE_ALPHA_GATEWAY_API=true` |
 | 4 | Verify GatewayClass + installation |
 
 ```bash
@@ -109,15 +113,21 @@ Istio automatically creates two `GatewayClass` resources:
 
 The **experimental channel** is a superset of the standard channel — all standard CRDs
 (`Gateway`, `HTTPRoute`, `GatewayClass`) are included, plus experimental ones like
-`BackendTrafficPolicy` for retry budgets (GEP-3388).
+`XBackendTrafficPolicy` for retry budgets (GEP-3388).
 
 ### Configuration
 
 ```bash
-ISTIO_VERSION="1.24.2"
+ISTIO_VERSION="1.27.5"         # 1.27+ required for Gateway API v1.3 experimental conformance
 GATEWAY_API_VERSION="v1.3.0"
 ISTIO_PROFILE="default"
 ```
+
+### Key Istio flags
+
+- `PILOT_ENABLE_ALPHA_GATEWAY_API=true` — enables experimental Gateway API features
+  (`XBackendTrafficPolicy`, `BackendTLSPolicy`, etc.)
+- `meshConfig.accessLogFile=/dev/stdout` — enables Envoy access logs for debugging
 
 ---
 
@@ -179,17 +189,18 @@ DestinationRule  DestinationRule   ← Circuit breaking (Istio-native)
 #### `retry-budget` — Retry Budgets (GEP-3388)
 
 Implements [GEP-3388: Retry Budgets](https://gateway-api.sigs.k8s.io/geps/gep-3388/) using
-the Gateway API `BackendTrafficPolicy` resource.
+the Gateway API `XBackendTrafficPolicy` resource. Istio 1.27+ natively translates this into
+Envoy's `circuit_breakers.retry_budget` configuration — no extra controllers needed.
 
 ```
 manifests/retry-budget/
 ├── app.conf                       # APP_NS=retry-budget-test, APP_HOST=retry.example.com
-├── test.sh                        # 2-phase test: low traffic → high traffic burst
+├── test.sh                        # Traffic test with Envoy stats + config verification
 ├── namespace.yaml                 # retry-budget-test namespace
-├── backend.yaml                   # 2 healthy pods + 1 faulty pod + Service
+├── backend.yaml                   # Single backend, tunable FAILURE_RATE (0-100%)
 ├── gateway.yaml                   # Gateway (HTTP/80, NodePort)
-├── httproute.yaml                 # HTTPRoute (retry 503, max 3 attempts)
-├── backend-traffic-policy.yaml    # BackendTrafficPolicy (retry budget 20%)
+├── httproute.yaml                 # HTTPRoute (retry 503, max 3 attempts, 100ms backoff)
+├── backend-traffic-policy.yaml    # XBackendTrafficPolicy (retry budget 20%, min 10)
 └── client.yaml                    # Client config
 ```
 
@@ -197,27 +208,37 @@ manifests/retry-budget/
 Client → Gateway → HTTPRoute (retry 503, max 3, 100ms backoff)
                         │
                         ▼
-                   Service "backend"
-                   ┌──────────────┐
-                   │ 2 healthy    │ → return 200 "ok"
-                   │ 1 faulty     │ → return 503 always
-                   └──────────────┘
+                   Service "backend"  (FAILURE_RATE=30%)
                         ↑
-              BackendTrafficPolicy
-              budget: 20%, interval: 10s
-              minRetryRate: 10/s
+              XBackendTrafficPolicy
+              budget: 20%, min_concurrency: 10
+                        │
+                        │ (Istio 1.27 translates natively)
+                        ▼
+              Envoy circuit_breakers.retry_budget
 ```
 
 **How it works:**
-- ~33% of requests land on the faulty pod and get 503
-- The HTTPRoute says "retry 503 up to 3 times" — so the Gateway retries
-- The BackendTrafficPolicy says "but cap retries at 20% of total traffic over 10s"
+- Backend randomly returns 503 based on FAILURE_RATE (tunable, default 30%)
+- The HTTPRoute says "retry 503 up to 3 times" — so the Gateway retries failed requests
+- The `XBackendTrafficPolicy` says "cap retries at 20% of active requests"
+- Istio 1.27 translates this into Envoy's `circuit_breakers.retry_budget` automatically
 - Under low load: retries succeed (budget not exhausted), client sees 200
-- Under high load: budget exhausted, 503s pass through to client
+- Under high load: budget exhausted, additional retries are rejected with 503
+
+**What Istio generates in Envoy:**
+
+| Gateway API resource | Envoy config |
+|---|---|
+| `HTTPRoute.retry.codes: [503]` | `retryPolicy.retriableStatusCodes: [503]` |
+| `HTTPRoute.retry.attempts: 3` | `retryPolicy.numRetries: 3` |
+| `HTTPRoute.retry.backoff: 100ms` | `retryPolicy.retryBackOff.baseInterval: 0.100s` |
+| `XBackendTrafficPolicy.retryConstraint.budget.percent: 20` | `circuitBreakers.thresholds.retryBudget.budgetPercent: 20` |
+| `XBackendTrafficPolicy.retryConstraint.minRetryRate.count: 10` | `circuitBreakers.thresholds.retryBudget.minRetryConcurrency: 10` |
 
 **Key difference: HTTPRoute retry vs RetryConstraint:**
 
-| | HTTPRoute retry | BackendTrafficPolicy retryConstraint |
+| | HTTPRoute retry | XBackendTrafficPolicy retryConstraint |
 |---|---|---|
 | **Scope** | Per-request, per-route | Per-service, global across all clients |
 | **Question** | "Should this request be retried?" | "Can the system afford this retry?" |
@@ -230,7 +251,7 @@ Tests run from your **local machine** by curling through the Gateway's NodePort:
 
 ```bash
 ./deploy-app.sh demo --test            # Canary split (10 requests)
-./deploy-app.sh retry-budget --test    # 2-phase: low + high traffic burst
+./deploy-app.sh retry-budget --test    # Send requests, show Envoy stats + access logs
 ```
 
 Manual testing:
