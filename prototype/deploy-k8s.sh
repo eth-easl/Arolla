@@ -449,10 +449,18 @@ full_deploy() {
     # Step 10: Verify
     step10_verify
 
+    # Copy kubeconfig locally so kubectl/istioctl work from your machine
+    banner "Copying kubeconfig to local machine"
+    mkdir -p "$HOME/.kube"
+    local scp_opts="${SSH_OPTS}"
+    [[ -n "${SSH_KEY}" ]] && scp_opts+=" -i ${SSH_KEY}"
+    scp ${scp_opts} "${SSH_USER}@${MASTER_HOST}:~/.kube/config" "$HOME/.kube/config"
+    ok "Kubeconfig saved to ~/.kube/config"
+    info "Verifying local access:"
+    kubectl get nodes
+
     banner "Deployment complete!"
     info "Logs saved to ${LOG_DIR}/"
-    info "To access the cluster from your local machine, copy the kubeconfig:"
-    echo "  scp ${SSH_USER}@${MASTER_HOST}:~/.kube/config ~/.kube/config"
 }
 
 # ── CLI argument handling ───────────────────────────────────────────────────

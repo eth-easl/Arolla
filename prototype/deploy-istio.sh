@@ -89,6 +89,29 @@ step1_install_istioctl() {
         istioctl version --remote=false
     "
     ok "istioctl installed on master"
+
+    # Also install istioctl locally so you can run istioctl commands from your machine
+    banner "Step 1b: Install istioctl ${ISTIO_VERSION} locally"
+    if command -v istioctl &>/dev/null; then
+        CURRENT=$(istioctl version --remote=false 2>/dev/null || echo 'unknown')
+        if [[ "$CURRENT" == "${ISTIO_VERSION}" ]]; then
+            ok "istioctl ${ISTIO_VERSION} already installed locally, skipping."
+        else
+            info "Upgrading local istioctl from $CURRENT to ${ISTIO_VERSION}…"
+            curl -sL https://istio.io/downloadIstio | ISTIO_VERSION=${ISTIO_VERSION} sh -
+            sudo cp "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
+            sudo chmod +x /usr/local/bin/istioctl
+            rm -rf "istio-${ISTIO_VERSION}"
+            ok "istioctl ${ISTIO_VERSION} installed locally"
+        fi
+    else
+        info "Downloading istioctl ${ISTIO_VERSION} for local use…"
+        curl -sL https://istio.io/downloadIstio | ISTIO_VERSION=${ISTIO_VERSION} sh -
+        sudo cp "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
+        sudo chmod +x /usr/local/bin/istioctl
+        rm -rf "istio-${ISTIO_VERSION}"
+        ok "istioctl ${ISTIO_VERSION} installed locally"
+    fi
 }
 
 # ── Step 2: Install Gateway API CRDs ────────────────────────────────────────
@@ -128,6 +151,8 @@ step3_install_istio() {
         istioctl install --set profile=\${ISTIO_PROFILE} \
             --set values.pilot.resources.requests.memory=512Mi \
             --set values.pilot.resources.requests.cpu=250m \
+            --set values.pilot.env.PILOT_ENABLE_ALPHA_GATEWAY_API=true \
+            --set meshConfig.accessLogFile=/dev/stdout \
             -y
 
         echo ''
