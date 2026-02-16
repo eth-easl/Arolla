@@ -11,7 +11,7 @@
 #   3. Istio control plane (istiod)
 #   4. Verify GatewayClass + health
 #
-# After this, deploy applications with: ./deploy-demo.sh
+# After this, deploy applications with: ./deploy-app.sh <app>
 #
 # Reference: https://devopscube.com/istio-ingress-kubernetes-gateway-api/
 #
@@ -102,8 +102,9 @@ step2_install_gateway_api_crds() {
             echo 'Gateway API CRDs already present. Updating…'
         fi
 
-        echo \"Installing Gateway API CRDs \${GATEWAY_API_VERSION} (standard channel)…\"
-        kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/\${GATEWAY_API_VERSION}/standard-install.yaml
+        echo \"Installing Gateway API CRDs \${GATEWAY_API_VERSION} (experimental channel)…\"
+        echo '(Experimental channel includes BackendTrafficPolicy for retry budgets)'
+        kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/\${GATEWAY_API_VERSION}/experimental-install.yaml
 
         echo ''
         echo 'Installed Gateway API CRDs:'
@@ -235,7 +236,7 @@ cleanup_istio() {
         echo ''
         echo '--- Removing Gateway API CRDs ---'
         GATEWAY_API_VERSION='${GATEWAY_API_VERSION}'
-        kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/\${GATEWAY_API_VERSION}/standard-install.yaml 2>/dev/null || true
+        kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/\${GATEWAY_API_VERSION}/experimental-install.yaml 2>/dev/null || true
 
         echo ''
         echo '--- Removing istioctl binary ---'
@@ -270,7 +271,8 @@ full_deploy() {
     info "The platform is ready. Istio auto-created the 'istio' GatewayClass."
     info ""
     info "Next steps:"
-    echo "  1. Run: ./deploy-demo.sh              Deploy sample app with canary routing"
+    echo "  1. Run: ./deploy-app.sh demo           Deploy canary routing demo"
+    echo "          ./deploy-app.sh retry-budget   Deploy retry budget demo (GEP-3388)"
     echo "  2. Run: ./deploy-istio.sh --status     Check platform status"
     echo ""
     echo "  Or deploy your own app:"
@@ -305,7 +307,7 @@ main() {
             echo "Usage: $0 [OPTION]"
             echo ""
             echo "Installs the Istio service mesh + Kubernetes Gateway API on your cluster."
-            echo "Run this AFTER deploy-k8s.sh. Then use deploy-demo.sh for applications."
+            echo "Run this AFTER deploy-k8s.sh. Then use deploy-app.sh <app> for applications."
             echo ""
             echo "Options:"
             echo "  (none)       Full install (steps 1-4)"

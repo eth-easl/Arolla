@@ -13,12 +13,12 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 # ---------- Node definitions ----------
 # Master node
-MASTER_HOST="pc795.emulab.net"      # SSH-reachable address
+MASTER_HOST="pc797.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
 MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc785.emulab.net")
+WORKER_HOSTS=("pc799.emulab.net")
 WORKER_HOSTNAMES=("worker01")
 WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
 

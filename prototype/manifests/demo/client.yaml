@@ -10,7 +10,7 @@
 #       -l gateway.networking.k8s.io/gateway-name=istio-gateway \
 #       -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}')
 #
-#   Or just run:  ./deploy-demo.sh --status
+#   Or just run:  ./deploy-app.sh demo --status
 #
 # ── Test commands ────────────────────────────────────────────────────────────
 #
@@ -21,7 +21,7 @@
 #     curl -s -H 'Host: test.example.com' http://<MASTER_HOST>:$NODE_PORT/
 #   done
 #
-#   Or just run:  ./deploy-demo.sh --test
+#   Or just run:  ./deploy-app.sh demo --test
 #
 # ── What the client needs to know ────────────────────────────────────────────
 #
