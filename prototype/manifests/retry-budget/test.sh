@@ -53,7 +53,7 @@ run_app_tests() {
     echo -e "${GREEN}  ${ok_count} succeeded / ${fail_count} failed out of ${num_requests}${NC}"
     echo ""
 
-    # ── Envoy config check (verify controller generated the right config) ─
+    # ── Envoy config verification ────────────────────────────────────────
     echo -e "${CYAN}--- Envoy Config (retry policy + circuit breaker) ---${NC}"
     echo ""
     remote "$MASTER_HOST" "
@@ -81,22 +81,37 @@ for rc in data:
 \" 2>/dev/null || echo '  (could not parse)'
 
             echo ''
-            echo 'Retry budget (circuit breaker level):'
-            kubectl -n ${APP_NS} exec \"\$GATEWAY_POD\" -- \
-                curl -s localhost:15000/clusters 2>/dev/null | \
-                grep 'backend.${APP_NS}' | \
-                grep -E '(max_retries|rq_retry_open)' | \
-                sed 's/.*svc.cluster.local::/  /' || echo '  (no circuit breaker stats)'
+            echo 'Retry budget (cluster level):'
+            istioctl proxy-config cluster \"\$GATEWAY_POD\" -n ${APP_NS} \
+                --fqdn backend.${APP_NS}.svc.cluster.local -o json 2>/dev/null | \
+                python3 -c \"
+import json, sys
+data = json.load(sys.stdin)
+for c in data:
+    cb = c.get('circuitBreakers', {})
+    for t in cb.get('thresholds', []):
+        rb = t.get('retryBudget')
+        if rb:
+            pct = rb.get('budgetPercent', {}).get('value', '?')
+            minc = rb.get('minRetryConcurrency', '?')
+            print(f'  budgetPercent: {pct}%')
+            print(f'  minRetryConcurrency: {minc}')
+        else:
+            mr = t.get('maxRetries')
+            if mr:
+                print(f'  maxRetries: {mr} (no retry budget configured!)')
+\" 2>/dev/null || echo '  (could not parse)'
 
             echo ''
-            echo 'Controller-managed EnvoyFilters:'
-            kubectl -n ${APP_NS} get envoyfilter -l app.kubernetes.io/managed-by=btp-controller 2>/dev/null || echo '  (none found — is the controller running?)'
+            echo 'XBackendTrafficPolicy status:'
+            kubectl -n ${APP_NS} get xbackendtrafficpolicies.gateway.networking.x-k8s.io \
+                -o jsonpath='{range .items[*]}{.metadata.name}: {.status.ancestors[0].conditions[0].reason}{\"\\n\"}{end}' 2>/dev/null || echo '  (not found)'
         fi
     "
     echo ""
 
-    # ── Envoy retry stats (what actually happened inside the mesh) ───────
-    echo -e "${CYAN}--- Envoy Retry Stats (gateway proxy) ---${NC}"
+    # ── Envoy retry stats ────────────────────────────────────────────────
+    echo -e "${CYAN}--- Retry Stats (gateway proxy → backend) ---${NC}"
     echo ""
     remote "$MASTER_HOST" "
         GATEWAY_POD=\$(kubectl -n ${APP_NS} get pod \
@@ -106,25 +121,57 @@ for rc in data:
         if [[ -z \"\$GATEWAY_POD\" ]]; then
             echo '(gateway pod not found)'
         else
-            echo 'Per-cluster retry stats:'
-            kubectl -n ${APP_NS} exec \"\$GATEWAY_POD\" -- \
-                curl -s localhost:15000/stats 2>/dev/null | \
-                grep 'backend.${APP_NS}' | \
-                grep -E '(upstream_rq_total|upstream_rq_completed|upstream_rq_retry|upstream_rq_200|upstream_rq_503|upstream_rq_5xx)' | \
-                sed 's/.*svc.cluster.local./  /' || echo '  (no stats found)'
+            # Istio 1.27 stat format uses semicolons for tag extraction:
+            #   cluster.<cluster_name>;.<stat_name>: <value>
+            # Service port (80), not container port (5678)
+            CLUSTER='outbound|80||backend.${APP_NS}.svc.cluster.local'
+            STAT_PREFIX=\"cluster.\${CLUSTER};.\"
+
+            STATS=\$(kubectl -n ${APP_NS} exec \"\$GATEWAY_POD\" -- \
+                curl -s localhost:15000/stats 2>/dev/null)
+
+            # Extract key counters using grep -F (fixed-string; cluster name has | and . chars)
+            RQ_TOTAL=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_total:\" | awk '{print \$2}')
+            RQ_COMPLETED=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_completed:\" | awk '{print \$2}')
+            RQ_RETRY=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_retry:\" | awk '{print \$2}')
+            RQ_RETRY_SUCCESS=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_retry_success:\" | awk '{print \$2}')
+            RQ_RETRY_OVERFLOW=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_retry_overflow:\" | awk '{print \$2}')
+            RQ_RETRY_LIMIT=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_retry_limit_exceeded:\" | awk '{print \$2}')
+            RQ_200=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_200:\" | awk '{print \$2}')
+            RQ_503=\$(echo \"\$STATS\" | grep -F \"\${STAT_PREFIX}upstream_rq_503:\" | awk '{print \$2}')
+
+            echo 'Cluster-level Envoy stats:'
+            echo \"  upstream_rq_total:                \${RQ_TOTAL:-0}   (total upstream requests incl. retries)\"
+            echo \"  upstream_rq_completed:            \${RQ_COMPLETED:-0}   (requests completed to client)\"
+            echo \"  upstream_rq_200:                  \${RQ_200:-0}\"
+            echo \"  upstream_rq_503:                  \${RQ_503:-0}   (503s returned to client after all retries)\"
+            echo ''
+            echo \"  upstream_rq_retry:                \${RQ_RETRY:-0}   (retry attempts)\"
+            echo \"  upstream_rq_retry_success:        \${RQ_RETRY_SUCCESS:-0}   (retries that got 200)\"
+            echo \"  upstream_rq_retry_limit_exceeded: \${RQ_RETRY_LIMIT:-0}   (blocked by max retries)\"
+            echo \"  upstream_rq_retry_overflow:       \${RQ_RETRY_OVERFLOW:-0}   (blocked by retry budget)\"
 
             echo ''
-            echo 'Per-endpoint stats:'
+            echo 'Per-endpoint stats (/clusters):'
             kubectl -n ${APP_NS} exec \"\$GATEWAY_POD\" -- \
                 curl -s localhost:15000/clusters 2>/dev/null | \
                 grep 'backend.${APP_NS}' | \
                 grep -E '(rq_total|rq_error|rq_success)' | \
-                sed 's/.*svc.cluster.local::/  /' || echo '  (no stats found)'
+                sed 's/.*svc.cluster.local::/  /'
+
+            echo ''
+            echo 'Summary:'
+            echo \"  Client requests sent:      ${num_requests}\"
+            echo \"  Total upstream to backend:  \${RQ_TOTAL:-?}\"
+            echo \"  Retries attempted:          \${RQ_RETRY:-?}\"
+            echo \"  Retries succeeded:          \${RQ_RETRY_SUCCESS:-?}\"
+            echo \"  Retries blocked (budget):   \${RQ_RETRY_OVERFLOW:-0}\"
+            echo \"  Retries blocked (max):      \${RQ_RETRY_LIMIT:-0}\"
         fi
     "
     echo ""
 
-    # ── Envoy access log tail (per-request detail) ───────────────────────
+    # ── Envoy access log tail ────────────────────────────────────────────
     echo -e "${CYAN}--- Recent Envoy Access Logs (last 20 lines) ---${NC}"
     echo ""
     echo "  Response flags:  -=ok  URX=retry limit exceeded  UO=retry budget overflow"
@@ -134,7 +181,7 @@ for rc in data:
             -l gateway.networking.k8s.io/gateway-name=${APP_GATEWAY_NAME} \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
         if [[ -n \"\$GATEWAY_POD\" ]]; then
-            kubectl -n ${APP_NS} logs \"\$GATEWAY_POD\" -c istio-proxy --tail=20 2>/dev/null || echo '(no access logs — enable with: istioctl install --set meshConfig.accessLogFile=/dev/stdout)'
+            kubectl -n ${APP_NS} logs \"\$GATEWAY_POD\" -c istio-proxy --tail=20 2>/dev/null || echo '(no access logs)'
         fi
     "
 }

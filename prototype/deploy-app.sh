@@ -183,11 +183,18 @@ do_deploy() {
         echo 'Waiting for gateway proxy pod…'
         sleep 15
 
-        # Re-apply XBackendTrafficPolicy after Services are up
-        # (Istio may report TargetNotFound if BTP is applied before the Service exists)
+        # Delete and re-apply XBackendTrafficPolicy after Services + routes are up.
+        # Istio reports TargetNotFound if BTP is applied before the full route chain
+        # (Gateway → HTTPRoute → Service) is reconciled.
         for f in \${M}/*traffic-policy*.yaml; do
-            [[ -f \"\$f\" ]] && kubectl apply -f \"\$f\" 2>/dev/null || true
+            if [[ -f \"\$f\" ]]; then
+                echo \"Re-applying \$(basename \$f) (delete + create)…\"
+                kubectl delete -f \"\$f\" --ignore-not-found 2>/dev/null || true
+                sleep 2
+                kubectl apply -f \"\$f\" 2>/dev/null || true
+            fi
         done
+        sleep 5
 
         echo ''
         echo '=== Resource summary ==='

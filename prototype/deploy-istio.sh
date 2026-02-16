@@ -153,6 +153,10 @@ step3_install_istio() {
             --set values.pilot.resources.requests.cpu=250m \
             --set values.pilot.env.PILOT_ENABLE_ALPHA_GATEWAY_API=true \
             --set meshConfig.accessLogFile=/dev/stdout \
+            --set 'meshConfig.defaultConfig.proxyStatsMatcher.inclusionRegexps[0]=.*upstream_rq_retry.*' \
+            --set 'meshConfig.defaultConfig.proxyStatsMatcher.inclusionRegexps[1]=.*upstream_rq_completed' \
+            --set 'meshConfig.defaultConfig.proxyStatsMatcher.inclusionRegexps[2]=.*upstream_rq_total' \
+            --set 'meshConfig.defaultConfig.proxyStatsMatcher.inclusionRegexps[3]=.*upstream_rq_[0-9]+' \
             -y
 
         echo ''

@@ -3,10 +3,11 @@ kind: Gateway
 metadata:
   name: retry-gateway
   namespace: retry-budget-test
-  annotations:
-    networking.istio.io/service-type: NodePort
 spec:
   gatewayClassName: istio
+  infrastructure:
+    annotations:
+      networking.istio.io/service-type: NodePort
   listeners:
     - name: http
       protocol: HTTP
