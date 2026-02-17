@@ -13,8 +13,6 @@ from pathlib import Path
 from datetime import datetime
 
 # Add src to path
-import sys
-from pathlib import Path
 script_dir = Path(__file__).parent.resolve()
 src_dir = script_dir.parent / "src"
 sys.path.append(str(src_dir))

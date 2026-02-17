@@ -1,6 +1,7 @@
 from __future__ import annotations
 import heapq
 import math
+import random
 from typing import List, Optional, Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -14,8 +15,6 @@ from simulator.policies.retry import RetryPolicy, RetryContext
 from simulator.policies.load_limiter import LoadLimiter
 from simulator.policies.timeout import Timeout
 
-from simulator.middleware.base import AttemptContext, MiddlewareChain
-from simulator.middleware.retry import RetryMiddleware, NoRetryMiddleware
 from simulator.middleware.base import AttemptContext, MiddlewareChain
 from simulator.middleware.retry import RetryMiddleware, NoRetryMiddleware
 from simulator.middleware.load_limiter import LoadLimiterMiddleware
@@ -95,7 +94,6 @@ class ServiceRuntime:
         # Initialize isolated RNG
         # Fallback to 0 if no seed provided (though loader should provide one)
         initial_seed = seed if seed is not None else 0
-        import random
         self._rng = random.Random(initial_seed)
         
         return self
@@ -239,7 +237,7 @@ class ServiceRuntime:
         # Immediately drop the request if somehow it has already expired?
         if attempt_deadline is not None and sim.timestep >= attempt_deadline:
             on_done(False, 0, DropReason.DEADLINE, len(self.queue))
-            raise Exception("Attempt already expired at submission time")
+            raise RuntimeError("Attempt already expired at submission time")
 
         start_cb = partial(self._begin_service, sim, on_done, attempt_deadline, is_retry)
 
@@ -394,31 +392,25 @@ class ServiceRuntime:
             queue_size=queue_size,
             service_name=self.cfg.name,
         )
-        
-        # If successful, we're done, BUT we must update load limiter if present
-        if attempt_ctx.is_successful:
-            if self.cfg.load_limiter is not None and hasattr(self.cfg.load_limiter, 'add_result'):
-                self.cfg.load_limiter.add_result(True, end_time)
-            ctx.on_root_done()
-            return
-        
+
         # Build middleware chain from config (cached in bind())
         if self._middleware_chain is None:
             self._middleware_chain = self._build_middleware_chain()
-        
-        # Execute middleware chain to decide retry
+
+        # Execute middleware chain for ALL outcomes (success and failure).
+        # The chain handles load limiter state tracking and retry decisions.
         chain = self._middleware_chain
-        
+
         def final_handler(attempt_ctx: AttemptContext):
             """Final handler after middleware chain"""
-            if attempt_ctx.should_retry:
+            if attempt_ctx.is_successful or not attempt_ctx.should_retry:
+                # Success or no retry -> mark as done
+                ctx.on_root_done()
+            else:
                 # Schedule retry
                 next_start = end_time + attempt_ctx.retry_delay
                 sim.schedule(next_start, partial(self._start_attempt, sim, ctx))
-            else:
-                # No retry, mark as done
-                ctx.on_root_done()
-        
+
         chain.execute(attempt_ctx, final_handler)
     
     def _build_middleware_chain(self) -> MiddlewareChain:

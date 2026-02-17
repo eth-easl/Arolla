@@ -45,22 +45,23 @@ class RetryMiddleware(Middleware):
         
         # Consult retry policy
         retry_ctx = RetryContext(attempt=ctx.attempt_number, now=ctx.end_time)
-        should_retry, delay = self.policy.next_delay(retry_ctx)
-        
+        policy_allows, delay = self.policy.next_delay(retry_ctx)
+
         # Check global deadline constraint
-        if should_retry and ctx.global_deadline is not None:
+        deadline_exceeded = False
+        if policy_allows and ctx.global_deadline is not None:
             next_start = ctx.end_time + delay
             if next_start >= ctx.global_deadline:
-                should_retry = False
-        
+                deadline_exceeded = True
+
         # Update context
-        if should_retry:
+        if policy_allows and not deadline_exceeded:
             ctx.should_retry = True
             ctx.retry_delay = delay
             ctx.metadata['retry_reason'] = 'policy_allowed'
         else:
             ctx.should_retry = False
-            ctx.metadata['retry_reason'] = 'policy_denied' if not should_retry else 'deadline_exceeded'
+            ctx.metadata['retry_reason'] = 'deadline_exceeded' if deadline_exceeded else 'policy_denied'
         
         # Pass to next middleware
         next_fn(ctx)

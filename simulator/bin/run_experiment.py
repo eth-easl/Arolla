@@ -140,9 +140,6 @@ Examples:
         if args.verbose:
             print(f"Exporting results...")
         
-        if args.verbose:
-            print(f"Exporting results...")
-        
         # Merge metrics from all clients into a single DataFrame
         import pandas as pd
         
