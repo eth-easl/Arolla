@@ -67,6 +67,7 @@ REMOTE_EOF
 # ── App loading ──────────────────────────────────────────────────────────────
 # These variables are set after load_app():
 APP_NAME="" APP_NS="" APP_GATEWAY_NAME="" APP_HOST="" APP_DEPLOYMENTS=""
+APP_STATEFULSETS="" APP_WAIT_JOBS=""
 APP_DIR="" REMOTE_MANIFESTS_DIR=""
 
 load_app() {
@@ -156,6 +157,12 @@ do_deploy() {
 
     # Build the list of rollout-status waits
     local wait_cmds=""
+    for sts in ${APP_STATEFULSETS}; do
+        wait_cmds+="kubectl -n ${APP_NS} rollout status statefulset/${sts} --timeout=180s"$'\n'
+    done
+    for job in ${APP_WAIT_JOBS}; do
+        wait_cmds+="kubectl -n ${APP_NS} wait --for=condition=complete job/${job} --timeout=120s"$'\n'
+    done
     for dep in ${APP_DEPLOYMENTS}; do
         wait_cmds+="kubectl -n ${APP_NS} rollout status deployment/${dep} --timeout=120s"$'\n'
     done
@@ -164,9 +171,13 @@ do_deploy() {
         M='${REMOTE_MANIFESTS_DIR}'
 
         # Apply namespace first (so other resources have a target namespace)
-        if [[ -f \${M}/namespace.yaml ]]; then
-            echo '=== Applying namespace.yaml ==='
-            kubectl apply -f \${M}/namespace.yaml
+        NS_FILE=''
+        for f in \${M}/namespace.yaml \${M}/*namespace*.yaml; do
+            if [[ -f \"\$f\" ]]; then NS_FILE=\"\$f\"; break; fi
+        done
+        if [[ -n \"\$NS_FILE\" ]]; then
+            echo '=== Applying namespace ==='
+            kubectl apply -f \"\$NS_FILE\"
             echo ''
         fi
 
