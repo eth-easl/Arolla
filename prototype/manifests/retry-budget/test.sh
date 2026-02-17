@@ -1,6 +1,10 @@
 # Custom test logic for the retry budget demo.
 # Sourced by deploy-app.sh — has access to: gateway_url, APP_HOST, APP_NS,
-#   APP_GATEWAY_NAME, MASTER_HOST, CYAN, GREEN, NC, remote(), remote_capture(), info(), ok(), etc.
+#   APP_GATEWAY_NAME, MASTER_HOST, CLIENT_HOST, CYAN, GREEN, NC,
+#   remote(), remote_capture(), info(), ok(), etc.
+#
+# Client traffic originates from CLIENT_HOST (external load generator).
+# Envoy stats/config queries go to MASTER_HOST (K8s control plane).
 
 run_app_tests() {
     local gateway_url="$1"
@@ -30,20 +34,27 @@ run_app_tests() {
     info "Envoy stats reset."
     echo ""
 
-    # ── Send traffic ─────────────────────────────────────────────────────
-    echo -e "${CYAN}--- Sending ${num_requests} requests ---${NC}"
+    # ── Send traffic from client machine ────────────────────────────────
+    info "Client machine: ${CLIENT_HOST}"
+    echo -e "${CYAN}--- Sending ${num_requests} requests from ${CLIENT_HOST} ---${NC}"
     echo ""
-    local ok_count=0 fail_count=0 response status_codes=""
-    for i in $(seq 1 "$num_requests"); do
-        response=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 \
-            -H "Host: ${APP_HOST}" "${gateway_url}/" 2>/dev/null) || response="000"
-        status_codes+="$response"$'\n'
-        if [[ "$response" == "200" ]]; then
+    local status_codes
+    status_codes=$(remote_capture "$CLIENT_HOST" "
+        for i in \$(seq 1 ${num_requests}); do
+            curl -s -o /dev/null -w '%{http_code}\n' --connect-timeout 5 \
+                -H 'Host: ${APP_HOST}' '${gateway_url}/' 2>/dev/null || echo '000'
+        done
+    " 2>/dev/null)
+
+    local ok_count=0 fail_count=0
+    while IFS= read -r code; do
+        [[ -z "$code" ]] && continue
+        if [[ "$code" == "200" ]]; then
             ((ok_count++)) || true
         else
             ((fail_count++)) || true
         fi
-    done
+    done <<< "$status_codes"
 
     echo "  Client-side results (what the caller sees):"
     echo "$status_codes" | grep -v '^$' | sort | uniq -c | sort -rn | while read -r count code; do

@@ -1,10 +1,11 @@
 # Client configuration for the retry budget demo.
 #
-# The client runs from your LOCAL MACHINE.
-# Traffic flows: local curl → Gateway NodePort → HTTPRoute (with retries) → backend
+# The client runs from CLIENT_HOST (defined in k8s-config.sh), not the local
+# machine. Traffic flows:
+#   CLIENT_HOST (curl) → Gateway NodePort → HTTPRoute (with retries) → backend
 #
-# The backend has 2 healthy pods + 1 faulty pod (returns 503).
-# ~33% of requests hit the faulty pod, triggering retries.
+# The backend has a tunable failure rate (default 50%).
+# Failed requests trigger per-request retries (HTTPRoute).
 # The BackendTrafficPolicy caps retries at 20% of total traffic.
 #
 # ── Get the Gateway endpoint ─────────────────────────────────────────────────
@@ -15,16 +16,16 @@
 #
 #   Or just run:  ./deploy-app.sh retry-budget --status
 #
-# ── Test commands ────────────────────────────────────────────────────────────
+# ── Test commands (run on CLIENT_HOST via SSH) ───────────────────────────────
 #
 #   # Single request (may succeed or get 503 after retries exhausted)
-#   curl -s -H 'Host: retry.example.com' http://<MASTER_HOST>:$NODE_PORT/
+#   ssh $CLIENT_HOST "curl -s -H 'Host: retry.example.com' http://<MASTER_HOST>:\$NODE_PORT/"
 #
 #   # Blast traffic to observe retry budget in action
-#   for i in $(seq 1 100); do
-#     curl -s -o /dev/null -w "%{http_code}\n" \
-#       -H 'Host: retry.example.com' http://<MASTER_HOST>:$NODE_PORT/
-#   done | sort | uniq -c
+#   ssh $CLIENT_HOST "for i in \$(seq 1 100); do
+#     curl -s -o /dev/null -w '%{http_code}\n' \
+#       -H 'Host: retry.example.com' http://<MASTER_HOST>:\$NODE_PORT/
+#   done | sort | uniq -c"
 #
 #   Or just run:  ./deploy-app.sh retry-budget --test
 ---

@@ -1,7 +1,9 @@
 # Client configuration for testing the demo.
 #
-# The client runs from your LOCAL MACHINE (not as an in-cluster pod).
-# It sends HTTP requests to the Gateway's NodePort on the master node.
+# The client runs from CLIENT_HOST (defined in k8s-config.sh), not the local
+# machine. Traffic flows:
+#   CLIENT_HOST (curl) → Gateway NodePort → HTTPRoute → backend-v1 / backend-v2
+#
 # The Gateway + HTTPRoute handle routing and traffic splitting server-side.
 #
 # ── Get the Gateway endpoint ─────────────────────────────────────────────────
@@ -12,14 +14,14 @@
 #
 #   Or just run:  ./deploy-app.sh demo --status
 #
-# ── Test commands ────────────────────────────────────────────────────────────
+# ── Test commands (run on CLIENT_HOST via SSH) ───────────────────────────────
 #
-#   curl -s -H 'Host: test.example.com' http://<MASTER_HOST>:$NODE_PORT/
+#   ssh $CLIENT_HOST "curl -s -H 'Host: test.example.com' http://<MASTER_HOST>:\$NODE_PORT/"
 #
 #   # 10 requests to observe canary split:
-#   for i in $(seq 1 10); do
-#     curl -s -H 'Host: test.example.com' http://<MASTER_HOST>:$NODE_PORT/
-#   done
+#   ssh $CLIENT_HOST "for i in \$(seq 1 10); do
+#     curl -s -H 'Host: test.example.com' http://<MASTER_HOST>:\$NODE_PORT/
+#   done"
 #
 #   Or just run:  ./deploy-app.sh demo --test
 #
