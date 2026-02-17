@@ -97,18 +97,16 @@ class AIMDGlobalRetryBudget(LoadLimiter):
 
     def add_result(self, success: bool, now: Optional[TimePoint] = None) -> None:
         if now is None: return
-        
+
         # Initialize window start if needed
         if self._window_start is None:
             self._window_start = now
 
-        # Lazily close/update window if we are past duration (handled in _refill usually,
-        # but add_result might happen without request_ticket calls if all succeed).
-        # We'll just accumulate. The `_update_policy` logic in `request_ticket` handles strict timing.
-        # But wait, if we process old results?
-        # Ideally we only count results falling in current window.
-        # Simplification: Just count everything since last reset.
-        
+        # Evaluate and reset the window even when no retry tickets are requested.
+        # Without this, stats accumulate across windows indefinitely if all requests
+        # succeed (no retries), causing incorrect backoff when retries eventually resume.
+        self._update_policy(now)
+
         self._window_requests += 1
         if not success:
             self._window_failures += 1

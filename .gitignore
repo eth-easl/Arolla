@@ -213,3 +213,4 @@ outputs/
 *.png
 *.DS_Store
 results*/
+.k8s-deploy-logs/

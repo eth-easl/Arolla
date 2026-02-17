@@ -1,0 +1,83 @@
+# Backend service with tunable failure rate.
+#
+# A single Deployment running a lightweight Python HTTP server.
+# Each request randomly returns 200 or 503 based on FAILURE_RATE (0-100).
+#
+# To change the failure rate, edit the FAILURE_RATE env var below
+# and re-deploy:  ./deploy-app.sh retry-budget
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-server
+  namespace: retry-budget-test
+data:
+  server.py: |
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import random, os
+
+    FAILURE_RATE = int(os.environ.get('FAILURE_RATE', '30'))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if random.randint(1, 100) <= FAILURE_RATE:
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b"503 service unavailable\n")
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"200 ok\n")
+
+        def log_message(self, format, *args):
+            pass
+
+    print(f"Starting server on :5678 with FAILURE_RATE={FAILURE_RATE}%")
+    HTTPServer(('', 5678), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: retry-budget-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: server
+          image: python:3-alpine
+          command: ["python3", "/app/server.py"]
+          ports:
+            - containerPort: 5678
+          env:
+            - name: FAILURE_RATE
+              value: "50"          # ← tune this: 0 = never fail, 100 = always fail
+          volumeMounts:
+            - name: server-script
+              mountPath: /app
+      volumes:
+        - name: server-script
+          configMap:
+            name: backend-server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: retry-budget-test
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 5678

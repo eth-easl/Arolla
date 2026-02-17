@@ -1,0 +1,17 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: retry-gateway
+  namespace: retry-budget-test
+spec:
+  gatewayClassName: istio
+  infrastructure:
+    annotations:
+      networking.istio.io/service-type: NodePort
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same

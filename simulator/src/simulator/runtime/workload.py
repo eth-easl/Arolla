@@ -13,7 +13,7 @@ from simulator.faults.events import FaultEventsTracker
 class Workload:
     base_rps: float
     duration_s: int
-    load_spikes: List[LoadSpike] = ()
+    load_spikes: List[LoadSpike] = field(default_factory=list)
     rng_seed: Optional[int] = None
     _rng: random.Random = field(init=False, repr=False)
 

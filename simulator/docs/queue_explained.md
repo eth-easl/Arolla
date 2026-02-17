@@ -293,6 +293,6 @@ latency_injections:
 
 ## Further Reading
 
-- **Technical details:** See `mgck_queue_explanation.md` for full implementation
+- **Technical details:** See `docs/policy_analysis.md` for policy comparison
 - **Queueing theory:** Look up "M/G/c/K queue" or "Kendall's notation"
 - **Code:** `src/simulator/runtime/service.py`

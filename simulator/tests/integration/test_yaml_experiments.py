@@ -42,99 +42,107 @@ class TestYAMLExperiments(unittest.TestCase):
         """Test that default.yaml runs to completion"""
         yaml_path = self.experiments_dir / 'default.yaml'
         config = ConfigLoader.load_from_file(str(yaml_path))
-        
-        # Build simulation
-        sim, client, workload, tracker = ConfigLoader.build_simulation(config)
-        
+
+        # Build simulation (returns lists of clients/workloads)
+        sim, clients, workloads, tracker = ConfigLoader.build_simulation(config)
+
         # Run simulation
-        workload.drive(sim, client.start_request)
+        for client, workload in zip(clients, workloads):
+            workload.drive(sim, client.start_request)
         sim.run(until=s_to_ns(config.workload.duration_s))
-        
+
         # Verify simulation ran
+        client = clients[0]
         self.assertGreater(len(client.roots), 0, "Should have processed requests")
-        
+
         # Get summary
         summary = client.metrics().summary()
         self.assertGreater(summary.total, 0)
         self.assertGreater(summary.succeeded, 0)
-        
+
         success_rate = summary.succeeded / summary.total if summary.total > 0 else 0.0
         self.assertGreaterEqual(success_rate, 0.0)
         self.assertLessEqual(success_rate, 1.0)
-        
+
         print(f"✓ default.yaml: {summary.total} requests, "
               f"{success_rate:.1%} success rate")
     
     def test_2_chain_yaml_runs(self):
         """Test that 2_chain.yaml (service dependencies) runs correctly"""
         yaml_path = self.experiments_dir / '2_chain.yaml'
-        
+
         if not yaml_path.exists():
             self.skipTest(f"2_chain.yaml not found at {yaml_path}")
-        
+
         config = ConfigLoader.load_from_file(str(yaml_path))
-        
+
         # Should have 2 services
         self.assertEqual(len(config.services), 2, "Should have 2 services in chain")
-        
+
         # Build and run
-        sim, client, workload, tracker = ConfigLoader.build_simulation(config)
-        workload.drive(sim, client.start_request)
+        sim, clients, workloads, tracker = ConfigLoader.build_simulation(config)
+        for client, workload in zip(clients, workloads):
+            workload.drive(sim, client.start_request)
         sim.run(until=s_to_ns(config.workload.duration_s))
-        
+
         # Verify ran
+        client = clients[0]
         self.assertGreater(len(client.roots), 0)
         summary = client.metrics().summary()
         success_rate = summary.succeeded / summary.total if summary.total > 0 else 0.0
-        
+
         print(f"✓ 2_chain.yaml: {summary.total} requests, "
               f"{success_rate:.1%} success rate")
     
     def test_circuit_breaker_yaml_runs(self):
         """Test that circuit_breaker.yaml runs and circuit breaker activates"""
         yaml_path = self.experiments_dir / 'circuit_breaker.yaml'
-        
+
         if not yaml_path.exists():
             self.skipTest(f"circuit_breaker.yaml not found at {yaml_path}")
-        
+
         config = ConfigLoader.load_from_file(str(yaml_path))
-        
+
         # Build and run
-        sim, client, workload, tracker = ConfigLoader.build_simulation(config)
-        workload.drive(sim, client.start_request)
+        sim, clients, workloads, tracker = ConfigLoader.build_simulation(config)
+        for client, workload in zip(clients, workloads):
+            workload.drive(sim, client.start_request)
         sim.run(until=s_to_ns(config.workload.duration_s))
-        
+
         # Verify ran
+        client = clients[0]
         self.assertGreater(len(client.roots), 0)
         summary = client.metrics().summary()
         success_rate = summary.succeeded / summary.total if summary.total > 0 else 0.0
-        
+
         # With circuit breaker and failures, success rate should be < 100%
-        self.assertLess(success_rate, 1.0, 
+        self.assertLess(success_rate, 1.0,
                        "Circuit breaker should cause some failures")
-        
+
         print(f"✓ circuit_breaker.yaml: {summary.total} requests, "
               f"{success_rate:.1%} success rate")
     
     def test_jittered_backoff_yaml_runs(self):
         """Test that jittered_backoff.yaml runs with fault injection"""
         yaml_path = self.experiments_dir / 'jittered_backoff.yaml'
-        
+
         if not yaml_path.exists():
             self.skipTest(f"jittered_backoff.yaml not found at {yaml_path}")
-        
+
         config = ConfigLoader.load_from_file(str(yaml_path))
-        
+
         # Build and run
-        sim, client, workload, tracker = ConfigLoader.build_simulation(config)
-        workload.drive(sim, client.start_request)
+        sim, clients, workloads, tracker = ConfigLoader.build_simulation(config)
+        for client, workload in zip(clients, workloads):
+            workload.drive(sim, client.start_request)
         sim.run(until=s_to_ns(config.workload.duration_s))
-        
+
         # Verify ran
+        client = clients[0]
         self.assertGreater(len(client.roots), 0)
         summary = client.metrics().summary()
         success_rate = summary.succeeded / summary.total if summary.total > 0 else 0.0
-        
+
         print(f"✓ jittered_backoff.yaml: {summary.total} requests, "
               f"{success_rate:.1%} success rate, "
               f"P99={summary.p99:.1f}ms")
