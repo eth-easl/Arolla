@@ -1,0 +1,79 @@
+# Diamond dependency topology:
+#
+#     A
+#    / \
+#   B   C
+#    \ /
+#     D
+#
+# A calls B and C in parallel, both B and C depend on D.
+
+name: diamond_dependency
+seed: 42
+
+services:
+  # Leaf service (shared by B and C)
+  - name: D
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0
+    workers: 2
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: 0.5  
+
+  # Mid-tier services (both depend on D)
+  - name: B
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0
+    workers: 1
+    dependencies:
+      - service: D
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 0
+
+  - name: C
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0
+    workers: 1
+    dependencies:
+      - service: D
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 0
+
+  # Entry service (fan-out to B and C)
+  - name: A
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0
+    workers: 1
+    dependencies:
+      - service: B
+      - service: C
+    dependency_call_pattern: parallel
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 0
+
+clients:
+  - name: user
+    target_service: A
+    workload:
+      base_rps: 10
+      duration_s: 60
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 0
+    timeout:
+      global_ms: 500
+      attempt_ms: 200

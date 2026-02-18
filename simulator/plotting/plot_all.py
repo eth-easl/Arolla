@@ -12,7 +12,7 @@ from pathlib import Path
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from plotting.core import load_csv, get_time_range
+from plotting.core import load_and_aggregate, get_time_range
 from plotting.core.style import add_fault_events
 import matplotlib.pyplot as plt
 
@@ -386,6 +386,29 @@ def plot_success_rate_detailed(df, output_dir, fault_events=None):
 
 
 
+def _plot_comparison_metric(df, clients, metric_col, title, ylabel, output_path,
+                            fault_events=None, **kwargs):
+    """Plot a single metric for all clients on one chart (comparison view)."""
+    from plotting.core import setup_plot, save_plot
+    from plotting.core.style import add_fault_events as _add_faults
+
+    setup_plot(title, "Time (s)", ylabel)
+    lw = kwargs.get('line_width', 2.0)
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+
+    for i, client in enumerate(clients):
+        subset = df[df['base_client'] == client].sort_values('timepoint')
+        if metric_col in subset.columns:
+            color = CLIENT_COLORS.get(client, colors[i % len(colors)])
+            plt.plot(subset['timepoint'], subset[metric_col],
+                     label=client, color=color, linewidth=lw)
+
+    _add_faults(fault_events)
+    plt.legend(loc='best')
+    save_plot(output_path)
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate all plots from simulation results',
@@ -454,56 +477,8 @@ Examples:
              csv_file_path = input_path
 
         print(f"Loading data from {csv_file_path}...")
-        raw_df = load_csv(str(csv_file_path))
-        print(f"✓ Loaded {len(raw_df)} rows")
-        
-        # Helper to extract base name
-        def get_base_name(name):
-            if not isinstance(name, str): return str(name)
-            parts = name.rsplit('.', 1)
-            if len(parts) == 2 and parts[1].isdigit():
-                return parts[0]
-            return name
-
-        # 1. Pre-process: Aggregate Replicas (if client_id exists)
-        if 'client_id' in raw_df.columns:
-            raw_df['base_client'] = raw_df['client_id'].apply(get_base_name)
-            
-            # Aggregate replicas into base clients
-            print("  Consolidating replicas into base clients...")
-            sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
-                        'failure_root', 'failure_retry', 'failure_queue_full', 
-                        'failure_deadline', 'failure_server', 'total_request', 'total_failure']
-            sum_cols = [c for c in sum_cols if c in raw_df.columns]
-            
-            agg_dict = {c: 'sum' for c in sum_cols}
-            if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum'
-            if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
-            
-            latency_cols = ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']
-            for lc in latency_cols:
-                if lc in raw_df.columns: agg_dict[lc] = 'max'
-
-            # Multi-client DF (By Base Client)
-            df_by_client = raw_df.groupby(['timepoint', 'base_client']).agg(agg_dict).reset_index()
-            clients = sorted(df_by_client['base_client'].unique())
-            print(f"  identified clients: {clients}")
-        else:
-            df_by_client = raw_df
-            df_by_client['base_client'] = 'unknown'
-            clients = []
-
-        # 2. Global Aggregation (System View)
-        print("  Aggregating global stats...")
-        sum_cols_global = [c for c in df_by_client.columns if c not in ['timepoint', 'base_client', 'client_id'] and df_by_client[c].dtype.kind in 'biufc']
-        # Recalculate agg dict for global
-        agg_dict_global = {c: 'sum' for c in sum_cols_global}
-        # exceptions
-        if 'queue_avg_at_attempt_end' in agg_dict_global: agg_dict_global['queue_avg_at_attempt_end'] = 'mean'
-        for lc in ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']:
-            if lc in agg_dict_global: agg_dict_global[lc] = 'max'
-            
-        df_global = df_by_client.groupby('timepoint').agg(agg_dict_global).reset_index()
+        df_by_client, df_global, clients = load_and_aggregate(str(csv_file_path))
+        print(f"✓ Loaded data, identified {len(clients)} clients: {clients}")
             
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")
@@ -593,28 +568,35 @@ Examples:
     
     print(f"\nGenerating plots in {output_dir}/...")
 
-    # 3. Generate Global Plots
-    print("  Generating Global/Compound plots...")
-    generate_plot_set(df_global, output_dir, "Global")
-    
-    # New: Comparative Success Rate
-    if 'base_client' in df_by_client.columns:
-        print("  Generating Success Rate Comparison...")
-        plot_success_rate_comparison(df_by_client, output_dir, args.fault_events, **style_kwargs)
+    # --- analysis/ folder: cross-client comparisons only (multi-client) ---
+    if len(clients) > 1 and 'base_client' in df_by_client.columns:
+        analysis_dir = output_dir / "analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. Generate Per-Client Plots
+        print("  Generating cross-client comparison plots...")
+        plot_success_rate_comparison(df_by_client, analysis_dir, args.fault_events, **style_kwargs)
+
+        # Additional comparison plots (absorbed from compare_clients.py)
+        for metric, title, ylabel, fname in [
+            ('p99', 'P99 Latency Comparison', 'Latency (ms)', 'compare_latency_p99'),
+            ('p50', 'P50 Latency Comparison', 'Latency (ms)', 'compare_latency_p50'),
+            ('total_request', 'Throughput (Sent)', 'Avg Requests/sec', 'compare_throughput'),
+        ]:
+            _plot_comparison_metric(
+                df_by_client, clients, metric, title, ylabel,
+                analysis_dir / f'{fname}.{args.format}', args.fault_events, **style_kwargs
+            )
+
+    # --- clients/ folder: per-client individual plots ---
+    clients_dir = output_dir / "clients"
     for client in clients:
-        client_dir = output_dir / client
-        client_dir.mkdir(exist_ok=True)
+        client_dir = clients_dir / client
+        client_dir.mkdir(parents=True, exist_ok=True)
         subset = df_by_client[df_by_client['base_client'] == client]
         print(f"Processing client: {client}...")
         generate_plot_set(subset, client_dir, f"Client: {client}")
     
     print(f"\n✅ All plots generated in {output_dir}/")
-
-
-
-    
     return 0
 
 

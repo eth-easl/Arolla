@@ -80,23 +80,40 @@ class ServiceRuntime:
     queue: List[QItem] = field(default_factory=list)
     _seq: int = 0
 
-    dependency: Optional[ServiceRuntime] = None
+    # Multi-dependency support (replaces old single 'dependency')
+    dependencies: List[ServiceRuntime] = field(default_factory=list)
+    dependency_optionality: List[bool] = field(default_factory=list)  # per-dep: True = optional
+    dependency_call_pattern: str = "sequential"  # "sequential" or "parallel"
+
+    # Legacy single-dependency property for backward compat
+    @property
+    def dependency(self) -> Optional['ServiceRuntime']:
+        return self.dependencies[0] if self.dependencies else None
+
     _middleware_chain: Optional[MiddlewareChain] = field(default=None, init=False, repr=False)
     _rng: Optional[random.Random] = field(default=None, init=False, repr=False)
 
-    def bind(self, seed: Optional[int] = None):
+    # Per-service event recording (lightweight telemetry)
+    _events: List[tuple] = field(default_factory=list, init=False, repr=False)
+    _record_events: bool = field(default=False, init=False, repr=False)
+
+    def bind(self, seed: Optional[int] = None, record_events: bool = False):
         self.in_flight = 0
         self.queue.clear()
         self._seq = 0
-        # Build middleware chain once during initialization
         self._middleware_chain = self._build_middleware_chain()
+        self._record_events = record_events
+        self._events = []
         
-        # Initialize isolated RNG
-        # Fallback to 0 if no seed provided (though loader should provide one)
         initial_seed = seed if seed is not None else 0
         self._rng = random.Random(initial_seed)
         
         return self
+    
+    @property
+    def events(self) -> List[tuple]:
+        """Return recorded events: (timestamp_ns, latency_ns, success, drop_reason, queue_size, attempt_num, is_retry)"""
+        return self._events
 
     def submit_request(
         self,
@@ -279,41 +296,58 @@ class ServiceRuntime:
 
         self.in_flight += 1
 
-        if self.dependency is not None:
-            # Start downstream request; measure total time from here
+        if self.dependencies:
+            # Multi-dependency fan-out
             start_t = sim.timestep
 
-            def downstream_done(
-                    success: bool,
-                    svc_time: TimeDuration,
-                    drop_reason: DropReason,
-                    queue_size: int,
-                    _begin: TimePoint,
-                    _deadline: Optional[TimePoint],
-            ):
-                total_time = sim.timestep - start_t
+            def on_all_deps_done(all_success: bool, worst_reason: DropReason):
+                """Called when all dependencies have completed."""
+                if not all_success:
+                    # Dependencies failed — report failure immediately, no own processing
+                    total_time = sim.timestep - start_t
+                    self.in_flight -= 1
+                    on_done(False, total_time, worst_reason, len(self.queue))
+                    self._start_next(sim)
+                    return
 
-                local_failed = self._fails_now(sim.timestep, sim)
-                combined_success = success and not local_failed
+                # Dependencies succeeded — now simulate this service's own processing time
+                service_time = self._sample_service_time(sim.timestep, sim)
 
-                final_reason = drop_reason
-                if not success:
-                    final_reason = drop_reason
-                elif local_failed:
-                    final_reason = DropReason.SERVER_FAILURE
+                # Respect deadline
+                expiry = (
+                    min(sim.timestep + service_time, attempt_deadline)
+                    if attempt_deadline is not None
+                    else sim.timestep + service_time
+                )
 
-                self.in_flight -= 1
-                on_done(combined_success, total_time, final_reason, len(self.queue))
-                self._start_next(sim)
+                def finish_after_deps():
+                    total_time = sim.timestep - start_t
+                    local_failed = self._fails_now(sim.timestep, sim)
+                    timed_out = attempt_deadline is not None and sim.timestep >= attempt_deadline
 
-            # Forward call to dependency (respecting our attempt deadline)
-            self.dependency.submit_request(
-                sim,
-                on_attempt_done=downstream_done,
-                on_root_done=lambda: None,
-                global_deadline=attempt_deadline,
-                is_retry=is_retry,
-            )
+                    if timed_out:
+                        self.in_flight -= 1
+                        on_done(False, total_time, DropReason.DEADLINE, len(self.queue))
+                    elif local_failed:
+                        self.in_flight -= 1
+                        on_done(False, total_time, DropReason.SERVER_FAILURE, len(self.queue))
+                    else:
+                        self.in_flight -= 1
+                        on_done(True, total_time, DropReason.NONE, len(self.queue))
+                    self._start_next(sim)
+
+                sim.schedule(expiry, finish_after_deps)
+
+            if self.dependency_call_pattern == "parallel":
+                self._call_deps_parallel(
+                    sim, self.dependencies, self.dependency_optionality,
+                    on_all_deps_done, attempt_deadline, is_retry
+                )
+            else:  # sequential (default)
+                self._call_deps_sequential(
+                    sim, self.dependencies, self.dependency_optionality, 0,
+                    on_all_deps_done, attempt_deadline, is_retry
+                )
             return
 
         service_time = self._sample_service_time(sim.timestep, sim)
@@ -331,6 +365,88 @@ class ServiceRuntime:
             self._finish_service, sim, on_done, service_time, attempt_deadline
         )
         sim.schedule(expiry, finish_cb)
+
+    def _call_deps_parallel(
+        self,
+        sim: Simulator,
+        deps: List['ServiceRuntime'],
+        optionality: List[bool],
+        on_all_done: Callable[[bool, DropReason], None],
+        deadline: Optional[TimePoint],
+        is_retry: bool,
+    ):
+        """Call all dependencies concurrently, barrier-wait for all to complete."""
+        remaining = [len(deps)]  # mutable counter
+        any_required_failed = [False]
+        worst_reason = [DropReason.NONE]
+
+        def on_dep_done(
+            dep_idx: int,
+            success: bool,
+            svc_time: TimeDuration,
+            drop_reason: DropReason,
+            queue_size: int,
+            _begin: TimePoint,
+            _deadline: Optional[TimePoint],
+        ):
+            remaining[0] -= 1
+            is_optional = optionality[dep_idx] if dep_idx < len(optionality) else False
+            if not success and not is_optional:
+                any_required_failed[0] = True
+                worst_reason[0] = drop_reason
+            if remaining[0] == 0:
+                on_all_done(not any_required_failed[0], worst_reason[0])
+
+        for i, dep in enumerate(deps):
+            dep.submit_request(
+                sim,
+                on_attempt_done=partial(on_dep_done, i),
+                on_root_done=lambda: None,
+                global_deadline=deadline,
+                is_retry=is_retry,
+            )
+
+    def _call_deps_sequential(
+        self,
+        sim: Simulator,
+        deps: List['ServiceRuntime'],
+        optionality: List[bool],
+        idx: int,
+        on_all_done: Callable[[bool, DropReason], None],
+        deadline: Optional[TimePoint],
+        is_retry: bool,
+    ):
+        """Call dependencies one after another. Short-circuit on required failure."""
+        if idx >= len(deps):
+            on_all_done(True, DropReason.NONE)
+            return
+
+        def on_dep_done(
+            success: bool,
+            svc_time: TimeDuration,
+            drop_reason: DropReason,
+            queue_size: int,
+            _begin: TimePoint,
+            _deadline: Optional[TimePoint],
+        ):
+            is_optional = optionality[idx] if idx < len(optionality) else False
+            if not success and not is_optional:
+                # Required dep failed — short-circuit
+                on_all_done(False, drop_reason)
+                return
+            # Continue to next dependency
+            self._call_deps_sequential(
+                sim, deps, optionality, idx + 1,
+                on_all_done, deadline, is_retry
+            )
+
+        deps[idx].submit_request(
+            sim,
+            on_attempt_done=on_dep_done,
+            on_root_done=lambda: None,
+            global_deadline=deadline,
+            is_retry=is_retry,
+        )
 
     def _finish_service(
         self,
@@ -368,6 +484,18 @@ class ServiceRuntime:
         retry/timeout/load limiting logic directly.
         """
         end_time = sim.timestep
+        
+        # Record event for per-service metrics
+        if self._record_events:
+            self._events.append((
+                end_time,       # timestamp_ns
+                svc_time,       # latency_ns
+                success,        # success
+                drop_reason,    # drop_reason
+                queue_size,     # queue_size
+                ctx.attempt,    # attempt_num
+                ctx.attempt > 1,  # is_retry
+            ))
         
         # Notify caller about attempt completion
         ctx.on_attempt_done(

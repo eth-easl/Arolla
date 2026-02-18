@@ -227,54 +227,52 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         
         fault_events_file = output_dir / "fault_events.json"
         
-        # Find all CSV files in output dir
-        all_csvs = list(output_dir.glob("*.csv"))
+        # Find all client CSV files in output dir (exclude service_metrics.csv)
+        all_csvs = [f for f in output_dir.glob("*.csv") if f.name != "service_metrics.csv"]
         
         if not all_csvs:
              print(f"Error: No output CSVs found in {output_dir}")
              return 1
-             
-        # Case 1: Single Client (Legacy) - Exactly one CSV found
-        if len(all_csvs) == 1:
-            csv_file = all_csvs[0]
-            print(f"Detected single-client output: {csv_file.name}")
-            cmd = [
-                sys.executable,
-                "plotting/plot_all.py",
-                str(csv_file),
-                "-o", str(plots_dir)
-            ]
-            
-            # Add fault events if file exists
-            if fault_events_file.exists():
-                cmd.extend(["--fault-events", str(fault_events_file)])
-            
-            if time_range:
-                cmd.extend(["--time-range", time_range])
 
-            try:
-                subprocess.run(cmd, check=True)
-                print(f"\n✓ Plots generated in {plots_dir}/")
-            except subprocess.CalledProcessError as e:
-                print(f"\n⚠ Plotting failed with exit code {e.returncode}")
-        
-        # Case 2: Multi-Client - Multiple CSVs found
-        else:
-            print(f"Detected multi-client output ({len(all_csvs)} files).")
-            print("Running comparison plots...")
-            
+        # Use the first CSV (output.csv for single-client, or directory for multi)
+        csv_input = all_csvs[0] if len(all_csvs) == 1 else output_dir
+        print(f"Plotting from: {csv_input}")
+
+        cmd = [
+            sys.executable,
+            "plotting/plot_all.py",
+            str(csv_input),
+            "-o", str(plots_dir)
+        ]
+
+        # Add fault events if file exists
+        if fault_events_file.exists():
+            cmd.extend(["--fault-events", str(fault_events_file)])
+
+        if time_range:
+            cmd.extend(["--time-range", time_range])
+
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"\n✓ Plots generated in {plots_dir}/")
+        except subprocess.CalledProcessError as e:
+            print(f"\n⚠ Plotting failed with exit code {e.returncode}")
+
+        # Auto-detect per-service metrics and plot them
+        svc_metrics_csv = output_dir / "service_metrics.csv"
+        if svc_metrics_csv.exists():
+            print(f"\nDetected per-service metrics. Generating service plots...")
+            svc_plots_dir = plots_dir / "services"
             cmd = [
                 sys.executable,
-                "plotting/compare_clients.py",
+                "plotting/plot_services.py",
                 str(output_dir),
-                "-o", str(plots_dir)
+                "-o", str(svc_plots_dir)
             ]
-            
             try:
                 subprocess.run(cmd, check=True)
-                print(f"\n✓ Comparison plots generated in {plots_dir}/")
             except subprocess.CalledProcessError as e:
-                print(f"\n⚠ Plotting failed with exit code {e.returncode}")
+                print(f"\n⚠ Per-service plotting failed with exit code {e.returncode}")
     else:
         print(f"\nStep 2/2: Skipping plots (--no-plot)")
 

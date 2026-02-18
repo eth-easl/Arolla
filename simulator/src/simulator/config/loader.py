@@ -6,7 +6,7 @@ This module provides factory methods to construct simulation objects
 """
 
 import yaml
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from simulator.config.schema import *
 from simulator.core.models import TimeInterval
 from simulator.utils.time import s_to_ns, ms_to_ns
@@ -358,7 +358,9 @@ class ConfigLoader:
     def build_service(
         cfg: ServiceConfigYAML,
         sim: Simulator,
-        dependency: Optional[ServiceRuntime] = None,
+        dependencies: Optional[List[ServiceRuntime]] = None,
+        dependency_optionality: Optional[List[bool]] = None,
+        dependency_call_pattern: str = "sequential",
         seed: Optional[int] = None
     ) -> ServiceRuntime:
         """Build ServiceRuntime from configuration"""
@@ -368,8 +370,6 @@ class ConfigLoader:
         svc_rng = random.Random(initial_seed)
 
         # Build policies
-        # NOTE: Retry policy is technically Client-side in new schema, but for legacy support
-        # and complex service chains, we allow Service-side retry if configured.
         retry_policy = ConfigLoader.build_retry_policy(cfg.retry, svc_rng)
         timeout_policy = ConfigLoader.build_timeout_policy(cfg.timeout)
         load_limiter = ConfigLoader.build_load_limiter(
@@ -398,8 +398,13 @@ class ConfigLoader:
             load_limiter=load_limiter
         )
         
-        # Create service runtime
-        return ServiceRuntime(cfg=service_cfg, dependency=dependency).bind(seed=seed)
+        # Create service runtime with multi-dep support
+        return ServiceRuntime(
+            cfg=service_cfg,
+            dependencies=dependencies or [],
+            dependency_optionality=dependency_optionality or [],
+            dependency_call_pattern=dependency_call_pattern,
+        ).bind(seed=seed, record_events=True)
     
     @staticmethod
     def build_workload(cfg: WorkloadConfig) -> Workload:
@@ -418,12 +423,26 @@ class ConfigLoader:
     # ========================================================================
     
     @staticmethod
+    def _get_effective_deps(svc_cfg: ServiceConfigYAML) -> List[DependencyConfig]:
+        """
+        Return effective dependency list, handling backward compat.
+        Converts legacy 'dependency: str' to 'dependencies: [{service: str}]'.
+        """
+        if svc_cfg.dependencies:
+            return svc_cfg.dependencies
+        # Legacy single-dependency field
+        if svc_cfg.dependency is not None:
+            return [DependencyConfig(service=svc_cfg.dependency)]
+        return []
+
+    @staticmethod
     def build_simulation(config: ExperimentConfig):
         """
         Build complete simulation from experiment configuration.
+        Uses topological sort to resolve multi-level dependencies.
         
         Returns:
-            (simulator, client, workload, fault_tracker)
+            (simulator, clients, workloads, fault_tracker)
         """
         # Create simulator
         sim = Simulator(seed=config.seed)
@@ -431,35 +450,90 @@ class ConfigLoader:
         # Create fault events tracker
         fault_tracker = FaultEventsTracker()
         
-        # Build services (resolve dependencies)
-        services: Dict[str, ServiceRuntime] = {}
-        
         # Registry for shared budgets {id: Policy}
         shared_budgets: Dict[str, RetryBudgetPolicy] = {}
         
         # Helper to generate stable seed
         def get_stable_seed(base_seed: int, name: str) -> int:
             import hashlib
-            # Use deterministic hash
             h = hashlib.md5(f"{base_seed}:{name}".encode('utf-8')).hexdigest()
-            # Convert to int, mask to 32/64 bit
             return int(h, 16) & 0xFFFFFFFF
 
-        # First pass: build services without dependencies
-        for svc_cfg in config.services:
-            if svc_cfg.dependency is None:
-                svc_seed = get_stable_seed(config.seed, svc_cfg.name)
-                services[svc_cfg.name] = ConfigLoader.build_service(svc_cfg, sim, seed=svc_seed)
+        # ------------------------------------------------------------------
+        # Topological sort (Kahn's algorithm) for dependency resolution
+        # ------------------------------------------------------------------
+        svc_map: Dict[str, ServiceConfigYAML] = {s.name: s for s in config.services}
         
-        # Second pass: build services with dependencies
+        # Build adjacency: dep_names[name] = list of dependency service names
+        dep_names: Dict[str, List[str]] = {}
+        in_degree: Dict[str, int] = {s.name: 0 for s in config.services}
+        
         for svc_cfg in config.services:
-            if svc_cfg.dependency is not None:
-                dependency = services.get(svc_cfg.dependency)
-                if dependency is None:
-                    raise ValueError(f"Dependency {svc_cfg.dependency} not found for service {svc_cfg.name}")
+            deps = ConfigLoader._get_effective_deps(svc_cfg)
+            names = [d.service for d in deps]
+            # Validate all referenced deps actually exist
+            for dep_name in names:
+                if dep_name not in svc_map:
+                    raise ValueError(
+                        f"Dependency '{dep_name}' not found for service '{svc_cfg.name}'. "
+                        f"Available services: {list(svc_map.keys())}"
+                    )
+            dep_names[svc_cfg.name] = names
+            in_degree[svc_cfg.name] = len(names)
+        
+        # Queue starts with leaf services (no dependencies)
+        from collections import deque
+        queue = deque([name for name, deg in in_degree.items() if deg == 0])
+        topo_order: List[str] = []
+        
+        while queue:
+            name = queue.popleft()
+            topo_order.append(name)
+            # Decrement in-degree for all services that depend on 'name'
+            for other_name, other_deps in dep_names.items():
+                if name in other_deps:
+                    in_degree[other_name] -= 1
+                    if in_degree[other_name] == 0:
+                        queue.append(other_name)
+        
+        if len(topo_order) != len(config.services):
+            missing = set(s.name for s in config.services) - set(topo_order)
+            raise ValueError(f"Circular dependency detected involving: {missing}")
+        
+        # Build services in topological order
+        services: Dict[str, ServiceRuntime] = {}
+        
+        for name in topo_order:
+            svc_cfg = svc_map[name]
+            effective_deps = ConfigLoader._get_effective_deps(svc_cfg)
+            svc_seed = get_stable_seed(config.seed, name)
+            
+            if effective_deps:
+                dep_runtimes: List[ServiceRuntime] = []
+                dep_optionality: List[bool] = []
+                for dep_cfg in effective_deps:
+                    dep_rt = services.get(dep_cfg.service)
+                    if dep_rt is None:
+                        raise ValueError(
+                            f"Dependency '{dep_cfg.service}' not found for service '{name}'. "
+                            f"Available: {list(services.keys())}"
+                        )
+                    dep_runtimes.append(dep_rt)
+                    dep_optionality.append(dep_cfg.optional)
                 
-                svc_seed = get_stable_seed(config.seed, svc_cfg.name)
-                services[svc_cfg.name] = ConfigLoader.build_service(svc_cfg, sim, dependency, seed=svc_seed)
+                call_pattern = svc_cfg.dependency_call_pattern.value if hasattr(
+                    svc_cfg.dependency_call_pattern, 'value'
+                ) else str(svc_cfg.dependency_call_pattern)
+                
+                services[name] = ConfigLoader.build_service(
+                    svc_cfg, sim,
+                    dependencies=dep_runtimes,
+                    dependency_optionality=dep_optionality,
+                    dependency_call_pattern=call_pattern,
+                    seed=svc_seed,
+                )
+            else:
+                services[name] = ConfigLoader.build_service(svc_cfg, sim, seed=svc_seed)
         
         # Register fault events
         for svc_name, svc_runtime in services.items():
@@ -576,5 +650,5 @@ class ConfigLoader:
             workload.register_fault_events(fault_tracker)
             workloads.append(workload)
         
-        return sim, clients, workloads, fault_tracker
+        return sim, clients, workloads, fault_tracker, services
 

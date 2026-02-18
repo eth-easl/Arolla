@@ -197,6 +197,22 @@ FaultConfig = Union[LatencyInjectionConfig, PartialFailureConfig, LoadSpikeConfi
 
 
 # ============================================================================
+# Dependency Configuration
+# ============================================================================
+
+class DependencyCallPattern(str, Enum):
+    """How a service calls its dependencies"""
+    SEQUENTIAL = "sequential"  # Call deps one after another (total latency = sum)
+    PARALLEL = "parallel"      # Call all deps concurrently (total latency = max)
+
+
+class DependencyConfig(BaseModel):
+    """Configuration for a single service dependency"""
+    service: str = Field(description="Target service name")
+    optional: bool = Field(default=False, description="If True, failure of this dep does not fail the parent")
+
+
+# ============================================================================
 # Service Configuration
 # ============================================================================
 
@@ -220,8 +236,15 @@ class ServiceConfigYAML(BaseModel):
     latency_injections: List[LatencyInjectionConfig] = Field(default_factory=list)
     partial_failures: List[PartialFailureConfig] = Field(default_factory=list)
     
-    # Dependencies
-    dependency: Optional[str] = Field(default=None, description="Name of dependency service")
+    # Dependencies (new multi-dep support)
+    dependencies: List[DependencyConfig] = Field(default_factory=list, description="List of dependency services")
+    dependency_call_pattern: DependencyCallPattern = Field(
+        default=DependencyCallPattern.SEQUENTIAL,
+        description="How to call dependencies: sequential (sum latency) or parallel (max latency)"
+    )
+    
+    # Legacy single-dependency field (deprecated, auto-converted to dependencies)
+    dependency: Optional[str] = Field(default=None, description="DEPRECATED: use 'dependencies' list instead")
 
 
 # ============================================================================
