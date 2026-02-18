@@ -386,6 +386,29 @@ def plot_success_rate_detailed(df, output_dir, fault_events=None):
 
 
 
+def _plot_comparison_metric(df, clients, metric_col, title, ylabel, output_path,
+                            fault_events=None, **kwargs):
+    """Plot a single metric for all clients on one chart (comparison view)."""
+    from plotting.core import setup_plot, save_plot
+    from plotting.core.style import add_fault_events as _add_faults
+
+    setup_plot(title, "Time (s)", ylabel)
+    lw = kwargs.get('line_width', 2.0)
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b']
+
+    for i, client in enumerate(clients):
+        subset = df[df['base_client'] == client].sort_values('timepoint')
+        if metric_col in subset.columns:
+            color = CLIENT_COLORS.get(client, colors[i % len(colors)])
+            plt.plot(subset['timepoint'], subset[metric_col],
+                     label=client, color=color, linewidth=lw)
+
+    _add_faults(fault_events)
+    plt.legend(loc='best')
+    save_plot(output_path)
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate all plots from simulation results',
@@ -593,28 +616,35 @@ Examples:
     
     print(f"\nGenerating plots in {output_dir}/...")
 
-    # 3. Generate Global Plots
-    print("  Generating Global/Compound plots...")
-    generate_plot_set(df_global, output_dir, "Global")
-    
-    # New: Comparative Success Rate
-    if 'base_client' in df_by_client.columns:
-        print("  Generating Success Rate Comparison...")
-        plot_success_rate_comparison(df_by_client, output_dir, args.fault_events, **style_kwargs)
+    # --- analysis/ folder: cross-client comparisons only (multi-client) ---
+    if len(clients) > 1 and 'base_client' in df_by_client.columns:
+        analysis_dir = output_dir / "analysis"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. Generate Per-Client Plots
+        print("  Generating cross-client comparison plots...")
+        plot_success_rate_comparison(df_by_client, analysis_dir, args.fault_events, **style_kwargs)
+
+        # Additional comparison plots (absorbed from compare_clients.py)
+        for metric, title, ylabel, fname in [
+            ('p99', 'P99 Latency Comparison', 'Latency (ms)', 'compare_latency_p99'),
+            ('p50', 'P50 Latency Comparison', 'Latency (ms)', 'compare_latency_p50'),
+            ('total_request', 'Throughput (Sent)', 'Avg Requests/sec', 'compare_throughput'),
+        ]:
+            _plot_comparison_metric(
+                df_by_client, clients, metric, title, ylabel,
+                analysis_dir / f'{fname}.{args.format}', args.fault_events, **style_kwargs
+            )
+
+    # --- clients/ folder: per-client individual plots ---
+    clients_dir = output_dir / "clients"
     for client in clients:
-        client_dir = output_dir / client
-        client_dir.mkdir(exist_ok=True)
+        client_dir = clients_dir / client
+        client_dir.mkdir(parents=True, exist_ok=True)
         subset = df_by_client[df_by_client['base_client'] == client]
         print(f"Processing client: {client}...")
         generate_plot_set(subset, client_dir, f"Client: {client}")
     
     print(f"\n✅ All plots generated in {output_dir}/")
-
-
-
-    
     return 0
 
 
