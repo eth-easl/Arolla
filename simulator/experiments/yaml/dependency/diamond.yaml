@@ -18,6 +18,11 @@ services:
       median_ms: 10
       lognorm_sigma: 0
     workers: 2
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: 0.5  
 
   # Mid-tier services (both depend on D)
   - name: B
@@ -64,11 +69,11 @@ clients:
     target_service: A
     workload:
       base_rps: 10
-      duration_s: 30
+      duration_s: 60
     retry:
       type: fixed
       max_attempts: 3
       delay_ms: 0
-    timeout:  
+    timeout:
       global_ms: 500
       attempt_ms: 200
