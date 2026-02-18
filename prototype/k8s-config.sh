@@ -13,17 +13,17 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
 # ---------- Node definitions ----------
 # Master node
-MASTER_HOST="pc742.emulab.net"      # SSH-reachable address
+MASTER_HOST="pc723.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
 MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc741.emulab.net")
-WORKER_HOSTNAMES=("worker01")
+WORKER_HOSTS=("pc738.emulab.net" "pc712.emulab.net")
+WORKER_HOSTNAMES=("worker01" "worker02")
 WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
 
 # Client node (external load generator — not part of K8s cluster)
-CLIENT_HOST="pc745.emulab.net"      # SSH-reachable address
+CLIENT_HOST="pc702.emulab.net"      # SSH-reachable address
 
 # ---------- Kubernetes settings ----------
 K8S_VERSION="v1.30"                 # Kubernetes APT repo channel

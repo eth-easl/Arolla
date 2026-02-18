@@ -130,8 +130,19 @@ upload_manifests() {
     [[ -n "${SSH_KEY}" ]] && scp_opts+=" -i ${SSH_KEY}"
 
     eval "$(ssh_cmd "$MASTER_HOST")" "mkdir -p ${REMOTE_MANIFESTS_DIR}"
-    # Upload yaml files and conf/sh files
-    scp ${scp_opts} "${APP_DIR}"/*.yaml "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/"
+
+    # Upload top-level yaml files
+    scp ${scp_opts} "${APP_DIR}"/*.yaml "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/" 2>/dev/null || true
+
+    # Upload subdirectories (e.g. services/) preserving structure
+    for subdir in "${APP_DIR}"/*/; do
+        [[ -d "$subdir" ]] || continue
+        local dirname
+        dirname=$(basename "$subdir")
+        eval "$(ssh_cmd "$MASTER_HOST")" "mkdir -p ${REMOTE_MANIFESTS_DIR}/${dirname}"
+        scp ${scp_opts} "${subdir}"*.yaml "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/${dirname}/" 2>/dev/null || true
+    done
+
     ok "Manifests uploaded to ${REMOTE_MANIFESTS_DIR}/"
 }
 
@@ -181,9 +192,9 @@ do_deploy() {
             echo ''
         fi
 
-        # Apply all manifests (idempotent for namespace.yaml)
+        # Apply all manifests recursively (idempotent for namespace.yaml)
         echo '=== Applying all manifests ==='
-        kubectl apply -f \${M}/
+        kubectl apply -R -f \${M}/
         echo ''
 
         # Wait for deployments
@@ -335,7 +346,7 @@ do_cleanup() {
         M='${REMOTE_MANIFESTS_DIR}'
 
         echo 'Removing all resources…'
-        kubectl delete -f \${M}/ 2>/dev/null || true
+        kubectl delete -R -f \${M}/ 2>/dev/null || true
 
         rm -rf \${M}
 
