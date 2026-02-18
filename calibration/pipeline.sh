@@ -10,11 +10,13 @@
 #   5. (optional) compare.py         → calibration_report.txt
 #
 # Usage:
-#   ./pipeline.sh                       # collect (60s) + fit + generate
-#   ./pipeline.sh --wait 30             # shorter collection window
-#   RUN_SIM=1 ./pipeline.sh             # also run the simulator
-#   RUN_SIM=1 COMPARE=1 ./pipeline.sh   # full pipeline with comparison report
-#   DURATION=300 ./pipeline.sh          # longer simulation duration
+#   ./pipeline.sh                            # collect (60s) + fit + generate
+#   ./pipeline.sh --wait 30                  # shorter collection window
+#   RUN_SIM=1 ./pipeline.sh                  # also run the simulator
+#   RUN_SIM=1 COMPARE=1 ./pipeline.sh        # full pipeline with comparison + plot
+#   DURATION=300 ./pipeline.sh               # longer simulation duration
+#   ./pipeline.sh --no-collect               # skip collect/fit/generate; just re-run sim + compare
+#   RUN_SIM=1 COMPARE=1 ./pipeline.sh --no-collect   # re-run sim + compare only
 #
 # Environment variables:
 #   WAIT_SECS   Envoy counter window in seconds (default: 60)
@@ -35,6 +37,7 @@ RUN_SIM="${RUN_SIM:-0}"
 COMPARE="${COMPARE:-0}"
 DURATION="${DURATION:-120}"
 RPS_OVERRIDE="${RPS:-}"
+COLLECT=1   # set to 0 via --no-collect to skip stages 1-3
 
 RAW_STATS_DIR="${SCRIPT_DIR}/data/raw_stats"
 FITTED_PARAMS="${SCRIPT_DIR}/data/fitted_params.json"
@@ -49,34 +52,43 @@ banner() { echo -e "\n${GREEN}=== $* ===${NC}\n"; }
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --wait)     WAIT_SECS="$2";     shift 2 ;;
-        --duration) DURATION="$2";      shift 2 ;;
-        --rps)      RPS_OVERRIDE="$2";  shift 2 ;;
-        --run-sim)  RUN_SIM=1;          shift ;;
-        --compare)  COMPARE=1;          shift ;;
+        --wait)       WAIT_SECS="$2";     shift 2 ;;
+        --duration)   DURATION="$2";      shift 2 ;;
+        --rps)        RPS_OVERRIDE="$2";  shift 2 ;;
+        --run-sim)    RUN_SIM=1;          shift ;;
+        --compare)    COMPARE=1;          shift ;;
+        --no-collect) COLLECT=0; RUN_SIM=1; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
 
-# ── Stage 1: Collect ──────────────────────────────────────────────────────────
-banner "Stage 1/3: Collect Envoy stats (${WAIT_SECS}s window)"
-bash "${SCRIPT_DIR}/collect.sh" --wait "${WAIT_SECS}" --output "${RAW_STATS_DIR}"
+# ── Stages 1–3: Collect / Fit / Generate (skipped with --no-collect) ──────────
+if [[ "${COLLECT}" == "1" ]]; then
+    banner "Stage 1/3: Collect Envoy stats (${WAIT_SECS}s window)"
+    bash "${SCRIPT_DIR}/collect.sh" --wait "${WAIT_SECS}" --output "${RAW_STATS_DIR}"
 
-# ── Stage 2: Fit ──────────────────────────────────────────────────────────────
-banner "Stage 2/3: Fit simulator parameters"
-python3 "${SCRIPT_DIR}/fit.py" "${RAW_STATS_DIR}" --out "${FITTED_PARAMS}"
+    banner "Stage 2/3: Fit simulator parameters"
+    python3 "${SCRIPT_DIR}/fit.py" "${RAW_STATS_DIR}" --out "${FITTED_PARAMS}"
 
-# ── Stage 3: Generate YAML ────────────────────────────────────────────────────
-banner "Stage 3/3: Generate simulator YAML"
-RPS_ARG=""
-[[ -n "${RPS_OVERRIDE}" ]] && RPS_ARG="--rps ${RPS_OVERRIDE}"
+    banner "Stage 3/3: Generate simulator YAML"
+    RPS_ARG=""
+    [[ -n "${RPS_OVERRIDE}" ]] && RPS_ARG="--rps ${RPS_OVERRIDE}"
 
-python3 "${SCRIPT_DIR}/generate_config.py" "${FITTED_PARAMS}" \
-    --out "${GENERATED_YAML}" \
-    --duration "${DURATION}" \
-    ${RPS_ARG}
+    python3 "${SCRIPT_DIR}/generate_config.py" "${FITTED_PARAMS}" \
+        --out "${GENERATED_YAML}" \
+        --duration "${DURATION}" \
+        ${RPS_ARG}
 
-info "Generated: ${GENERATED_YAML}"
+    info "Generated: ${GENERATED_YAML}"
+else
+    info "Skipping collect/fit/generate (--no-collect); using existing:"
+    info "  ${FITTED_PARAMS}"
+    info "  ${GENERATED_YAML}"
+    if [[ ! -f "${GENERATED_YAML}" ]]; then
+        echo "Error: ${GENERATED_YAML} not found. Run without --no-collect first." >&2
+        exit 1
+    fi
+fi
 
 # ── Optional Stage 4: Run simulator ───────────────────────────────────────────
 if [[ "${RUN_SIM}" == "1" ]]; then
