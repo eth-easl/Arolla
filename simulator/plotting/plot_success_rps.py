@@ -12,7 +12,7 @@ from pathlib import Path
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from plotting.core import load_csv, get_time_range
+from plotting.core import load_and_aggregate, get_time_range
 from plotting.core.style import add_fault_events, setup_plot, save_plot
 import matplotlib.pyplot as plt
 
@@ -212,69 +212,16 @@ def main():
             csv_file = input_path
 
         print(f"Loading data from {csv_file}...")
-        raw_df = load_csv(str(csv_file))
-        print(f"✓ Loaded {len(raw_df)} rows")
+        df_by_client, df_global, clients = load_and_aggregate(str(csv_file))
         
-        # Check for multi-client data
-        if 'client_id' in raw_df.columns and raw_df['client_id'].nunique() > 1:
-            print(f"  Detected multiple clients: {raw_df['client_id'].unique()}")
-            
-            # Helper to extract base name
-            def get_base_name(name):
-                parts = name.rsplit('.', 1)
-                if len(parts) == 2 and parts[1].isdigit():
-                    return parts[0]
-                return name
-
-            raw_df['base_client'] = raw_df['client_id'].apply(get_base_name)
-            
-            # Check if aggregation is needed
-            if raw_df['base_client'].nunique() < raw_df['client_id'].nunique():
-                print("  Consolidating replicas (summing metrics)...")
-                
-                # Metrics to sum
-                sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
-                            'failure_root', 'failure_retry', 'failure_queue_full', 
-                            'failure_deadline', 'failure_server', 'total_request', 'total_failure']
-                
-                # Filter to existing columns
-                agg_dict = {c: 'sum' for c in sum_cols if c in raw_df.columns}
-                
-                if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum'
-                if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
-                
-                # Perform Groupby
-                df = raw_df.groupby(['timepoint', 'base_client']).agg(agg_dict).reset_index()
-                
-                # Rename base_client back to client_id so the plotting function uses the group name
-                df.rename(columns={'base_client': 'client_id'}, inplace=True)
-                
-                print(f"  Merged {raw_df['client_id'].nunique()} clients into {df['client_id'].nunique()} groups: {df['client_id'].unique()}")
-            else:
-                df = raw_df # Keep all rows, let plot function handle grouping
-        elif raw_df['timepoint'].duplicated().any():
-            print("  Detected multiple entries per timepoint (unknown source). Aggregating...")
-            
-            sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
-                        'failure_root', 'failure_retry', 'failure_queue_full', 
-                        'failure_deadline', 'failure_server', 'total_request', 'total_failure']
-            sum_cols = [c for c in sum_cols if c in raw_df.columns]
-            
-            agg_dict = {c: 'sum' for c in sum_cols}
-            
-            if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum'
-            if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
-            
-            latency_cols = ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']
-            for lc in latency_cols:
-                if lc in raw_df.columns:
-                    agg_dict[lc] = 'max'
-            
-            df = raw_df.groupby('timepoint').agg(agg_dict).reset_index()
-            print(f"✓ Aggregated to {len(df)} time buckets")
+        # Use df_by_client with base_client renamed to client_id for plot function
+        df_by_client.rename(columns={'base_client': 'client_id'}, inplace=True)
+        
+        if len(clients) > 1:
+            print(f"  Detected {len(clients)} clients: {clients}")
+            df = df_by_client
         else:
-            df = raw_df
-            print(f"✓ Loaded {len(df)} time buckets")
+            df = df_global
 
         # Calculate Metric
         if args.metric == 'success_rate':

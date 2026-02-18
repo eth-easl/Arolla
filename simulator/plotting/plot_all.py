@@ -12,7 +12,7 @@ from pathlib import Path
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from plotting.core import load_csv, get_time_range
+from plotting.core import load_and_aggregate, get_time_range
 from plotting.core.style import add_fault_events
 import matplotlib.pyplot as plt
 
@@ -477,56 +477,8 @@ Examples:
              csv_file_path = input_path
 
         print(f"Loading data from {csv_file_path}...")
-        raw_df = load_csv(str(csv_file_path))
-        print(f"✓ Loaded {len(raw_df)} rows")
-        
-        # Helper to extract base name
-        def get_base_name(name):
-            if not isinstance(name, str): return str(name)
-            parts = name.rsplit('.', 1)
-            if len(parts) == 2 and parts[1].isdigit():
-                return parts[0]
-            return name
-
-        # 1. Pre-process: Aggregate Replicas (if client_id exists)
-        if 'client_id' in raw_df.columns:
-            raw_df['base_client'] = raw_df['client_id'].apply(get_base_name)
-            
-            # Aggregate replicas into base clients
-            print("  Consolidating replicas into base clients...")
-            sum_cols = ['root_requests', 'retries', 'success_root', 'completed', 
-                        'failure_root', 'failure_retry', 'failure_queue_full', 
-                        'failure_deadline', 'failure_server', 'total_request', 'total_failure']
-            sum_cols = [c for c in sum_cols if c in raw_df.columns]
-            
-            agg_dict = {c: 'sum' for c in sum_cols}
-            if 'queue_size' in raw_df.columns: agg_dict['queue_size'] = 'sum'
-            if 'queue_avg_at_attempt_end' in raw_df.columns: agg_dict['queue_avg_at_attempt_end'] = 'mean'
-            
-            latency_cols = ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']
-            for lc in latency_cols:
-                if lc in raw_df.columns: agg_dict[lc] = 'max'
-
-            # Multi-client DF (By Base Client)
-            df_by_client = raw_df.groupby(['timepoint', 'base_client']).agg(agg_dict).reset_index()
-            clients = sorted(df_by_client['base_client'].unique())
-            print(f"  identified clients: {clients}")
-        else:
-            df_by_client = raw_df
-            df_by_client['base_client'] = 'unknown'
-            clients = []
-
-        # 2. Global Aggregation (System View)
-        print("  Aggregating global stats...")
-        sum_cols_global = [c for c in df_by_client.columns if c not in ['timepoint', 'base_client', 'client_id'] and df_by_client[c].dtype.kind in 'biufc']
-        # Recalculate agg dict for global
-        agg_dict_global = {c: 'sum' for c in sum_cols_global}
-        # exceptions
-        if 'queue_avg_at_attempt_end' in agg_dict_global: agg_dict_global['queue_avg_at_attempt_end'] = 'mean'
-        for lc in ['p50', 'p90', 'p95', 'p99', 'p99.9', 'Max']:
-            if lc in agg_dict_global: agg_dict_global[lc] = 'max'
-            
-        df_global = df_by_client.groupby('timepoint').agg(agg_dict_global).reset_index()
+        df_by_client, df_global, clients = load_and_aggregate(str(csv_file_path))
+        print(f"✓ Loaded data, identified {len(clients)} clients: {clients}")
             
     except (FileNotFoundError, ValueError) as e:
         print(f"Error: {e}")

@@ -2,10 +2,17 @@ import argparse
 import glob
 import os
 import json
+import sys
+from pathlib import Path
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import yaml
+
+# Add parent to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from plotting.core import load_csv
 
 def load_data(input_dir):
     # Match specific pattern for reproducibility
@@ -18,7 +25,7 @@ def load_data(input_dir):
              continue 
         
         client_name = basename.replace("output_", "").replace(".csv", "")
-        df = pd.read_csv(f)
+        df = load_csv(f)
         clients[client_name] = df
     return clients
 
