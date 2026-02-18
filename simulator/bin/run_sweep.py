@@ -97,7 +97,7 @@ def run_simulation_instance(config: ExperimentConfig, output_dir: Path, verbose:
     
     # Build simulation
     try:
-        sim, clients, workloads, fault_tracker = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, fault_tracker, services = ConfigLoader.build_simulation(config)
     except Exception as e:
         print(f"Error building simulation: {e}", file=sys.stderr)
         return []

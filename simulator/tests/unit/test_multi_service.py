@@ -315,7 +315,7 @@ class TestConfigLoaderMultiDep:
             workload=WorkloadConfig(base_rps=10, duration_s=5),
         )
 
-        sim, clients, workloads, _ = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, _, _ = ConfigLoader.build_simulation(config)
         # Should build without error
         assert len(clients) == 1
 
@@ -349,7 +349,7 @@ class TestConfigLoaderMultiDep:
             workload=WorkloadConfig(base_rps=10, duration_s=5),
         )
 
-        sim, clients, workloads, _ = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, _, _ = ConfigLoader.build_simulation(config)
         assert len(clients) == 1
 
     def test_legacy_single_dependency_compat(self):
@@ -373,7 +373,7 @@ class TestConfigLoaderMultiDep:
             workload=WorkloadConfig(base_rps=10, duration_s=5),
         )
 
-        sim, clients, workloads, _ = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, _, _ = ConfigLoader.build_simulation(config)
         assert len(clients) == 1
 
     def test_circular_dependency_error(self):
@@ -421,32 +421,32 @@ class TestConfigLoaderMultiDep:
             ConfigLoader.build_simulation(config)
 
     def test_diamond_dependency(self):
-        """Diamond: D→{B,C}, B→A, C→A. A built once, shared."""
+        """Diamond: A→{B,C} parallel, B→D, C→D. D is shared leaf."""
         config = ExperimentConfig(
             name="test_diamond",
             seed=42,
             services=[
                 ServiceConfigYAML(
-                    name="A",
-                    latency=LatencyConfig(median_ms=10),
+                    name="D",
+                    latency=LatencyConfig(median_ms=10, lognorm_sigma=0),
                     workers=2,
                 ),
                 ServiceConfigYAML(
                     name="B",
-                    latency=LatencyConfig(median_ms=10),
-                    workers=2,
-                    dependencies=[DependencyConfig(service="A")],
+                    latency=LatencyConfig(median_ms=10, lognorm_sigma=0),
+                    workers=1,
+                    dependencies=[DependencyConfig(service="D")],
                 ),
                 ServiceConfigYAML(
                     name="C",
-                    latency=LatencyConfig(median_ms=10),
-                    workers=2,
-                    dependencies=[DependencyConfig(service="A")],
+                    latency=LatencyConfig(median_ms=10, lognorm_sigma=0),
+                    workers=1,
+                    dependencies=[DependencyConfig(service="D")],
                 ),
                 ServiceConfigYAML(
-                    name="D",
-                    latency=LatencyConfig(median_ms=5),
-                    workers=4,
+                    name="A",
+                    latency=LatencyConfig(median_ms=10, lognorm_sigma=0),
+                    workers=1,
                     dependencies=[
                         DependencyConfig(service="B"),
                         DependencyConfig(service="C"),
@@ -457,8 +457,39 @@ class TestConfigLoaderMultiDep:
             workload=WorkloadConfig(base_rps=10, duration_s=5),
         )
 
-        sim, clients, workloads, _ = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, _, services = ConfigLoader.build_simulation(config)
         assert len(clients) == 1
+
+        # Use services['A'] directly (legacy workload= path targets first listed service D)
+        svc_a = services['A']
+        assert len(svc_a.dependencies) == 2, f"A should have 2 deps, got {len(svc_a.dependencies)}"
+
+        # Run a single request through A
+        # With D workers=2, B and C's D-calls don't queue.
+        # Expected: D=10ms, B=D+own=20ms, C=D+own=20ms, A=max(B,C)+own=30ms
+        result = run_single_request(sim, svc_a)
+        assert result['success'] is True
+
+        # Check end-to-end A latency
+        latency_ms = ns_to_ms(result['latency_ns'])
+        assert 29 <= latency_ms <= 31, f"Expected A ~30ms, got {latency_ms:.1f}ms"
+
+        # Check each service's latency from recorded events
+        # events format: (timestamp_ns, latency_ns, success, drop_reason, queue_size, attempt_num, is_retry)
+        def get_latency(svc_name):
+            evts = services[svc_name].events
+            assert len(evts) > 0, f"No events for {svc_name}"
+            return ns_to_ms(evts[0][1])  # latency_ns of first event
+
+        d_lat = get_latency("D")
+        b_lat = get_latency("B")
+        c_lat = get_latency("C")
+        a_lat = get_latency("A")
+
+        assert 9 <= d_lat <= 11, f"Expected D ~10ms, got {d_lat:.1f}ms"
+        assert 19 <= b_lat <= 21, f"Expected B ~20ms, got {b_lat:.1f}ms"
+        assert 19 <= c_lat <= 21, f"Expected C ~20ms, got {c_lat:.1f}ms"
+        assert 29 <= a_lat <= 31, f"Expected A ~30ms, got {a_lat:.1f}ms"
 
 
 # ============================================================================
@@ -499,7 +530,7 @@ workload:
   duration_s: 10
 """
         config = ConfigLoader.load_from_string(yaml_str)
-        sim, clients, workloads, _ = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, _, _ = ConfigLoader.build_simulation(config)
         assert len(clients) == 1
         assert len(config.services) == 3
 
@@ -538,5 +569,5 @@ workload:
         assert fe.dependencies[1].optional is False
         assert fe.dependency_call_pattern == DependencyCallPattern.PARALLEL
 
-        sim, clients, workloads, _ = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, _, _ = ConfigLoader.build_simulation(config)
         assert len(clients) == 1

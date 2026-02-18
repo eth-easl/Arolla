@@ -404,7 +404,7 @@ class ConfigLoader:
             dependencies=dependencies or [],
             dependency_optionality=dependency_optionality or [],
             dependency_call_pattern=dependency_call_pattern,
-        ).bind(seed=seed)
+        ).bind(seed=seed, record_events=True)
     
     @staticmethod
     def build_workload(cfg: WorkloadConfig) -> Workload:
@@ -650,5 +650,5 @@ class ConfigLoader:
             workload.register_fault_events(fault_tracker)
             workloads.append(workload)
         
-        return sim, clients, workloads, fault_tracker
+        return sim, clients, workloads, fault_tracker, services
 

@@ -89,7 +89,7 @@ Examples:
     try:
         if args.verbose:
             print("Building simulation...")
-        sim, clients, workloads, fault_tracker = ConfigLoader.build_simulation(config)
+        sim, clients, workloads, fault_tracker, services = ConfigLoader.build_simulation(config)
         if args.verbose:
             print(f"✓ Simulation built successfully ({len(clients)} clients)")
     except Exception as e:
@@ -204,6 +204,16 @@ Examples:
             fault_tracker.export_json(str(fault_json_path))
             if args.verbose:
                  print(f"  ✓ Fault events exported to {fault_json_path}")
+        
+        # Export per-service metrics if multi-service topology
+        if len(services) > 1:
+            from simulator.metrics.service_collector import collect_service_metrics
+            svc_df = collect_service_metrics(services, granularity_s=config.granularity_s)
+            if not svc_df.empty:
+                svc_csv_path = csv_path.parent / "service_metrics.csv"
+                svc_df.to_csv(svc_csv_path, index=False)
+                if args.verbose:
+                    print(f"  ✓ Per-service metrics exported to {svc_csv_path}")
         
     except Exception as e:
         print(f"❌ Error exporting results: {e}", file=sys.stderr)

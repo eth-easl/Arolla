@@ -227,8 +227,8 @@ def run_workflow(yaml_file: str, output_base: str = "results",
         
         fault_events_file = output_dir / "fault_events.json"
         
-        # Find all CSV files in output dir
-        all_csvs = list(output_dir.glob("*.csv"))
+        # Find all client CSV files in output dir (exclude service_metrics.csv)
+        all_csvs = [f for f in output_dir.glob("*.csv") if f.name != "service_metrics.csv"]
         
         if not all_csvs:
              print(f"Error: No output CSVs found in {output_dir}")
@@ -275,6 +275,22 @@ def run_workflow(yaml_file: str, output_base: str = "results",
                 print(f"\n✓ Comparison plots generated in {plots_dir}/")
             except subprocess.CalledProcessError as e:
                 print(f"\n⚠ Plotting failed with exit code {e.returncode}")
+        
+        # Auto-detect per-service metrics and plot them
+        svc_metrics_csv = output_dir / "service_metrics.csv"
+        if svc_metrics_csv.exists():
+            print(f"\nDetected per-service metrics. Generating service plots...")
+            svc_plots_dir = plots_dir / "services"
+            cmd = [
+                sys.executable,
+                "plotting/plot_services.py",
+                str(output_dir),
+                "-o", str(svc_plots_dir)
+            ]
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError as e:
+                print(f"\n⚠ Per-service plotting failed with exit code {e.returncode}")
     else:
         print(f"\nStep 2/2: Skipping plots (--no-plot)")
 
