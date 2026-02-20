@@ -150,7 +150,9 @@ def build_config(fitted: dict, rps_override: float | None = None,
             }
         ],
         "output_csv": "output.csv",
-        "granularity_s": 1.0,
+        # 10s buckets give ~28 frontend requests per bucket → per-bucket P99 ≈ true P97.
+        # At 1s, each bucket has ~3 requests so "P99" = max of 3 ≈ true P75.
+        "granularity_s": 10.0,
     }
 
     return config

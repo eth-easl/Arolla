@@ -64,12 +64,41 @@ def compare(
         )
         return 0, []
 
-    # Aggregate simulated stats: mean P50/P99 across all time buckets per service
-    sim_agg = (
-        sim_df.groupby("service")[["p50", "p99"]]
-        .mean()
-        .to_dict("index")
-    )
+    # Aggregate simulated stats using request-weighted quantile estimation.
+    #
+    # Why not mean(bucket_p99)?
+    #   With granularity_s=10s and ~3 req/bucket, the per-bucket "P99" is the
+    #   max of 3 samples, which approximates the true P75, not P99.  Averaging
+    #   these underestimates the tail.
+    #
+    # Instead: treat each bucket as contributing total_requests weight at its
+    # reported p50/p99 value, then find the request-weighted quantile.  This
+    # is equivalent to computing the percentile over a virtual list where each
+    # bucket's p-value appears total_requests times — a much better estimator
+    # of the global P50/P99 across all simulated requests.
+    sim_agg: dict[str, dict] = {}
+    for svc, grp in sim_df.groupby("service"):
+        nonempty = grp[grp["total_requests"] > 0].copy()
+        if nonempty.empty:
+            sim_agg[svc] = {"p50": None, "p99": None}
+            continue
+        weights = nonempty["total_requests"].values
+
+        def _weighted_quantile(values, weights, q: float) -> float:
+            import numpy as np
+            order = values.argsort()
+            vals_sorted = values[order]
+            wts_sorted = weights[order]
+            cumw = wts_sorted.cumsum()
+            threshold = q * cumw[-1]
+            idx = (cumw >= threshold).argmax()
+            return float(vals_sorted[idx])
+
+        import numpy as np
+        sim_agg[svc] = {
+            "p50": _weighted_quantile(nonempty["p50"].values, weights, 0.50),
+            "p99": _weighted_quantile(nonempty["p99"].values, weights, 0.99),
+        }
 
     rows = []
     warnings = []
