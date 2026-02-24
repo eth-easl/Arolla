@@ -57,6 +57,13 @@ calibration/
    cd prototype
    ./deploy-app.sh online-boutique
    ```
+   
+   In this repo, the stock in-cluster `loadgenerator` is disabled by default for
+   retry experiments. Start external clients on `CLIENT_HOST` before collecting:
+   ```bash
+   cd prototype/clients/online-boutique
+   ./run-clients.sh start
+   ```
 
 2. **SSH access** configured in `prototype/k8s-config.sh`
    (`MASTER_HOST`, `SSH_USER`, `SSH_KEY`, `SSH_OPTS`).
@@ -74,7 +81,14 @@ calibration/
 cd calibration
 
 # Collect (60s window) + fit + generate simulator YAML
+# (Ensure external clients are running first, or RPS will calibrate near zero.)
 ./pipeline.sh
+
+# Orchestrate external clients automatically for the collection window
+./pipeline.sh --with-clients --client-duration 90
+
+# Limit to specific external client profiles while calibrating
+./pipeline.sh --with-clients --client-profiles good,bad --client-duration 90
 
 # Run the simulator with the generated YAML:
 python3 ../simulator/bin/run_experiment.py configs/online_boutique.yaml \
@@ -95,6 +109,11 @@ per service, and `reports/latency_comparison.png` showing simulated latency
 time-series alongside the observed reference values. A P99 error below 25%
 indicates a good fit.
 
+Note: The calibration pipeline uses Envoy sidecar stats from the **services**,
+so it is agnostic to whether traffic originates from the old in-cluster
+`loadgenerator` or the new external clients on `CLIENT_HOST`. The only
+requirement is that representative traffic is flowing during `collect.sh`.
+
 ---
 
 ## Options
@@ -108,6 +127,9 @@ indicates a good fit.
 | `--rps N` / `RPS=N` | auto | Override frontend base_rps |
 | `--run-sim` / `RUN_SIM=1` | off | Run simulator after generating YAML |
 | `--compare` / `COMPARE=1` | off | Run comparison + plot after simulation |
+| `--with-clients` / `ORCHESTRATE_CLIENTS=1` | off | Start external clients on `CLIENT_HOST` before collection |
+| `--client-duration N` / `CLIENT_DURATION=N` | `WAIT_SECS+15` | Auto-stop externally orchestrated clients after `N` seconds |
+| `--client-profiles CSV` / `CLIENT_PROFILES=CSV` | all | Profiles passed to `prototype/clients/online-boutique/run-clients.sh` |
 
 ```bash
 ./pipeline.sh --wait 120                       # longer collection window
