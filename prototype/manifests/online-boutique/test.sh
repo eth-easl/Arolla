@@ -96,17 +96,18 @@ run_app_tests() {
     fi
     ((pass++))
 
-    # --- Test 6: Loadgenerator (Locust) status ---
+    # --- Test 6: Stock loadgenerator disabled ---
     ((total++))
-    echo "Test 6: Loadgenerator pod status"
-    local lg_status
-    lg_status=$(ssh ${SSH_OPTS} ${SSH_USER}@${MASTER_HOST} \
-        "kubectl -n ${APP_NS} get pod -l app=loadgenerator -o jsonpath='{.items[0].status.phase}'" 2>/dev/null || echo "Unknown")
-    if [[ "$lg_status" == "Running" ]]; then
-        echo -e "${GREEN}✓${NC} Loadgenerator pod is Running (Locust generating traffic in-cluster)"
+    echo "Test 6: Stock loadgenerator disabled"
+    local lg_replicas
+    lg_replicas=$(ssh ${SSH_OPTS} ${SSH_USER}@${MASTER_HOST} \
+        "kubectl -n ${APP_NS} get deploy loadgenerator -o jsonpath='{.spec.replicas}'" \
+        2>/dev/null || echo "Unknown")
+    if [[ "$lg_replicas" == "0" ]]; then
+        echo -e "${GREEN}✓${NC} Stock loadgenerator is disabled (replicas=0)"
         ((pass++))
     else
-        echo -e "${RED}✗${NC} Loadgenerator pod status: ${lg_status} (expected Running)"
+        echo -e "${RED}✗${NC} Stock loadgenerator replicas=${lg_replicas} (expected 0)"
     fi
 
     # --- Summary ---
@@ -119,6 +120,8 @@ run_app_tests() {
     fi
     echo "============================================"
     echo
-    echo "  Note: The loadgenerator pod runs Locust in-cluster for continuous"
-    echo "  load testing. These smoke tests verify the gateway path from outside."
+    echo "  Note: Stock loadgenerator is disabled for retry experiments in this repo."
+    echo "  Run external clients from CLIENT_HOST using:"
+    echo "    prototype/clients/online-boutique/run-clients.sh start"
+    echo "  These smoke tests verify the gateway path from outside."
 }

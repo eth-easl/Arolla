@@ -19,7 +19,9 @@ spec:
   selector:
     matchLabels:
       app: loadgenerator
-  replicas: 1
+  # Disabled by default for retry experiments in this repo.
+  # Custom retry clients are deployed separately (see retry-clients.yaml).
+  replicas: 0
   template:
     metadata:
       labels:

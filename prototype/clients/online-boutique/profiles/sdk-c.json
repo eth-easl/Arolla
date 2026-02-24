@@ -1,0 +1,16 @@
+{
+  "name": "sdk-c",
+  "count": 2,
+  "method": "GET",
+  "rate_rps_per_client": 1.0,
+  "timeout_s": 0.5,
+  "paths": ["/product/OLJCESPC7Z"],
+  "retries": 4,
+  "backoff": {
+    "mode": "fixed",
+    "base_s": 0.05,
+    "max_s": 0.05,
+    "jitter": "none"
+  },
+  "retry_on_status": [500, 502, 503, 504]
+}

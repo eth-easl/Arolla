@@ -69,6 +69,7 @@ REMOTE_EOF
 APP_NAME="" APP_NS="" APP_GATEWAY_NAME="" APP_HOST="" APP_DEPLOYMENTS=""
 APP_STATEFULSETS="" APP_WAIT_JOBS=""
 APP_DIR="" REMOTE_MANIFESTS_DIR=""
+ENABLE_FAULT_INJECTION=0
 
 load_app() {
     local app="$1"
@@ -162,6 +163,13 @@ get_node_port() {
 do_deploy() {
     banner "Deploying: ${APP_NAME}"
     info "Manifests: ${APP_DIR}/"
+    if [[ "$(basename "${APP_DIR}")" == "online-boutique" ]]; then
+        if [[ "${ENABLE_FAULT_INJECTION}" == "1" ]]; then
+            info "Fault injection: ENABLED (fault-injection.yaml will be applied)"
+        else
+            info "Fault injection: DISABLED (fault-injection.yaml will be removed if present)"
+        fi
+    fi
     echo ""
 
     upload_manifests
@@ -196,6 +204,17 @@ do_deploy() {
         echo '=== Applying all manifests ==='
         kubectl apply -R -f \${M}/
         echo ''
+
+        # Optional app-specific fault injection toggle (online-boutique).
+        if [[ \"$(basename "${APP_DIR}")\" == \"online-boutique\" ]]; then
+            if [[ \"${ENABLE_FAULT_INJECTION}\" != \"1\" ]]; then
+                if [[ -f \"\${M}/fault-injection.yaml\" ]]; then
+                    echo 'Disabling optional fault injection (fault-injection.yaml)…'
+                    kubectl delete -f \"\${M}/fault-injection.yaml\" --ignore-not-found 2>/dev/null || true
+                    echo ''
+                fi
+            fi
+        fi
 
         # Wait for deployments
         echo '=== Waiting for pods ==='
@@ -375,6 +394,10 @@ do_app_help() {
     echo "  --status    Show resource status"
     echo "  --cleanup   Remove all resources"
     echo "  --help      Show this help"
+    if [[ "$app_slug" == "online-boutique" ]]; then
+        echo "  --fault-injection      (Deploy only) apply fault-injection.yaml"
+        echo "  --no-fault-injection   (Deploy only) ensure fault-injection.yaml is not active (default)"
+    fi
     echo ""
     echo "Manifests:"
     for f in "${APP_DIR}"/*.yaml; do
@@ -424,8 +447,32 @@ main() {
     esac
 
     # First arg is the app name
-    local app="$1"
-    local action="${2:-}"
+    local app="$1"; shift
+    local action=""
+
+    # Parse app-specific options (allow deploy modifiers + one action)
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --test|--status|--cleanup|--help|-h)
+                if [[ -n "${action}" ]]; then
+                    err "Multiple actions specified: ${action} and $1"
+                    exit 1
+                fi
+                action="$1"
+                ;;
+            --fault-injection)
+                ENABLE_FAULT_INJECTION=1
+                ;;
+            --no-fault-injection)
+                ENABLE_FAULT_INJECTION=0
+                ;;
+            *)
+                err "Unknown option: $1 (try --help)"
+                exit 1
+                ;;
+        esac
+        shift
+    done
 
     load_app "$app"
 
