@@ -12,16 +12,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import random
 import signal
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
-
-import aiohttp
 
 
 def load_profiles(profile_dir: Path) -> list[dict[str, Any]]:
@@ -66,8 +65,27 @@ async def append_csv(line: str, out_csv: Path, lock: asyncio.Lock) -> None:
             f.write(line)
 
 
+def send_once(
+    *,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    timeout_s: float,
+) -> tuple[bool, int, str]:
+    req = urllib.request.Request(url=url, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            status = int(resp.getcode())
+            _ = resp.read(64)
+            ok = 200 <= status < 400
+            return ok, status, ""
+    except urllib.error.HTTPError as exc:
+        return False, int(exc.code), f"http_error:{exc.code}"
+    except Exception as exc:
+        return False, 0, exc.__class__.__name__
+
+
 async def client_worker(
-    session: aiohttp.ClientSession,
     profile: dict[str, Any],
     worker_idx: int,
     target_base_url: str,
@@ -113,17 +131,13 @@ async def client_worker(
             attempt_start = time.time()
             status = 0
             err = ""
-            try:
-                async with session.request(
-                    method, url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s)
-                ) as resp:
-                    status = int(resp.status)
-                    await resp.read()
-                    ok = 200 <= status < 400
-            except Exception as exc:
-                ok = False
-                status = 0
-                err = exc.__class__.__name__
+            ok, status, err = await asyncio.to_thread(
+                send_once,
+                method=method,
+                url=url,
+                headers=headers,
+                timeout_s=timeout_s,
+            )
 
             latency = time.time() - attempt_start
             final_status = status
@@ -208,34 +222,31 @@ async def main_async(args) -> int:
         except NotImplementedError:
             signal.signal(sig, lambda *_args: stop_event.set())
 
-    connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=300)
     csv_lock = asyncio.Lock()
-    async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = []
-        for p in profiles:
-            count = int(p.get("count", 1))
-            for i in range(count):
-                tasks.append(asyncio.create_task(client_worker(
-                    session=session,
-                    profile=p,
-                    worker_idx=i,
-                    target_base_url=args.target_base_url,
-                    host_header=args.host_header or "",
-                    out_csv=out_csv,
-                    csv_lock=csv_lock,
-                    stop_event=stop_event,
-                )))
+    tasks = []
+    for p in profiles:
+        count = int(p.get("count", 1))
+        for i in range(count):
+            tasks.append(asyncio.create_task(client_worker(
+                profile=p,
+                worker_idx=i,
+                target_base_url=args.target_base_url,
+                host_header=args.host_header or "",
+                out_csv=out_csv,
+                csv_lock=csv_lock,
+                stop_event=stop_event,
+            )))
 
-        print(json.dumps({
-            "event": "startup",
-            "ts": time.time(),
-            "target_base_url": args.target_base_url,
-            "host_header": args.host_header,
-            "profiles": [{k: v for k, v in p.items() if not k.startswith("_")} for p in profiles],
-            "output_csv": str(out_csv),
-        }), flush=True)
+    print(json.dumps({
+        "event": "startup",
+        "ts": time.time(),
+        "target_base_url": args.target_base_url,
+        "host_header": args.host_header,
+        "profiles": [{k: v for k, v in p.items() if not k.startswith("_")} for p in profiles],
+        "output_csv": str(out_csv),
+    }), flush=True)
 
-        await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
     return 0
 
 
@@ -250,11 +261,6 @@ def parse_args():
 
 
 def main():
-    try:
-        import aiohttp  # noqa: F401
-    except Exception:
-        print("Missing dependency: aiohttp. Install with: pip3 install aiohttp", file=sys.stderr)
-        return 1
     args = parse_args()
     return asyncio.run(main_async(args))
 

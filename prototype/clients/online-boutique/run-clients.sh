@@ -71,10 +71,6 @@ start_clients() {
       exit 0
     fi
     rm -f \"${REMOTE_PID_FILE}\"
-    if ! python3 -c \"import aiohttp\" >/dev/null 2>&1; then
-      echo \"Installing aiohttp (user site) on CLIENT_HOST...\"
-      python3 -m pip install --user aiohttp >/dev/null
-    fi
     nohup python3 \"${REMOTE_BASE}/traffic_gen.py\" \
       --target-base-url \"${target_url}\" \
       --host-header \"${APP_HOST}\" \
