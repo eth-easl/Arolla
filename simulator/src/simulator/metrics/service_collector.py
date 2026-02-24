@@ -11,7 +11,6 @@ import pandas as pd
 
 from simulator.core.types import DropReason
 from simulator.runtime.service import ServiceRuntime
-from simulator.utils.time import ns_to_ms
 
 
 def collect_service_metrics(
@@ -98,4 +97,34 @@ def collect_service_metrics(
     if not rows:
         return pd.DataFrame()
     
+    return pd.DataFrame(rows)
+
+
+def collect_service_attempt_events(services: Dict[str, ServiceRuntime]) -> pd.DataFrame:
+    """
+    Export raw per-attempt service events for exact downstream analysis.
+
+    Each row corresponds to one completed attempt recorded by ServiceRuntime.
+    """
+    S_TO_NS = 1_000_000_000
+    MS_TO_NS = 1_000_000
+    rows = []
+
+    for svc_name, svc_rt in services.items():
+        for evt in svc_rt.events:
+            ts_ns, latency_ns, success, drop_reason, queue_sz, attempt_num, is_retry = evt
+            rows.append({
+                "timepoint": ts_ns / S_TO_NS,
+                "service": svc_name,
+                "latency_ms": latency_ns / MS_TO_NS,
+                "success": bool(success),
+                "drop_reason": drop_reason.name if isinstance(drop_reason, DropReason) else str(drop_reason),
+                "queue_size": int(queue_sz),
+                "attempt_num": int(attempt_num),
+                "is_retry": bool(is_retry),
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
     return pd.DataFrame(rows)

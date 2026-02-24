@@ -1,0 +1,21 @@
+# HTTPRoute: Routes external traffic from the Gateway to the frontend service.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: boutique-route
+  namespace: online-boutique
+spec:
+  parentRefs:
+    - name: boutique-gateway
+      namespace: online-boutique
+  hostnames:
+    - "boutique.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: frontend
+          port: 80
