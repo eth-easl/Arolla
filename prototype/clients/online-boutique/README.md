@@ -14,7 +14,7 @@ expect AWS service protocols and cannot be directly used to call storefront endp
 `GET /product/...`.
 
 This folder therefore uses **AWS-SDK-style retry profiles** (good/bad/sdk-a/sdk-b/sdk-c/sdk-d)
-modeled after the retry profile study in `aws_outage/client/traffic_gen.py`.
+for comparative retry-behavior experiments against the Online Boutique gateway.
 
 If you need literal AWS SDK retry middleware, the target must be an AWS API-compatible endpoint.
 

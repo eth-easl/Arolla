@@ -3,8 +3,8 @@
 External Online Boutique traffic generator (runs on CLIENT_HOST).
 
 Uses split profile JSON files to model heterogeneous client retry behaviors.
-Profiles are AWS-SDK-style (inspired by aws_outage/client/traffic_gen.py), but
-implemented for generic HTTP traffic against the Online Boutique gateway.
+Profiles are AWS-SDK-style, implemented for generic HTTP traffic against the
+Online Boutique gateway.
 """
 
 from __future__ import annotations
