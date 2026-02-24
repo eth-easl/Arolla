@@ -287,6 +287,10 @@ def process_service(svc_name: str, stats_file: Path) -> dict:
         "rq_active": rq_active,
         "fit_method": fit_method,
         "tcp_only": False,
+        "observed_percentiles_ms": (
+            {f"{k:g}": round(float(v), 4) for k, v in sorted(pct_map.items())}
+            if pct_map else {}
+        ),
     }
 
 

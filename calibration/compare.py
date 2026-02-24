@@ -344,6 +344,149 @@ def plot_latency_over_time(
     print(f"  Plot saved → {out_path}")
 
 
+def plot_latency_cdfs(
+    fitted: dict,
+    attempts_df: "pd.DataFrame | None",
+    plot_dir: Path,
+) -> None:
+    """
+    Plot empirical simulator latency CDFs (success-only) with observed percentile markers.
+
+    Requires service_attempts.csv so we can compute an exact empirical CDF from
+    per-attempt simulated latencies. Observed Envoy percentiles are shown as
+    vertical dotted lines (P50, P90, P95, P99, ... if available).
+    """
+    if attempts_df is None or attempts_df.empty:
+        print("  [WARN] No service_attempts.csv data available — skipping CDF plots.")
+        return
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        print("  [WARN] matplotlib not installed — skipping CDF plots (pip install matplotlib)")
+        return
+
+    required = {"service", "latency_ms", "success"}
+    if not required.issubset(attempts_df.columns):
+        print("  [WARN] service_attempts.csv missing required columns for CDF plots.")
+        return
+
+    success_series = attempts_df["success"]
+    if success_series.dtype != bool:
+        success_norm = success_series.astype(str).str.lower().map({
+            "true": True, "false": False, "1": True, "0": False
+        })
+    else:
+        success_norm = success_series
+
+    comparable = []
+    for svc_name, svc_obs in fitted.get("services", {}).items():
+        if svc_obs.get("tcp_only"):
+            continue
+        obs_pcts = svc_obs.get("observed_percentiles_ms") or {}
+        grp = attempts_df[attempts_df["service"] == svc_name]
+        if grp.empty:
+            continue
+        succ = grp.loc[(success_norm.loc[grp.index] == True), "latency_ms"].dropna()
+        if succ.empty:
+            continue
+        comparable.append((svc_name, succ.to_numpy(dtype=float), obs_pcts))
+
+    if not comparable:
+        print("  [WARN] No comparable services found for CDF plots.")
+        return
+
+    n = len(comparable)
+    ncols = min(3, n)
+    nrows = math.ceil(n / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4 * nrows), squeeze=False)
+    fig.suptitle("Simulator Latency CDFs with Observed Percentile Markers", fontsize=13, fontweight="bold")
+
+    marker_styles = {
+        "25": {"color": "#2E8B57", "label": "Obs P25"},
+        "50": {"color": "#1F77B4", "label": "Obs P50"},
+        "75": {"color": "#9467BD", "label": "Obs P75"},
+        "95": {"color": "#D62728", "label": "Obs P95"},
+        "99": {"color": "#FF7F0E", "label": "Obs P99"},
+    }
+
+    for idx, (svc_name, latencies_ms, obs_pcts) in enumerate(comparable):
+        ax = axes[idx // ncols][idx % ncols]
+        xs = np.sort(latencies_ms)
+        ys = np.arange(1, len(xs) + 1, dtype=float) / len(xs)
+        ax.plot(xs, ys, color="steelblue", linewidth=2.2, label="Sim CDF (success-only)")
+
+        # Draw vertical dotted lines for observed percentiles.
+        for p_label, v in sorted(obs_pcts.items(), key=lambda kv: float(kv[0])):
+            if p_label not in marker_styles:
+                continue
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                continue
+            style = marker_styles[p_label]
+            ax.axvline(
+                x, linestyle=":", linewidth=2.0, alpha=0.95,
+                color=style["color"],
+                label=style["label"] if idx == 0 else None,
+            )
+
+        # Annotate selected percentile values on plot body for readability.
+        p25 = obs_pcts.get("25")
+        p50 = obs_pcts.get("50")
+        p75 = obs_pcts.get("75")
+        p95 = obs_pcts.get("95")
+        p99 = obs_pcts.get("99")
+        notes = []
+        if p25 is not None:
+            notes.append(f"P25={float(p25):.1f}ms")
+        if p50 is not None:
+            notes.append(f"P50={float(p50):.1f}ms")
+        if p75 is not None:
+            notes.append(f"P75={float(p75):.1f}ms")
+        if p95 is not None:
+            notes.append(f"P95={float(p95):.1f}ms")
+        if p99 is not None:
+            notes.append(f"P99={float(p99):.1f}ms")
+        if notes:
+            ax.text(
+                0.98, 0.03, "\n".join(notes),
+                transform=ax.transAxes, fontsize=10,
+                verticalalignment="bottom", horizontalalignment="right",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="gray", alpha=0.85)
+            )
+
+        ax.set_title(svc_name, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Latency (ms)", fontsize=11)
+        ax.set_ylabel("CDF", fontsize=11)
+        ax.tick_params(axis="both", labelsize=10)
+        ax.grid(True, alpha=0.25, linestyle=":")
+        ax.set_ylim(0, 1.0)
+        ax.set_xlim(left=0)
+
+    # De-duplicate legend entries and place one global legend.
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    dedup = {}
+    for h, l in zip(handles, labels):
+        if l not in dedup:
+            dedup[l] = h
+    if dedup:
+        fig.legend(dedup.values(), dedup.keys(), loc="upper center", ncol=min(6, len(dedup)), fontsize=10)
+
+    for idx in range(n, nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    out_path = plot_dir / "latency_cdf_comparison.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  CDF plot saved → {out_path}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -394,6 +537,7 @@ def main() -> int:
 
     if args.plot_dir:
         plot_latency_over_time(sim_df, fitted, rows, Path(args.plot_dir))
+        plot_latency_cdfs(fitted, attempts_df, Path(args.plot_dir))
 
     # Exit 1 if any service exceeds threshold (useful for CI checks)
     return 1 if n_warnings > 0 else 0
