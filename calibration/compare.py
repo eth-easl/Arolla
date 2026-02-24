@@ -40,9 +40,76 @@ def _fmt_err(v: float | None) -> str:
 
 # ── Core comparison ───────────────────────────────────────────────────────────
 
+def _aggregate_exact_from_attempts(attempts_df: "pd.DataFrame") -> dict[str, dict]:
+    """Compute exact per-service percentiles from raw attempt events (success-only)."""
+    if attempts_df.empty:
+        return {}
+
+    required = {"service", "latency_ms", "success"}
+    if not required.issubset(set(attempts_df.columns)):
+        missing = sorted(required - set(attempts_df.columns))
+        raise ValueError(f"service_attempts.csv missing columns: {missing}")
+
+    success_series = attempts_df["success"]
+    if success_series.dtype != bool:
+        success_norm = success_series.astype(str).str.lower().map({
+            "true": True,
+            "false": False,
+            "1": True,
+            "0": False,
+        })
+    else:
+        success_norm = success_series
+
+    sim_agg: dict[str, dict] = {}
+    for svc, grp in attempts_df.groupby("service"):
+        succ_mask = success_norm.loc[grp.index] == True
+        succ = grp.loc[succ_mask, "latency_ms"].dropna()
+        if succ.empty:
+            sim_agg[svc] = {"p50": None, "p99": None}
+            continue
+
+        p50 = float(succ.quantile(0.50))
+        p99 = float(succ.quantile(0.99))
+        sim_agg[svc] = {"p50": p50, "p99": p99}
+    return sim_agg
+
+
+def _aggregate_fallback_from_bucket_metrics(sim_df: "pd.DataFrame") -> dict[str, dict]:
+    """
+    Backward-compatible fallback when raw attempt events are unavailable.
+
+    This is an approximation (weighted quantile over bucket quantiles), not an
+    exact global percentile.
+    """
+    sim_agg: dict[str, dict] = {}
+    for svc, grp in sim_df.groupby("service"):
+        nonempty = grp[grp["total_requests"] > 0].copy()
+        if nonempty.empty:
+            sim_agg[svc] = {"p50": None, "p99": None}
+            continue
+        weights = nonempty["total_requests"].values
+
+        def _weighted_quantile(values, weights, q: float) -> float:
+            order = values.argsort()
+            vals_sorted = values[order]
+            wts_sorted = weights[order]
+            cumw = wts_sorted.cumsum()
+            threshold = q * cumw[-1]
+            idx = (cumw >= threshold).argmax()
+            return float(vals_sorted[idx])
+
+        sim_agg[svc] = {
+            "p50": _weighted_quantile(nonempty["p50"].values, weights, 0.50),
+            "p99": _weighted_quantile(nonempty["p99"].values, weights, 0.99),
+        }
+    return sim_agg
+
+
 def compare(
     fitted: dict,
     sim_df: "pd.DataFrame",
+    attempts_df: "pd.DataFrame | None" = None,
     report_path: str | None = None,
 ) -> tuple[int, list[dict]]:
     """Compare observed vs simulated latency percentiles per service.
@@ -64,41 +131,16 @@ def compare(
         )
         return 0, []
 
-    # Aggregate simulated stats using request-weighted quantile estimation.
-    #
-    # Why not mean(bucket_p99)?
-    #   With granularity_s=10s and ~3 req/bucket, the per-bucket "P99" is the
-    #   max of 3 samples, which approximates the true P75, not P99.  Averaging
-    #   these underestimates the tail.
-    #
-    # Instead: treat each bucket as contributing total_requests weight at its
-    # reported p50/p99 value, then find the request-weighted quantile.  This
-    # is equivalent to computing the percentile over a virtual list where each
-    # bucket's p-value appears total_requests times — a much better estimator
-    # of the global P50/P99 across all simulated requests.
-    sim_agg: dict[str, dict] = {}
-    for svc, grp in sim_df.groupby("service"):
-        nonempty = grp[grp["total_requests"] > 0].copy()
-        if nonempty.empty:
-            sim_agg[svc] = {"p50": None, "p99": None}
-            continue
-        weights = nonempty["total_requests"].values
-
-        def _weighted_quantile(values, weights, q: float) -> float:
-            import numpy as np
-            order = values.argsort()
-            vals_sorted = values[order]
-            wts_sorted = weights[order]
-            cumw = wts_sorted.cumsum()
-            threshold = q * cumw[-1]
-            idx = (cumw >= threshold).argmax()
-            return float(vals_sorted[idx])
-
-        import numpy as np
-        sim_agg[svc] = {
-            "p50": _weighted_quantile(nonempty["p50"].values, weights, 0.50),
-            "p99": _weighted_quantile(nonempty["p99"].values, weights, 0.99),
-        }
+    used_exact_attempts = attempts_df is not None and not attempts_df.empty
+    if used_exact_attempts:
+        sim_agg = _aggregate_exact_from_attempts(attempts_df)
+    else:
+        print(
+            "  [WARN] service_attempts.csv not found; falling back to approximate "
+            "comparison from bucketed service_metrics.csv",
+            file=sys.stderr,
+        )
+        sim_agg = _aggregate_fallback_from_bucket_metrics(sim_df)
 
     rows = []
     warnings = []
@@ -178,15 +220,23 @@ def compare(
         lines.append("")
         lines.append(
             "Possible causes: low traffic during collection (increase --wait),\n"
-            "  workers underestimated (increase --workers-multiplier in fit.py),\n"
+            "  workers underestimated (adjust estimate_workers() in fit.py),\n"
             "  or dependency_call_pattern mismatch (try 'parallel' for frontend)."
         )
+
+    lines.append("")
+    lines.append(
+        "Comparison basis: observed=Envoy response_code.200 (success-only attempts); "
+        f"simulated={'exact success-only per-attempt percentiles' if used_exact_attempts else 'approximate bucketed percentiles'}."
+    )
 
     report_text = "\n".join(lines) + "\n"
     print(report_text)
 
     if report_path:
-        Path(report_path).write_text(report_text)
+        report_out = Path(report_path)
+        report_out.parent.mkdir(parents=True, exist_ok=True)
+        report_out.write_text(report_text)
         print(f"Report written to {report_path}")
 
     return len(warnings), rows
@@ -321,6 +371,14 @@ def main() -> int:
     try:
         fitted = json.loads(Path(args.fitted_params).read_text())
         sim_df = pd.read_csv(args.sim_metrics)
+        attempts_path = Path(args.sim_metrics).with_name("service_attempts.csv")
+        if attempts_path.exists():
+            try:
+                attempts_df = pd.read_csv(attempts_path)
+            except pd.errors.EmptyDataError:
+                attempts_df = None
+        else:
+            attempts_df = None
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -332,7 +390,7 @@ def main() -> int:
         )
         return 1
 
-    n_warnings, rows = compare(fitted, sim_df, args.report)
+    n_warnings, rows = compare(fitted, sim_df, attempts_df=attempts_df, report_path=args.report)
 
     if args.plot_dir:
         plot_latency_over_time(sim_df, fitted, rows, Path(args.plot_dir))

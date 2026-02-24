@@ -125,6 +125,7 @@ echo ""
 
 # Step 2: Reset Envoy counters on all discovered pods
 info "Resetting Envoy counters (histograms are NOT reset; only request counters)..."
+declare -a RESET_EPOCHS
 for i in "${!SERVICES[@]}"; do
     POD="${POD_NAMES[$i]}"
     [[ -z "${POD}" ]] && continue
@@ -133,6 +134,7 @@ for i in "${!SERVICES[@]}"; do
         kubectl exec -n ${NAMESPACE} ${POD} -c istio-proxy -- \
             curl -s -X POST localhost:15000/reset_counters > /dev/null 2>&1 || true
     " > /dev/null
+    RESET_EPOCHS[$i]="$(python3 -c 'import time; print(f"{time.time():.6f}")')"
     info "  Reset ${SVC}"
 done
 ok "Counters reset."
@@ -161,9 +163,15 @@ for i in "${!SERVICES[@]}"; do
     fi
 
     OUTFILE="${OUTPUT_DIR}/${SVC}.txt"
+    RESET_EPOCH="${RESET_EPOCHS[$i]:-}"
+    FILE_COLLECT_EPOCH="$(python3 -c 'import time; print(f"{time.time():.6f}")')"
+    EFFECTIVE_ELAPSED="${WAIT_SECS}"
+    if [[ -n "${RESET_EPOCH}" ]]; then
+        EFFECTIVE_ELAPSED="$(python3 -c 'import sys; print(f"{max(0.001, float(sys.argv[2]) - float(sys.argv[1])):.6f}")' "${RESET_EPOCH}" "${FILE_COLLECT_EPOCH}")"
+    fi
 
     # Write metadata header (parsed by fit.py)
-    echo "# SERVICE=${SVC}  PORT=${PORT}  POD=${POD}  ELAPSED_SECS=${WAIT_SECS}  COLLECTED_AT=${COLLECTED_AT}" > "${OUTFILE}"
+    echo "# SERVICE=${SVC}  PORT=${PORT}  POD=${POD}  ELAPSED_SECS=${EFFECTIVE_ELAPSED}  COLLECTED_AT=${COLLECTED_AT}  RESET_AT_EPOCH=${RESET_EPOCH:-}  FILE_COLLECTED_AT_EPOCH=${FILE_COLLECT_EPOCH}  WINDOW_START_MODE=per-service-reset" > "${OUTFILE}"
 
     # Append raw Envoy stats dump
     remote_capture "$MASTER_HOST" "

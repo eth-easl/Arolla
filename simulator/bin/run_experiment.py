@@ -207,13 +207,22 @@ Examples:
         
         # Export per-service metrics if multi-service topology
         if len(services) > 1:
-            from simulator.metrics.service_collector import collect_service_metrics
+            from simulator.metrics.service_collector import (
+                collect_service_metrics,
+                collect_service_attempt_events,
+            )
             svc_df = collect_service_metrics(services, granularity_s=config.granularity_s)
             if not svc_df.empty:
                 svc_csv_path = csv_path.parent / "service_metrics.csv"
                 svc_df.to_csv(svc_csv_path, index=False)
                 if args.verbose:
                     print(f"  ✓ Per-service metrics exported to {svc_csv_path}")
+            attempts_df = collect_service_attempt_events(services)
+            if not attempts_df.empty:
+                attempts_csv_path = csv_path.parent / "service_attempts.csv"
+                attempts_df.to_csv(attempts_csv_path, index=False)
+                if args.verbose:
+                    print(f"  ✓ Per-service attempts exported to {attempts_csv_path}")
         
     except Exception as e:
         print(f"❌ Error exporting results: {e}", file=sys.stderr)

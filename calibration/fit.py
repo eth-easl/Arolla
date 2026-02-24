@@ -59,16 +59,24 @@ def _find_istio_duration_lines(stats_text: str, svc_name: str) -> list[str]:
     return lines
 
 
-def _non_nan_interval_count(line: str) -> int:
-    """Count how many interval values (first in each Pnn pair) are non-nan."""
-    count = 0
-    for m in re.finditer(r'P\d+(?:\.\d+)?\(([^,]+),', line):
+def _non_nan_hist_value_counts(line: str) -> tuple[int, int]:
+    """Count non-NaN histogram values in (cumulative, interval) order."""
+    cumulative = 0
+    interval = 0
+    for m in re.finditer(r'P\d+(?:\.\d+)?\(([^,]+),([^)]+)\)', line):
         try:
-            if not math.isnan(float(m.group(1))):
-                count += 1
+            iv = float(m.group(1))
+            if not math.isnan(iv):
+                interval += 1
         except ValueError:
             pass
-    return count
+        try:
+            cv = float(m.group(2))
+            if not math.isnan(cv):
+                cumulative += 1
+        except ValueError:
+            pass
+    return cumulative, interval
 
 
 def parse_histogram(stats_text: str, svc_name: str, port: int) -> dict[float, float] | None:
@@ -80,10 +88,13 @@ def parse_histogram(stats_text: str, svc_name: str, port: int) -> dict[float, fl
             P0(interval_val,cumulative_val) P25(...) P50(...) P75(...)
             P90(...) P95(...) P99(...) P99.5(...) P99.9(...) P100(...)
 
-    Selects the histogram line with the most non-nan interval values (i.e.
-    the line with the most recent in-window traffic).  Prefers the interval
-    value (first) over the cumulative (second) for each percentile because
-    the interval value reflects the measurement window after reset_counters.
+    Histograms are not reset by /reset_counters (only counters are), so the
+    interval values cannot be assumed to represent the full WAIT_SECS window.
+    We therefore prefer cumulative histogram values for fitting and only fall
+    back to interval values when cumulative values are missing.
+
+    Selects the histogram line with the most non-nan cumulative values (then
+    interval values as a tiebreaker).
 
     Returns: {percentile_float: value_ms, ...} or None if not found.
     """
@@ -91,8 +102,8 @@ def parse_histogram(stats_text: str, svc_name: str, port: int) -> dict[float, fl
     if not lines:
         return None
 
-    # Pick the line with the most non-nan interval values (most recent traffic)
-    best_line = max(lines, key=_non_nan_interval_count)
+    # Pick the line with the most usable values (prefer cumulative coverage)
+    best_line = max(lines, key=_non_nan_hist_value_counts)
 
     pct_map: dict[float, float] = {}
     for m in re.finditer(r'P(\d+(?:\.\d+)?)\(([^,]+),([^)]+)\)', best_line):
@@ -100,20 +111,20 @@ def parse_histogram(stats_text: str, svc_name: str, port: int) -> dict[float, fl
         interval_str = m.group(2).strip()
         cumulative_str = m.group(3).strip()
 
-        # Prefer interval value (reflects measurement window); fall back to cumulative
+        # Prefer cumulative histogram value; interval is a best-effort fallback.
         val: float | None = None
         try:
-            iv = float(interval_str)
-            if not math.isnan(iv) and iv > 0:
-                val = iv
+            cv = float(cumulative_str)
+            if not math.isnan(cv) and cv > 0:
+                val = cv
         except ValueError:
             pass
 
         if val is None:
             try:
-                cv = float(cumulative_str)
-                if not math.isnan(cv) and cv > 0:
-                    val = cv
+                iv = float(interval_str)
+                if not math.isnan(iv) and iv > 0:
+                    val = iv
             except ValueError:
                 pass
 
