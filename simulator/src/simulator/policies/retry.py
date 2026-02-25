@@ -1,5 +1,5 @@
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import deque
 from typing import Optional, Tuple, Deque
 from simulator.core.types import TimeDuration, TimePoint
@@ -99,6 +99,7 @@ class RetryBudgetPolicy(RetryPolicy):
     _max_tokens: float = 0
     retry_cost: int = 100
     success_reward: int = 0
+    _last_refill_time: int = field(default=0, init=False)
 
     def __post_init__(self):
         # Jirfag: tokens_to_sub = 100, tokens_to_add = int(ratio * 100)
@@ -107,8 +108,6 @@ class RetryBudgetPolicy(RetryPolicy):
         self.success_reward = int(self.budget_ratio * self.retry_cost)
         self._max_tokens = self.retry_cost * self.max_retries
         self._tokens = self._max_tokens # Start full
-        self._last_refill_time = 0
-
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
         # Refill based on time
         now = context.now if context.now is not None else 0
@@ -157,22 +156,35 @@ class RetryCircuitBreakerPolicy(RetryPolicy):
     Implements a stateless, window-based circuit breaker (Retry Circuit Breaker).
     Ref Logic: "On success or failure, it updates statistics... If failure rate > threshold, don't retry."
     """ 
-    inner: RetryPolicy
+    inner: Optional[RetryPolicy]
     failure_rate_threshold: float
     window_duration: TimeDuration
-    min_requests: int
+    min_window_size: int
     wait_duration_in_open_state: TimeDuration 
     
     # Internal State
     requests_window: Deque[CircuitBreakerRequest] = None
     window_failed_req_count: int = 0
 
-    def __init__(self, inner: RetryPolicy, failure_rate_threshold: float, window_duration: TimeDuration, 
-                 min_window_size: int, wait_duration_in_open_state: TimeDuration):
+    def __init__(
+        self,
+        inner: Optional[RetryPolicy],
+        failure_rate_threshold: float,
+        window_duration: TimeDuration,
+        min_window_size: Optional[int] = None,
+        wait_duration_in_open_state: TimeDuration = 0,
+        min_requests: Optional[int] = None,
+    ):
         self.inner = inner
         self.failure_rate_threshold = failure_rate_threshold
         self.window_duration = window_duration
-        self.min_window_size = min_window_size
+
+        resolved_min_window = min_window_size if min_window_size is not None else min_requests
+        if resolved_min_window is None:
+            raise ValueError("RetryCircuitBreakerPolicy requires min_window_size or min_requests")
+        self.min_window_size = resolved_min_window
+        # Backward-compat alias for callers that inspect `min_requests`
+        self.min_requests = resolved_min_window
         self.wait_duration_in_open_state = wait_duration_in_open_state
         self.__post_init__()
     
@@ -197,11 +209,14 @@ class RetryCircuitBreakerPolicy(RetryPolicy):
         # Check threshold
         if self._is_failure_threshold_reached():
              return False, 0
-        
+
+        if self.inner is None:
+            return True, 0
         return self.inner.next_delay(context)
 
     def record_attempt(self, context: RetryContext, success: bool):
-        self.inner.record_attempt(context, success)
+        if self.inner is not None:
+            self.inner.record_attempt(context, success)
         
         now = context.now if context.now is not None else 0
         
