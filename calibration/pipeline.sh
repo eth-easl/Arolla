@@ -56,8 +56,9 @@ GENERATED_YAML="${SCRIPT_DIR}/configs/online_boutique.yaml"
 SIM_OUTPUT_DIR="${SCRIPT_DIR}/data/sim_output"
 
 # ── Colours & helpers ─────────────────────────────────────────────────────────
-GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
+GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()   { echo -e "${CYAN}[pipeline]${NC} $*"; }
+warn()   { echo -e "${YELLOW}[pipeline]${NC} $*"; }
 banner() { echo -e "\n${GREEN}=== $* ===${NC}\n"; }
 
 run_clients_cmd() {

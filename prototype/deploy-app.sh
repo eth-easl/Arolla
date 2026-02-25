@@ -53,6 +53,7 @@ remote() {
     local prefix
     prefix=$(eval "$(ssh_cmd "$host")" "hostname -s" 2>/dev/null || echo "$host")
     eval "$(ssh_cmd "$host")" "bash -s" <<-REMOTE_EOF 2>&1 | while IFS= read -r line; do echo -e "  ${CYAN}[${prefix}]${NC} ${line}"; done
+set -euo pipefail
 $@
 REMOTE_EOF
 }
@@ -60,6 +61,7 @@ REMOTE_EOF
 remote_capture() {
     local host="$1"; shift
     eval "$(ssh_cmd "$host")" "bash -s" <<-REMOTE_EOF 2>&1
+set -euo pipefail
 $@
 REMOTE_EOF
 }
@@ -132,17 +134,32 @@ upload_manifests() {
 
     eval "$(ssh_cmd "$MASTER_HOST")" "mkdir -p ${REMOTE_MANIFESTS_DIR}"
 
-    # Upload top-level yaml files
-    scp ${scp_opts} "${APP_DIR}"/*.yaml "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/" 2>/dev/null || true
+    # Upload top-level yaml files (namespace/gateway/routes/etc.)
+    local top_yaml_found=0
+    for f in "${APP_DIR}"/*.yaml; do
+        [[ -f "$f" ]] || continue
+        top_yaml_found=1
+        scp ${scp_opts} "$f" "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/" >/dev/null
+    done
 
     # Upload subdirectories (e.g. services/) preserving structure
+    local sub_yaml_found=0
     for subdir in "${APP_DIR}"/*/; do
         [[ -d "$subdir" ]] || continue
         local dirname
         dirname=$(basename "$subdir")
         eval "$(ssh_cmd "$MASTER_HOST")" "mkdir -p ${REMOTE_MANIFESTS_DIR}/${dirname}"
-        scp ${scp_opts} "${subdir}"*.yaml "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/${dirname}/" 2>/dev/null || true
+        for f in "${subdir}"*.yaml; do
+            [[ -f "$f" ]] || continue
+            sub_yaml_found=1
+            scp ${scp_opts} "$f" "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/${dirname}/" >/dev/null
+        done
     done
+
+    if [[ "${top_yaml_found}" == "0" && "${sub_yaml_found}" == "0" ]]; then
+        err "No YAML manifests found under ${APP_DIR}/"
+        exit 1
+    fi
 
     ok "Manifests uploaded to ${REMOTE_MANIFESTS_DIR}/"
 }
@@ -197,6 +214,7 @@ do_deploy() {
         if [[ -n \"\$NS_FILE\" ]]; then
             echo '=== Applying namespace ==='
             kubectl apply -f \"\$NS_FILE\"
+            kubectl get namespace ${APP_NS} >/dev/null
             echo ''
         fi
 
