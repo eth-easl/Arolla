@@ -14,8 +14,8 @@ from simulator.policies.retry import (
     RetryPolicy, RetryContext, NoRetryPolicy,
     FixedBackoffRetryPolicy, ExponentialBackoffRetryPolicy,
     ExponentialBackoffWithJitterRetryPolicy, JitterMode,
-    RetryBudgetPolicy, RetryCircuitBreakerPolicy
 )
+from simulator.policies.retry_controls import RetryBudgetPolicy, RetryCircuitBreakerPolicy
 from simulator.utils.time import ms_to_ns
 
 

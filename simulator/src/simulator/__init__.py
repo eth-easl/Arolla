@@ -30,8 +30,11 @@ except ModuleNotFoundError:  # pragma: no cover - import-time fallback for parti
     ExperimentConfig = None
     ConfigLoader = None
 
-# Metrics
-from .metrics.collector import Metrics
+# Metrics (optional deps: numpy/pandas)
+try:
+    from .metrics.collector import Metrics
+except ModuleNotFoundError:  # pragma: no cover - import-time fallback for partial installs
+    Metrics = None
 
 # Utilities
 from .utils.time import s_to_ns, ms_to_ns, ns_to_s, ns_to_ms
