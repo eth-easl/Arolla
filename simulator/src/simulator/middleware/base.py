@@ -36,6 +36,10 @@ class AttemptContext:
     queue_size: int
     service_name: str
     
+    # SYSNAME: per-request state
+    retry_budget_remaining: Optional[int] = None  # Level 2 end-to-end budget
+    tenant_id: Optional[str] = None  # for per-tenant tracking
+
     # Mutable state for middleware to modify
     should_retry: bool = False
     retry_delay: TimeDuration = 0

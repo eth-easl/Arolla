@@ -5,7 +5,7 @@ from functools import partial
 from simulator.core.engine import Simulator
 from simulator.core.types import DropReason, TimeDuration, TimePoint
 from simulator.middleware.base import AttemptContext, MiddlewareChain
-from simulator.middleware.load_limiter import LoadLimiterMiddleware
+from simulator.middleware.load_limiter import EndToEndRetryBudgetMiddleware, LoadLimiterMiddleware
 from simulator.middleware.retry import NoRetryMiddleware, RetryMiddleware
 
 
@@ -57,6 +57,10 @@ class _ServiceMiddlewareMixin:
             global_deadline=ctx.global_deadline,
             queue_size=queue_size,
             service_name=self.cfg.name,
+            retry_budget_remaining=(
+                ctx.retry_budget_remaining[0] if ctx.retry_budget_remaining is not None else None
+            ),
+            tenant_id=ctx.tenant_id,
         )
 
         if self._middleware_chain is None:
@@ -68,6 +72,9 @@ class _ServiceMiddlewareMixin:
             if a_ctx.is_successful or not a_ctx.should_retry:
                 ctx.on_root_done()
             else:
+                # Decrement Level 2 end-to-end budget on retry
+                if ctx.retry_budget_remaining is not None:
+                    ctx.retry_budget_remaining[0] -= 1
                 next_start = end_time + a_ctx.retry_delay
                 sim.schedule(next_start, partial(self._start_attempt, sim, ctx))
 
@@ -79,6 +86,9 @@ class _ServiceMiddlewareMixin:
             middlewares.append(RetryMiddleware(self.cfg.retry))
         else:
             middlewares.append(NoRetryMiddleware())
+
+        # Level 2: end-to-end budget check (before Level 1 load limiter)
+        middlewares.append(EndToEndRetryBudgetMiddleware())
 
         if self.cfg.load_limiter is not None:
             middlewares.append(LoadLimiterMiddleware(self.cfg.load_limiter))

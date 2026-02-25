@@ -15,6 +15,7 @@ from simulator.config.schema import (
     RetryBudgetConfig,
     RetryConfig,
     RetryPolicyType,
+    SysnameRetryBudgetConfig,
     TimeoutConfig,
     GlobalRetryBudgetConfig,
     ClientConfigYAML,
@@ -37,6 +38,7 @@ from simulator.policies.retry_controls import (
     LimiterRetryBudgetPolicy,
     GlobalRetryBudget,
     AIMDGlobalRetryBudget,
+    GoodputCoupledRetryBudget,
 )
 from simulator.policies.timeout import Timeout, StaticTimeout
 from simulator.policies.load_limiter import (
@@ -196,14 +198,32 @@ def build_aimd_global_retry_budget(
     )
 
 
+def build_sysname_retry_budget(
+    cfg: Optional[SysnameRetryBudgetConfig],
+) -> Optional[LoadLimiter]:
+    if cfg is None:
+        return None
+    return GoodputCoupledRetryBudget(
+        alpha=cfg.alpha,
+        beta_down=cfg.beta_down,
+        beta_up=cfg.beta_up,
+        window_duration=ms_to_ns(cfg.window_ms),
+        success_rate_threshold=cfg.success_rate_threshold,
+        success_rate_beta=cfg.success_rate_beta,
+    )
+
+
 def build_load_limiter(
     circuit_breaker: Optional[CircuitBreakerConfig],
     rate_limiter: Optional[RateLimiterConfig],
     retry_budget: Optional[RetryBudgetConfig],
     global_retry_budget: Optional[GlobalRetryBudgetConfig],
     aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig],
+    sysname_retry_budget: Optional[SysnameRetryBudgetConfig] = None,
 ) -> Optional[LoadLimiter]:
-    # Priority preserved for compatibility
+    # Priority: sysname > circuit breaker > AIMD > global > local > rate limiter
+    if sysname_retry_budget is not None:
+        return build_sysname_retry_budget(sysname_retry_budget)
     if circuit_breaker is not None:
         return build_circuit_breaker(circuit_breaker)
     if aimd_global_retry_budget is not None:

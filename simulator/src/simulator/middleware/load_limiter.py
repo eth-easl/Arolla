@@ -42,7 +42,11 @@ class LoadLimiterMiddleware(Middleware):
         
         # Record result for state tracking (circuit breakers, budgets, etc.)
         if hasattr(self.limiter, 'add_result'):
-            self.limiter.add_result(ctx.is_successful, ctx.end_time)
+            self.limiter.add_result(
+                ctx.is_successful, ctx.end_time,
+                tenant_id=ctx.tenant_id,
+                is_retry=(ctx.attempt_number > 1),
+            )
 
         # If successful or retry already denied by upstream middleware,
         # pass through without consuming limiter tokens
@@ -51,7 +55,9 @@ class LoadLimiterMiddleware(Middleware):
             return
 
         # Check if limiter allows retry (may consume a token from budget)
-        retry_ctx = RetryContext(attempt=ctx.attempt_number, now=ctx.end_time)
+        retry_ctx = RetryContext(
+            attempt=ctx.attempt_number, now=ctx.end_time, tenant_id=ctx.tenant_id,
+        )
         limiter_allows_retry, limiter_delay = self.limiter.next_delay(retry_ctx)
         
         if not limiter_allows_retry:
@@ -108,5 +114,31 @@ class CompositeLoadLimiterMiddleware(Middleware):
         for middleware in reversed(self.middlewares):
             current_handler = handler
             handler = lambda c, m=middleware, h=current_handler: m.process_attempt(c, h)
-        
+
         handler(ctx)
+
+
+class EndToEndRetryBudgetMiddleware(Middleware):
+    """
+    SYSNAME Level 2: End-to-end per-request retry budget.
+
+    Blocks retries when the shared budget (stamped at ingress) is exhausted.
+    This bounds total retries across all hops to B, preventing chain amplification.
+    No-op when retry_budget_remaining is None (budget not configured).
+    """
+
+    def process_attempt(
+        self,
+        ctx: AttemptContext,
+        next_fn: Callable[[AttemptContext], None],
+    ) -> None:
+        if ctx.is_successful or not ctx.should_retry:
+            next_fn(ctx)
+            return
+
+        if ctx.retry_budget_remaining is not None and ctx.retry_budget_remaining <= 0:
+            ctx.should_retry = False
+            ctx.metadata['limiter_blocked'] = True
+            ctx.metadata['limiter_reason'] = 'e2e_budget_exhausted'
+
+        next_fn(ctx)

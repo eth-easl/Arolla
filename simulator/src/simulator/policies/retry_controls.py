@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Deque, Optional, Tuple
+from typing import Deque, Dict, Optional, Tuple
 
 from simulator.core.types import TimeDuration, TimePoint
 from simulator.policies.load_limiter import LoadLimiter
@@ -132,7 +132,7 @@ class RetryCircuitBreakerPolicy(RetryPolicy):
             return True, 0
         return self.inner.next_delay(context)
 
-    def add_result(self, success: bool, now: Optional[int] = None) -> None:
+    def add_result(self, success: bool, now: Optional[int] = None, **kwargs) -> None:
         """Record a result for LoadLimiter compatibility (used by LoadLimiterMiddleware)."""
         ts = now if now is not None else 0
         self.requests_window.append(CircuitBreakerRequest(ts, success))
@@ -267,7 +267,7 @@ class CountBasedCircuitBreakerPolicy(LoadLimiter):
     def get_state(self) -> CBState:
         return self._state
 
-    def add_result(self, success: bool, now: TimePoint) -> None:
+    def add_result(self, success: bool, now: TimePoint, **kwargs) -> None:
         if self._state == CBState.CLOSED:
             self._closed_window.append(success)
             if len(self._closed_window) == self._closed_window.maxlen:
@@ -316,7 +316,7 @@ class LimiterTimeBasedCircuitBreakerPolicy(LoadLimiter):
     def get_state(self) -> CBState:
         return self._state
 
-    def add_result(self, success: bool, now: TimePoint) -> None:
+    def add_result(self, success: bool, now: TimePoint, **kwargs) -> None:
         self._evict_old(now)
         self._window.append((now, success))
 
@@ -360,7 +360,7 @@ class LimiterRetryBudgetPolicy(LoadLimiter):
         self._max_tokens = self._retry_cost * self.max_retries
         self._tokens = self._max_tokens
 
-    def add_result(self, success: bool, now: Optional[TimePoint] = None) -> None:
+    def add_result(self, success: bool, now: Optional[TimePoint] = None, **kwargs) -> None:
         if success:
             self._tokens = min(self._max_tokens, self._tokens + self._success_award)
 
@@ -410,7 +410,7 @@ class GlobalRetryBudget(LoadLimiter):
     def balance(self) -> float:
         return self._tokens
 
-    def add_result(self, success: bool, now: Optional[TimePoint] = None) -> None:
+    def add_result(self, success: bool, now: Optional[TimePoint] = None, **kwargs) -> None:
         pass
 
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
@@ -420,7 +420,7 @@ class GlobalRetryBudget(LoadLimiter):
             return True, 0
         return False, 0
 
-    def applies_pre_queue_admission(self, is_retry: bool) -> bool:
+    def applies_pre_queue_admission(self, is_retry: bool) -> bool:  # noqa: GlobalRetryBudget
         return is_retry
 
 
@@ -482,7 +482,7 @@ class AIMDGlobalRetryBudget(LoadLimiter):
             return True
         return False
 
-    def add_result(self, success: bool, now: Optional[TimePoint] = None) -> None:
+    def add_result(self, success: bool, now: Optional[TimePoint] = None, **kwargs) -> None:
         if now is None:
             return
         if self._window_start is None:
@@ -498,6 +498,136 @@ class AIMDGlobalRetryBudget(LoadLimiter):
         if self.request_ticket(context.now):
             return True, 0
         return False, 0
+
+    def applies_pre_queue_admission(self, is_retry: bool) -> bool:  # noqa: AIMDGlobalRetryBudget
+        return is_retry
+
+
+# ---------------------------------------------------------------------------
+# SYSNAME: Goodput-Coupled Retry Budget (Level 1)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _GoodputTenantState:
+    """Per-tenant state for GoodputCoupledRetryBudget."""
+    goodput_rate: float = 0.0          # asymmetric EWMA of goodput (requests/sec)
+    goodput_count: int = 0             # goodput in current window
+    window_start: Optional[TimePoint] = None
+    retry_timestamps: Deque[TimePoint] = field(default_factory=deque)
+    retry_success_ewma: float = 0.5    # EWMA of retry success rate
+    _initialized: bool = False
+
+
+@dataclass
+class GoodputCoupledRetryBudget(LoadLimiter):
+    """
+    SYSNAME Level 1: Goodput-coupled retry admission control.
+
+    Admits retries only when recent retry count < alpha * goodput_rate * window_seconds.
+    Uses asymmetric EWMA: fast decay (beta_down) when goodput drops,
+    slow growth (beta_up) when goodput recovers.
+
+    Optional enhancement: gate retries on retry success rate > success_rate_threshold.
+    Per-tenant fairness: maintains separate state per tenant_id.
+    """
+    alpha: float = 0.1                                # retry budget ratio
+    beta_down: float = 0.3                             # EWMA fast decay (goodput decrease)
+    beta_up: float = 0.05                              # EWMA slow growth (goodput increase)
+    window_duration: TimeDuration = 1_000_000_000      # 1 second in ns
+    success_rate_threshold: Optional[float] = None     # beta; None = disabled
+    success_rate_beta: float = 0.1                     # EWMA smoothing for retry success rate
+
+    _tenants: Dict[str, _GoodputTenantState] = field(default_factory=dict)
+
+    def _get_tenant(self, tenant_id: Optional[str] = None) -> _GoodputTenantState:
+        key = tenant_id if tenant_id is not None else "_global"
+        if key not in self._tenants:
+            self._tenants[key] = _GoodputTenantState()
+        return self._tenants[key]
+
+    def _maybe_advance_window(self, tenant: _GoodputTenantState, now: TimePoint) -> None:
+        """Advance window and update goodput EWMA if window has elapsed."""
+        if tenant.window_start is None:
+            tenant.window_start = now
+            return
+
+        while now - tenant.window_start >= self.window_duration:
+            window_secs = self.window_duration / 1e9
+            observed_rate = tenant.goodput_count / window_secs if window_secs > 0 else 0.0
+
+            if not tenant._initialized:
+                # Bootstrap: use first observation directly to avoid zero-start lockout
+                tenant.goodput_rate = observed_rate
+                tenant._initialized = True
+            else:
+                # Asymmetric EWMA: fast decay, slow growth
+                if observed_rate < tenant.goodput_rate:
+                    beta = self.beta_down
+                else:
+                    beta = self.beta_up
+                tenant.goodput_rate = (1 - beta) * tenant.goodput_rate + beta * observed_rate
+
+            tenant.goodput_count = 0
+            tenant.window_start += self.window_duration
+
+    def _count_recent_retries(self, tenant: _GoodputTenantState, now: TimePoint) -> int:
+        """Count retries within the current window."""
+        cutoff = now - self.window_duration
+        while tenant.retry_timestamps and tenant.retry_timestamps[0] < cutoff:
+            tenant.retry_timestamps.popleft()
+        return len(tenant.retry_timestamps)
+
+    def add_result(
+        self, success: bool, now: Optional[TimePoint] = None,
+        tenant_id: Optional[str] = None, is_retry: bool = False,
+        **kwargs,
+    ) -> None:
+        if now is None:
+            return
+        tenant = self._get_tenant(tenant_id)
+        self._maybe_advance_window(tenant, now)
+
+        if success:
+            tenant.goodput_count += 1
+
+        # Update retry success rate EWMA
+        if is_retry:
+            tenant.retry_success_ewma = (
+                (1 - self.success_rate_beta) * tenant.retry_success_ewma
+                + self.success_rate_beta * (1.0 if success else 0.0)
+            )
+
+    def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
+        now = context.now
+        if now is None:
+            return False, 0
+
+        tenant = self._get_tenant(context.tenant_id)
+        self._maybe_advance_window(tenant, now)
+
+        # Compute budget: alpha * goodput_rate * window_seconds
+        window_secs = self.window_duration / 1e9
+        budget = self.alpha * tenant.goodput_rate * window_secs
+
+        # Bootstrap grace: allow retries when not yet initialized
+        if not tenant._initialized and budget == 0:
+            budget = 1.0
+
+        recent_retries = self._count_recent_retries(tenant, now)
+        if recent_retries >= budget:
+            return False, 0
+
+        # Enhancement: retry success rate gate
+        if (
+            self.success_rate_threshold is not None
+            and tenant._initialized
+            and tenant.retry_success_ewma < self.success_rate_threshold
+        ):
+            return False, 0
+
+        # Admit retry and record timestamp
+        tenant.retry_timestamps.append(now)
+        return True, 0
 
     def applies_pre_queue_admission(self, is_retry: bool) -> bool:
         return is_retry
