@@ -13,6 +13,7 @@ from simulator.core.types import TimeDuration, TimePoint
 class RetryContext:
     attempt: int  # attempt starts at 1 (the original request is attempt 1)
     now: Optional[TimePoint] = None
+    tenant_id: Optional[str] = None
 
 
 class RetryPolicy(ABC):

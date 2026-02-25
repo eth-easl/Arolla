@@ -24,6 +24,8 @@ class _ServiceDependencyMixin:
         on_all_done: Callable[[bool, DropReason], None],
         deadline: Optional[TimePoint],
         is_retry: bool,
+        retry_budget_remaining: Optional[list] = None,
+        tenant_id: Optional[str] = None,
     ):
         """Call all dependencies concurrently, barrier-wait for all to complete."""
         remaining = [len(deps)]
@@ -55,6 +57,8 @@ class _ServiceDependencyMixin:
                 on_root_done=lambda: None,
                 global_deadline=deadline,
                 is_retry=is_retry,
+                retry_budget_remaining=retry_budget_remaining,
+                tenant_id=tenant_id,
             )
 
     def _call_deps_sequential(
@@ -66,6 +70,8 @@ class _ServiceDependencyMixin:
         on_all_done: Callable[[bool, DropReason], None],
         deadline: Optional[TimePoint],
         is_retry: bool,
+        retry_budget_remaining: Optional[list] = None,
+        tenant_id: Optional[str] = None,
     ):
         """Call dependencies one after another. Short-circuit on required failure."""
         if idx >= len(deps):
@@ -85,7 +91,9 @@ class _ServiceDependencyMixin:
                 on_all_done(False, drop_reason)
                 return
             self._call_deps_sequential(
-                sim, deps, optionality, idx + 1, on_all_done, deadline, is_retry
+                sim, deps, optionality, idx + 1, on_all_done, deadline, is_retry,
+                retry_budget_remaining=retry_budget_remaining,
+                tenant_id=tenant_id,
             )
 
         deps[idx].submit_request(
@@ -94,4 +102,6 @@ class _ServiceDependencyMixin:
             on_root_done=lambda: None,
             global_deadline=deadline,
             is_retry=is_retry,
+            retry_budget_remaining=retry_budget_remaining,
+            tenant_id=tenant_id,
         )

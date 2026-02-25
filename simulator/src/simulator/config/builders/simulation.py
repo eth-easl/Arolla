@@ -138,7 +138,12 @@ def build_clients_and_workloads(
                     shared_budgets=shared_budgets,
                 )
                 c_timeout_policy = policy_builders.build_timeout_policy(client_cfg_yaml.timeout)
-                c_cfg = ClientConfig(name=client_name, retry=c_retry_policy, timeout=c_timeout_policy)
+                c_cfg = ClientConfig(
+                    name=client_name,
+                    retry=c_retry_policy,
+                    timeout=c_timeout_policy,
+                    e2e_retry_budget=getattr(client_cfg_yaml, 'e2e_retry_budget', None),
+                )
 
                 target_svc = entry_service
                 if client_cfg_yaml.target_service:

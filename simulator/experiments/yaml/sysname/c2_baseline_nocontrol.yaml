@@ -1,0 +1,37 @@
+# C2 Baseline: No Retry Control
+# Single service, sweep p_fail in {0.1, 0.2, 0.3, 0.5, 0.7, 0.9}
+# Exponential backoff only, no server-side limiter
+
+name: c2_baseline_nocontrol
+seed: 42
+
+services:
+  - name: backend
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.5
+    workers: 32
+    queue_capacity: 100
+
+    retry:
+      type: exponential
+      max_attempts: 3
+      initial_delay_ms: 50
+      max_delay_ms: 500
+
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
+
+clients:
+  - name: client
+    workload:
+      base_rps: 500
+      duration_s: 120
+    target_service: backend
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

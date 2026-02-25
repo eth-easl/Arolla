@@ -1,0 +1,67 @@
+# C1 Baseline: No Retry Control
+# 3-hop chain (Frontend -> Backend -> DB)
+# DB brownout (p_fail=0.5) from 30-60s, then recovery
+# Exponential backoff only, no server-side limiter
+
+name: c1_baseline_nocontrol
+seed: 42
+
+services:
+  - name: db
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 50
+
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.5
+
+  - name: backend
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.5
+    workers: 32
+    queue_capacity: 100
+
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+
+    dependencies:
+      - service: db
+
+  - name: frontend
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 100
+
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+
+    dependencies:
+      - service: backend
+
+clients:
+  - name: client
+    workload:
+      base_rps: 300
+      duration_s: 120
+    target_service: frontend
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

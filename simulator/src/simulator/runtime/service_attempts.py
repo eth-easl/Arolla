@@ -19,11 +19,13 @@ class _ServiceAttemptMixin:
         on_root_done: Callable[[], None],
         global_deadline: Optional[TimePoint] = None,
         is_retry: bool = False,
+        retry_budget_remaining: Optional[list] = None,
+        tenant_id: Optional[str] = None,
     ):
         if self.cfg.load_limiter is not None:
             should_check = self.cfg.load_limiter.applies_pre_queue_admission(is_retry)
             if should_check:
-                check_ctx = RetryContext(attempt=1, now=sim.timestep)
+                check_ctx = RetryContext(attempt=1, now=sim.timestep, tenant_id=tenant_id)
                 allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
                 if not allowed:
                     on_attempt_done(
@@ -43,6 +45,8 @@ class _ServiceAttemptMixin:
             global_deadline=global_deadline,
             on_attempt_done=on_attempt_done,
             on_root_done=on_root_done,
+            retry_budget_remaining=retry_budget_remaining,
+            tenant_id=tenant_id,
         )
         self._start_attempt(sim, ctx)
 
@@ -64,6 +68,8 @@ class _ServiceAttemptMixin:
             on_done,
             attempt_deadline=attempt_deadline,
             is_retry=(ctx.attempt > 1),
+            retry_budget_remaining=ctx.retry_budget_remaining,
+            tenant_id=ctx.tenant_id,
         )
 
     def _start_next(self, sim: Simulator):
@@ -77,6 +83,8 @@ class _ServiceAttemptMixin:
         on_done: Callable[[bool, TimeDuration, DropReason, int], None],
         attempt_deadline: Optional[TimePoint] = None,
         is_retry: bool = False,
+        retry_budget_remaining: Optional[list] = None,
+        tenant_id: Optional[str] = None,
     ):
         """
         Enqueue an attempt for this service.
@@ -89,7 +97,10 @@ class _ServiceAttemptMixin:
             on_done(False, 0, DropReason.DEADLINE, len(self.queue))
             return
 
-        start_cb = partial(self._begin_service, sim, on_done, attempt_deadline, is_retry)
+        start_cb = partial(
+            self._begin_service, sim, on_done, attempt_deadline, is_retry,
+            retry_budget_remaining, tenant_id,
+        )
 
         if self.in_flight < self.cfg.workers:
             start_cb()
@@ -112,6 +123,8 @@ class _ServiceAttemptMixin:
         on_done: Callable[[bool, TimeDuration, DropReason, int], None],
         attempt_deadline: Optional[TimePoint],
         is_retry: bool,
+        retry_budget_remaining: Optional[list] = None,
+        tenant_id: Optional[str] = None,
     ):
         if attempt_deadline is not None and sim.timestep >= attempt_deadline:
             on_done(False, 0, DropReason.DEADLINE, len(self.queue))
@@ -165,6 +178,8 @@ class _ServiceAttemptMixin:
                     on_all_deps_done,
                     attempt_deadline,
                     is_retry,
+                    retry_budget_remaining=retry_budget_remaining,
+                    tenant_id=tenant_id,
                 )
             else:
                 self._call_deps_sequential(
@@ -175,6 +190,8 @@ class _ServiceAttemptMixin:
                     on_all_deps_done,
                     attempt_deadline,
                     is_retry,
+                    retry_budget_remaining=retry_budget_remaining,
+                    tenant_id=tenant_id,
                 )
             return
 
