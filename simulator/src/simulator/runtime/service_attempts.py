@@ -87,7 +87,7 @@ class _ServiceAttemptMixin:
 
         if attempt_deadline is not None and sim.timestep >= attempt_deadline:
             on_done(False, 0, DropReason.DEADLINE, len(self.queue))
-            raise RuntimeError("Attempt already expired at submission time")
+            return
 
         start_cb = partial(self._begin_service, sim, on_done, attempt_deadline, is_retry)
 

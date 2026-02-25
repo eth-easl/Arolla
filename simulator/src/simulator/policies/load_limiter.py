@@ -68,8 +68,9 @@ class BurstyRateLimiterPolicy(LoadLimiter):
             self._last_refill = now
             return
         time_elapsed = now - self._last_refill
-        tokens_to_add = int(time_elapsed * self.refill_rate)
-        self._tokens = min(self.max_requests, self._tokens + tokens_to_add)
+        if time_elapsed > 0 and self.period > 0:
+            tokens_to_add = int((time_elapsed / self.period) * self.refill_rate)
+            self._tokens = min(self.max_requests, self._tokens + tokens_to_add)
         self._last_refill = now
 
     def can_retry(self, now: TimePoint) -> bool:
@@ -115,7 +116,6 @@ class FixedWindowBurstyLimiterPolicy(LoadLimiter):
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
         if context.now is None:
             raise ValueError("FixedWindowBurstyLimiterPolicy requires context.now to be set")
-        self._refill_tokens(context.now)
         if self.can_retry(context.now):
             self._tokens -= 1
             return True, 0

@@ -179,12 +179,21 @@ class Metrics:
                     latencies_by_bucket[b_done].append(root_end - root_begin)
                 else:
                     failure_counts[b_done] += 1
-                    # Attribute failed root to the final attempt's drop_reason
-                    if last_attempt.drop_reason == DropReason.QUEUE_FULL:
+                    # Attribute failed root by most frequent drop reason
+                    # across all attempts (not just the last one)
+                    reason_counts: dict[DropReason, int] = {}
+                    for a in root.attempts:
+                        if a.drop_reason != DropReason.NONE:
+                            reason_counts[a.drop_reason] = reason_counts.get(a.drop_reason, 0) + 1
+                    if reason_counts:
+                        primary_reason = max(reason_counts, key=reason_counts.get)
+                    else:
+                        primary_reason = last_attempt.drop_reason
+                    if primary_reason == DropReason.QUEUE_FULL:
                         failure_q_counts[b_done] += 1
-                    elif last_attempt.drop_reason == DropReason.DEADLINE:
+                    elif primary_reason == DropReason.DEADLINE:
                         failure_dead_counts[b_done] += 1
-                    elif last_attempt.drop_reason == DropReason.SERVER_FAILURE:
+                    elif primary_reason == DropReason.SERVER_FAILURE:
                         failure_srv_counts[b_done] += 1
 
         seconds_per_bucket = granularity_s

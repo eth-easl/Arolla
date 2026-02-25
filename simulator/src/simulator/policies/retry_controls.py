@@ -132,19 +132,24 @@ class RetryCircuitBreakerPolicy(RetryPolicy):
             return True, 0
         return self.inner.next_delay(context)
 
+    def add_result(self, success: bool, now: Optional[int] = None) -> None:
+        """Record a result for LoadLimiter compatibility (used by LoadLimiterMiddleware)."""
+        ts = now if now is not None else 0
+        self.requests_window.append(CircuitBreakerRequest(ts, success))
+        if not success:
+            self.window_failed_req_count += 1
+
+        while self.requests_window and (ts - self.requests_window[0].timepoint > self.window_duration):
+            popped = self.requests_window.popleft()
+            if not popped.is_ok:
+                self.window_failed_req_count -= 1
+
     def record_attempt(self, context: RetryContext, success: bool):
         if self.inner is not None:
             self.inner.record_attempt(context, success)
 
         now = context.now if context.now is not None else 0
-        self.requests_window.append(CircuitBreakerRequest(now, success))
-        if not success:
-            self.window_failed_req_count += 1
-
-        while self.requests_window and (now - self.requests_window[0].timepoint > self.window_duration):
-            popped = self.requests_window.popleft()
-            if not popped.is_ok:
-                self.window_failed_req_count -= 1
+        self.add_result(success, now)
 
 
 @dataclass

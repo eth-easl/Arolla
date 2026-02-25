@@ -8,6 +8,14 @@ from simulator.core.types import DropReason, TimeDuration, TimePoint
 
 
 class _ServiceDependencyMixin:
+    # Severity ranking: higher value = more severe
+    _DROP_SEVERITY = {
+        DropReason.NONE: 0,
+        DropReason.QUEUE_FULL: 1,
+        DropReason.SERVER_FAILURE: 2,
+        DropReason.DEADLINE: 3,
+    }
+
     def _call_deps_parallel(
         self,
         sim: Simulator,
@@ -35,7 +43,8 @@ class _ServiceDependencyMixin:
             is_optional = optionality[dep_idx] if dep_idx < len(optionality) else False
             if not success and not is_optional:
                 any_required_failed[0] = True
-                worst_reason[0] = drop_reason
+                if self._DROP_SEVERITY.get(drop_reason, 0) > self._DROP_SEVERITY.get(worst_reason[0], 0):
+                    worst_reason[0] = drop_reason
             if remaining[0] == 0:
                 on_all_done(not any_required_failed[0], worst_reason[0])
 

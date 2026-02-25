@@ -43,13 +43,14 @@ class LoadLimiterMiddleware(Middleware):
         # Record result for state tracking (circuit breakers, budgets, etc.)
         if hasattr(self.limiter, 'add_result'):
             self.limiter.add_result(ctx.is_successful, ctx.end_time)
-        
-        # If successful, pass through
-        if ctx.is_successful:
+
+        # If successful or retry already denied by upstream middleware,
+        # pass through without consuming limiter tokens
+        if ctx.is_successful or not ctx.should_retry:
             next_fn(ctx)
             return
-        
-        # Check if limiter allows retry
+
+        # Check if limiter allows retry (may consume a token from budget)
         retry_ctx = RetryContext(attempt=ctx.attempt_number, now=ctx.end_time)
         limiter_allows_retry, limiter_delay = self.limiter.next_delay(retry_ctx)
         
