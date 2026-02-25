@@ -218,3 +218,4 @@ calibration/configs/
 calibration/data/
 calibration/reports/
 paper_figures/
+*.pdf
