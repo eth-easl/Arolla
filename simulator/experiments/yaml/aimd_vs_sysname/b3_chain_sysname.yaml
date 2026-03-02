@@ -1,0 +1,125 @@
+# Scenario B3: 5-hop chain, SYSNAME L1+L2
+# k=3 retries per hop, leaf brownout
+# Shows: Level 1 (goodput-coupled budget at each hop) responds quickly to congestion.
+# Level 2 (e2e budget B=2) hard-caps total retries across the entire chain.
+# Result: no exponential amplification, fast recovery.
+
+name: b3_chain_sysname
+seed: 42
+
+services:
+  - name: leaf
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 64
+    queue_capacity: 500
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.05
+      window_ms: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.5
+
+  - name: hop4
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.05
+      window_ms: 1000
+    dependencies:
+      - service: leaf
+
+  - name: hop3
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.05
+      window_ms: 1000
+    dependencies:
+      - service: hop4
+
+  - name: hop2
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.05
+      window_ms: 1000
+    dependencies:
+      - service: hop3
+
+  - name: ingress
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.05
+      window_ms: 1000
+    dependencies:
+      - service: hop2
+
+clients:
+  - name: client
+    workload:
+      base_rps: 200
+      duration_s: 120
+    target_service: ingress
+    e2e_retry_budget: 2
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+plotting_script: plotting/plot_all.py
+plotting_script_args:
+  smoothing_window: 3
+  font_size: 18
+  tick_size: 16
+  line_width: 3.0
+  no_legend_frame: true
+  legend_size: 16
+  figsize: "10,6"
+  legend_loc: "best"
+  format: pdf

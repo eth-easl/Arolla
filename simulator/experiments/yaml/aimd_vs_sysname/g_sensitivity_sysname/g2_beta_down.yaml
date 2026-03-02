@@ -1,0 +1,48 @@
+# SYSNAME sensitivity: sweep beta_down only
+
+name: g2_sysname_beta_down
+seed: 42
+
+services:
+  - name: db
+    latency: {median_ms: 5, lognorm_sigma: 0.3}
+    workers: 32
+    queue_capacity: 200
+    retry: {type: fixed, max_attempts: 2, delay_ms: 50}
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: &bd [0.01, 0.05, 0.1, 0.3, 0.5, 0.7, 0.9]
+      beta_up: 0.05
+      window_ms: 1000
+    partial_failures:
+      - {type: partial_failure, start_s: 30, end_s: 60, p_fail: 0.5}
+
+  - name: backend
+    latency: {median_ms: 10, lognorm_sigma: 0.5}
+    workers: 32
+    queue_capacity: 100
+    retry: {type: fixed, max_attempts: 2, delay_ms: 100}
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: *bd
+      beta_up: 0.05
+      window_ms: 1000
+    dependencies: [{service: db}]
+
+  - name: frontend
+    latency: {median_ms: 5, lognorm_sigma: 0.3}
+    workers: 32
+    queue_capacity: 100
+    retry: {type: fixed, max_attempts: 2, delay_ms: 100}
+    sysname_retry_budget:
+      alpha: 0.1
+      beta_down: *bd
+      beta_up: 0.05
+      window_ms: 1000
+    dependencies: [{service: backend}]
+
+clients:
+  - name: client
+    workload: {base_rps: 300, duration_s: 120}
+    target_service: frontend
+    e2e_retry_budget: 2
