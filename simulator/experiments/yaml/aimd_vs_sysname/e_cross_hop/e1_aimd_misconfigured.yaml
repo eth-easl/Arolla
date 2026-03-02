@@ -1,0 +1,148 @@
+# E1: Cross-hop failure — one misconfigured AIMD hop in a 5-hop chain
+#
+# hop3 has aggressive AIMD recovery (additive_step=50, max_rps=500)
+# During recovery oscillation, hop3 sends retry bursts that overwhelm hop4→leaf
+# before their local AIMD can react.
+#
+# This shows: per-service control fails when ONE hop is misconfigured,
+# because independent controllers have no shared state.
+
+name: e1_aimd_misconfigured_hop
+seed: 42
+
+services:
+  - name: leaf
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 64
+    queue_capacity: 500
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: 0.5
+      window_ms: 1000
+      failure_threshold: 0.1
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.5
+
+  - name: hop4
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: 0.5
+      window_ms: 1000
+      failure_threshold: 0.1
+    dependencies:
+      - service: leaf
+
+  # MISCONFIGURED HOP — aggressive recovery causes oscillation
+  - name: hop3
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 500        # Too high ceiling
+      initial_rps: 100    # Starts high
+      max_burst: 50       # Large burst allowed
+      additive_step: 50   # Grows 50 RPS per healthy window
+      decrease_factor: 0.5
+      window_ms: 1000
+      failure_threshold: 0.1
+    dependencies:
+      - service: hop4
+
+  - name: hop2
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: 0.5
+      window_ms: 1000
+      failure_threshold: 0.1
+    dependencies:
+      - service: hop3
+
+  - name: ingress
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: 0.5
+      window_ms: 1000
+      failure_threshold: 0.1
+    dependencies:
+      - service: hop2
+
+clients:
+  - name: client
+    workload:
+      base_rps: 200
+      duration_s: 120
+    target_service: ingress
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+plotting_script: plotting/plot_all.py
+plotting_script_args:
+  smoothing_window: 3
+  font_size: 18
+  tick_size: 16
+  line_width: 3.0
+  no_legend_frame: true
+  legend_size: 16
+  figsize: "10,6"
+  legend_loc: "best"
+  format: pdf

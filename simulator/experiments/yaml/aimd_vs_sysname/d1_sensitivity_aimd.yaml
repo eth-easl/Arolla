@@ -1,0 +1,85 @@
+# Parameter sensitivity sweep for AIMD
+# 3-hop chain (same as c1 baseline), sweeping key AIMD parameters:
+#   - failure_threshold: [0.05, 0.1, 0.2, 0.5]  (how sensitive to failures)
+#   - decrease_factor: [0.25, 0.5, 0.75]          (how aggressively to cut)
+# Total: 4 × 3 = 12 runs
+
+name: d1_sensitivity_aimd
+seed: 42
+
+services:
+  - name: db
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 50
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: &df [0.25, 0.5, 0.75]
+      window_ms: 1000
+      failure_threshold: &ft [0.05, 0.1, 0.2, 0.5]
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.5
+
+  - name: backend
+    latency:
+      median_ms: 10
+      lognorm_sigma: 0.5
+    workers: 32
+    queue_capacity: 100
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: *df
+      window_ms: 1000
+      failure_threshold: *ft
+    dependencies:
+      - service: db
+
+  - name: frontend
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 100
+    retry:
+      type: fixed
+      max_attempts: 2
+      delay_ms: 100
+    aimd_global_retry_budget:
+      min_rps: 5
+      max_rps: 100
+      initial_rps: 30
+      max_burst: 10
+      additive_step: 5
+      decrease_factor: *df
+      window_ms: 1000
+      failure_threshold: *ft
+    dependencies:
+      - service: backend
+
+clients:
+  - name: client
+    workload:
+      base_rps: 300
+      duration_s: 120
+    target_service: frontend

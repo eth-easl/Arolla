@@ -1,0 +1,95 @@
+# Scenario C1: Diamond topology, NO server-side control
+#
+# Topology (parallel fan-out):
+#              ┌→ svc-A (retry k=3) ─┐
+#   client → gateway (retry k=3) ──→│                     │→ backend-db (50% failure)
+#              └→ svc-B (retry k=3) ─┘
+#
+# Amplification: gateway retries entire fanout, both svc-A and svc-B independently
+# retry backend-db. Worst case per client request:
+#   3 (gateway) × 2 (fanout) × 3 (per-svc) = 18x on backend-db, plus client retries → 54x
+#
+# Tight capacity: backend-db has limited workers to show overload collapse.
+
+name: c1_diamond_nocontrol
+seed: 42
+
+services:
+  - name: backend-db
+    latency:
+      median_ms: 5
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    partial_failures:
+      - type: partial_failure
+        start_s: 30
+        end_s: 60
+        p_fail: 0.5
+
+  - name: svc-A
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    dependencies:
+      - service: backend-db
+
+  - name: svc-B
+    latency:
+      median_ms: 3
+      lognorm_sigma: 0.3
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    dependencies:
+      - service: backend-db
+
+  - name: gateway
+    latency:
+      median_ms: 2
+      lognorm_sigma: 0.2
+    workers: 32
+    queue_capacity: 200
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 50
+    dependencies:
+      - service: svc-A
+      - service: svc-B
+    dependency_call_pattern: parallel
+
+clients:
+  - name: client
+    workload:
+      base_rps: 200
+      duration_s: 120
+    target_service: gateway
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+plotting_script: plotting/plot_all.py
+plotting_script_args:
+  smoothing_window: 3
+  font_size: 18
+  tick_size: 16
+  line_width: 3.0
+  no_legend_frame: true
+  legend_size: 16
+  figsize: "10,6"
+  legend_loc: "best"
+  format: pdf
