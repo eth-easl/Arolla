@@ -61,18 +61,18 @@ async function apiSaveResults(analysisType, data, label = "") {
 // ============================================================
 
 const STRATEGY_COLORS = {
-  no_retries: "#6b7280",
-  three_retries: "#f59e0b",
-  exponential_backoff_jitter: "#22c55e",
-  circuit_breaker: "#a78bfa",
-  retry_budget: "#67e8f9",
+  no_retries: "#8b8b8b",
+  three_retries: "#4a86c8",
+  exponential_backoff_jitter: "#e07b39",
+  circuit_breaker: "#5ba05b",
+  retry_budget: "#c75050",
 };
 
 const STRATEGIES = [
   {
     key: "three_retries",
     label: "Fixed Retries",
-    color: "#f59e0b",
+    color: "#4a86c8",
     clientName: "three_retries",
     sweeps: [
       { param: "Max Attempts", path: "clients.1.retry.max_attempts", values: [1, 2, 3, 4, 5, 6, 8] },
@@ -82,7 +82,7 @@ const STRATEGIES = [
   {
     key: "exponential_backoff_jitter",
     label: "Exp Backoff + Jitter",
-    color: "#22c55e",
+    color: "#e07b39",
     clientName: "exponential_backoff_jitter",
     sweeps: [
       { param: "Max Attempts", path: "clients.2.retry.max_attempts", values: [1, 2, 3, 4, 5, 6, 8] },
@@ -93,7 +93,7 @@ const STRATEGIES = [
   {
     key: "circuit_breaker",
     label: "Circuit Breaker",
-    color: "#a78bfa",
+    color: "#5ba05b",
     clientName: "circuit_breaker",
     sweeps: [
       { param: "Failure Threshold", path: "clients.3.circuit_breaker.failure_threshold", values: [0.01, 0.05, 0.1, 0.2, 0.3, 0.5] },
@@ -104,7 +104,7 @@ const STRATEGIES = [
   {
     key: "retry_budget",
     label: "Client Retry Budget",
-    color: "#67e8f9",
+    color: "#c75050",
     clientName: "retry_budget",
     sweeps: [
       { param: "Budget Ratio", path: "clients.4.retry_budget.budget_ratio", values: [0.01, 0.05, 0.1, 0.2, 0.5, 1.0] },
@@ -129,8 +129,20 @@ function smoothArray(arr, windowSize) {
 }
 
 function heatColor(sr) {
-  const hue = Math.max(0, Math.min(120, sr * 120));
-  return `hsl(${hue}, 80%, 42%)`;
+  // Professional diverging: muted red → pale → muted teal
+  const t = Math.max(0, Math.min(1, sr));
+  if (t < 0.5) {
+    const s = t * 2;
+    const r = Math.round(178 + s * 42);
+    const g = Math.round(60 + s * 120);
+    const b = Math.round(60 + s * 100);
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  const s = (t - 0.5) * 2;
+  const r = Math.round(220 - s * 140);
+  const g = Math.round(180 + s * 10);
+  const b = Math.round(160 - s * 50);
+  return `rgb(${r}, ${g}, ${b})`;
 }
 
 function fmtVal(v) {
@@ -161,7 +173,7 @@ function TimeSeriesChart({ clients, faultEvents, T, width = 700, height = 380 })
   const xTicks = [];
   for (let t = 0; t <= maxT; t += 10) xTicks.push(t);
 
-  const defaultColors = ["#6b7280", "#f59e0b", "#22c55e", "#a78bfa", "#67e8f9", "#fb923c", "#f472b6"];
+  const defaultColors = ["#8b8b8b", "#4a86c8", "#e07b39", "#5ba05b", "#c75050", "#7a6cb2", "#c4853e"];
 
   return (
     <svg width={width} height={height} style={{ overflow: "visible" }}>
@@ -177,9 +189,9 @@ function TimeSeriesChart({ clients, faultEvents, T, width = 700, height = 380 })
         <g key={`f-${i}`}>
           <rect x={xScale(fe.start_time_s)} y={padT}
             width={Math.max(0, xScale(fe.end_time_s) - xScale(fe.start_time_s))} height={cH}
-            fill="#ef4444" opacity={0.12} rx={2} />
+            fill="#e59a9a" opacity={0.12} rx={2} />
           <text x={(xScale(fe.start_time_s) + xScale(fe.end_time_s)) / 2} y={padT + 18}
-            textAnchor="middle" fill="#ef4444" fontSize={12} fontWeight={600}
+            textAnchor="middle" fill="#e59a9a" fontSize={12} fontWeight={600}
             fontFamily="'JetBrains Mono', monospace">
             {fe.parameters?.p_fail
               ? `Partial Failure (${(fe.parameters.p_fail * 100).toFixed(0)}%)`
@@ -298,8 +310,8 @@ function SweepChart({ sweepResults, targetClient, strategyColor, T, width = 640,
           return (
             <g>
               <line x1={xScale(dropIdx)} y1={padT} x2={xScale(dropIdx)} y2={padT + cH}
-                stroke="#ef4444" strokeWidth={1.5} strokeDasharray="4,3" opacity={0.7} />
-              <text x={xScale(dropIdx)} y={padT - 4} textAnchor="middle" fill="#ef4444" fontSize={10}
+                stroke="#b74444" strokeWidth={1.5} strokeDasharray="4,3" opacity={0.7} />
+              <text x={xScale(dropIdx)} y={padT - 4} textAnchor="middle" fill="#b74444" fontSize={10}
                 fontFamily="'JetBrains Mono', monospace">cliff</text>
             </g>
           );
@@ -889,12 +901,12 @@ export default function App() {
                       </thead>
                       <tbody>
                         {tsResult.clients.map((c, i) => {
-                          const color = STRATEGY_COLORS[c.name] || "#67e8f9";
+                          const color = STRATEGY_COLORS[c.name] || "#4a86c8";
                           return (
                             <tr key={i} style={{ borderBottom: `1px solid ${T.rowBorder}` }}>
                               <td style={{ padding: "6px 10px", color, fontWeight: 600 }}>{c.name}</td>
                               <td style={{ padding: "6px 10px", textAlign: "right",
-                                color: c.summary.success_rate > 0.8 ? "#22c55e" : c.summary.success_rate > 0.5 ? "#f59e0b" : "#ef4444" }}>
+                                color: c.summary.success_rate > 0.8 ? "#388e3c" : c.summary.success_rate > 0.5 ? "#e07b39" : "#c75050" }}>
                                 {(c.summary.success_rate * 100).toFixed(1)}%
                               </td>
                               <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
@@ -904,7 +916,7 @@ export default function App() {
                                 {c.summary.p99.toFixed(0)}
                               </td>
                               <td style={{ padding: "6px 10px", textAlign: "right",
-                                color: c.summary.dropped_queue > 0 ? "#f59e0b" : T.faint }}>
+                                color: c.summary.dropped_queue > 0 ? "#e07b39" : T.faint }}>
                                 {c.summary.dropped_queue}
                               </td>
                             </tr>
@@ -966,7 +978,7 @@ export default function App() {
                             <tr key={i} style={{ borderBottom: `1px solid ${T.rowBorder}` }}>
                               <td style={{ padding: "6px 10px", color: T.accent }}>{fmtVal(r.param_value)}</td>
                               <td style={{ padding: "6px 10px", textAlign: "right",
-                                color: clientSR > 0.8 ? "#22c55e" : clientSR > 0.5 ? "#f59e0b" : "#ef4444" }}>
+                                color: clientSR > 0.8 ? "#388e3c" : clientSR > 0.5 ? "#e07b39" : "#c75050" }}>
                                 {r.error ? "ERR" : `${(clientSR * 100).toFixed(1)}%`}
                               </td>
                               <td style={{ padding: "6px 10px", textAlign: "right", color: T.muted }}>

@@ -46,7 +46,7 @@ async function apiSaveResults(analysisType, data, label = "") {
 // Color Utilities
 // ============================================================
 
-const SERIES_COLORS = ["#67e8f9", "#f59e0b", "#a78bfa", "#ef4444", "#22c55e", "#fb923c", "#f472b6"];
+const SERIES_COLORS = ["#4a86c8", "#e07b39", "#5ba05b", "#c75050", "#7a6cb2", "#c4853e", "#8b8b8b"];
 
 // ============================================================
 // Tab 1: Chain Depth Amplification
@@ -105,9 +105,9 @@ function ChainWaterfall({ chainResult, T, width = 620, height = 170 }) {
               />
             )}
             <rect x={x} y={y} width={boxW} height={barH * (1 - retryRatio)}
-              fill="#22c55e" opacity={0.7} rx={3} />
+              fill="#388e3c" opacity={0.7} rx={3} />
             <rect x={x} y={y + barH * (1 - retryRatio)} width={boxW} height={barH * retryRatio}
-              fill="#ef4444" opacity={0.7} rx={3} />
+              fill="#c75050" opacity={0.7} rx={3} />
             <text x={x + boxW / 2} y={padT + cH + 18} textAnchor="middle" fill={T.svgLabel} fontSize={10}
               fontFamily="'JetBrains Mono', monospace">{svc}</text>
             <text x={x + boxW / 2} y={y - 5} textAnchor="middle" fill={T.text} fontSize={11}
@@ -116,9 +116,9 @@ function ChainWaterfall({ chainResult, T, width = 620, height = 170 }) {
         );
       })}
       <g transform={`translate(${padL}, ${height - 2})`}>
-        <rect x={0} y={-7} width={8} height={7} fill="#22c55e" opacity={0.7} rx={1} />
+        <rect x={0} y={-7} width={8} height={7} fill="#388e3c" opacity={0.7} rx={1} />
         <text x={12} y={0} fill={T.svgLabel} fontSize={10} fontFamily="'JetBrains Mono', monospace">Original</text>
-        <rect x={80} y={-7} width={8} height={7} fill="#ef4444" opacity={0.7} rx={1} />
+        <rect x={80} y={-7} width={8} height={7} fill="#c75050" opacity={0.7} rx={1} />
         <text x={92} y={0} fill={T.svgLabel} fontSize={10} fontFamily="'JetBrains Mono', monospace">Retries</text>
       </g>
     </svg>
@@ -280,9 +280,9 @@ function ClientTimelineChart({ clients, faultEvents, T, width = 620, height = 26
         <g key={`fault-${i}`}>
           <rect x={xScale(fe.start_time_s)} y={padT}
             width={Math.max(0, xScale(fe.end_time_s) - xScale(fe.start_time_s))} height={cH}
-            fill="#ef4444" opacity={0.12} rx={2} />
+            fill="#b74444" opacity={0.12} rx={2} />
           <text x={(xScale(fe.start_time_s) + xScale(fe.end_time_s)) / 2} y={padT + 16}
-            textAnchor="middle" fill="#ef4444" fontSize={11} fontWeight={600}
+            textAnchor="middle" fill="#dd9090" fontSize={11} fontWeight={600}
             fontFamily="'JetBrains Mono', monospace">
             {fe.parameters?.p_fail
               ? `Partial Failure (${(fe.parameters.p_fail * 100).toFixed(0)}%)`
@@ -499,7 +499,7 @@ export default function App() {
                         {c.split("/").pop().replace(".yaml", "")}
                       </span>
                       <button onClick={() => removeChainConfig(c)}
-                        style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 14, padding: 0 }}>
+                        style={{ background: "none", border: "none", color: "#b74444", cursor: "pointer", fontSize: 14, padding: 0 }}>
                         x
                       </button>
                     </div>
@@ -642,7 +642,7 @@ export default function App() {
                             <tr key={i} style={{ borderBottom: `1px solid ${T.rowBorder}` }}>
                               <td style={{ padding: "6px 10px", color: T.text }}>{series.label}</td>
                               <td style={{ padding: "6px 10px", textAlign: "right",
-                                color: point?.success_rate > 0.8 ? "#22c55e" : point?.success_rate > 0.5 ? "#f59e0b" : "#ef4444" }}>
+                                color: point?.success_rate > 0.8 ? "#388e3c" : point?.success_rate > 0.5 ? "#e07b39" : "#c75050" }}>
                                 {point ? `${(point.success_rate * 100).toFixed(1)}%` : "—"}
                               </td>
                               <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
@@ -738,7 +738,7 @@ export default function App() {
                               {c.summary.total}
                             </td>
                             <td style={{ padding: "6px 10px", textAlign: "right",
-                              color: c.summary.success_rate > 0.8 ? "#22c55e" : c.summary.success_rate > 0.5 ? "#f59e0b" : "#ef4444" }}>
+                              color: c.summary.success_rate > 0.8 ? "#388e3c" : c.summary.success_rate > 0.5 ? "#e07b39" : "#c75050" }}>
                               {(c.summary.success_rate * 100).toFixed(1)}%
                             </td>
                             <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
@@ -747,7 +747,7 @@ export default function App() {
                             <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
                               {c.summary.p99.toFixed(0)}
                             </td>
-                            <td style={{ padding: "6px 10px", textAlign: "right", color: c.summary.dropped_queue > 0 ? "#f59e0b" : T.faint }}>
+                            <td style={{ padding: "6px 10px", textAlign: "right", color: c.summary.dropped_queue > 0 ? "#e07b39" : T.faint }}>
                               {c.summary.dropped_queue}
                             </td>
                           </tr>
@@ -769,9 +769,9 @@ export default function App() {
                   return (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginTop: 12 }}>
                       {[
-                        { label: "Best Client", value: `${(best * 100).toFixed(1)}%`, color: "#22c55e" },
-                        { label: "Worst Client", value: `${(worst * 100).toFixed(1)}%`, color: "#ef4444" },
-                        { label: "Fairness", value: `${(fairness * 100).toFixed(0)}%`, color: fairness > 0.8 ? "#22c55e" : "#f59e0b" },
+                        { label: "Best Client", value: `${(best * 100).toFixed(1)}%`, color: "#388e3c" },
+                        { label: "Worst Client", value: `${(worst * 100).toFixed(1)}%`, color: "#c75050" },
+                        { label: "Fairness", value: `${(fairness * 100).toFixed(0)}%`, color: fairness > 0.8 ? "#388e3c" : "#e07b39" },
                         { label: "Total Amplification", value: `${((totalRequests + totalRetries) / Math.max(totalRequests, 1)).toFixed(2)}x`, color: T.accent },
                       ].map((stat) => (
                         <div key={stat.label} style={{

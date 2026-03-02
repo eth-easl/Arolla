@@ -53,7 +53,7 @@ function ScalingWallChart({ seriesData, clientCounts, selectedIdx, T, width = 64
   const xScale = (i) => padL + (i / Math.max(1, n - 1)) * cW;
   const yScale = (v) => padT + (1 - v) * cH;
 
-  const colors = ["#67e8f9", "#f59e0b", "#a78bfa", "#ef4444", "#22c55e", "#fb923c", "#f472b6"];
+  const colors = ["#4a86c8", "#e07b39", "#5ba05b", "#c75050", "#7a6cb2", "#c4853e", "#8b8b8b"];
 
   return (
     <svg width={width} height={height} style={{ overflow: "visible" }}>
@@ -233,7 +233,7 @@ export default function App() {
                         {c.split("/").pop().replace(".yaml", "")}
                       </span>
                       <button onClick={() => removeConfig(c)}
-                        style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 14, padding: 0 }}>
+                        style={{ background: "none", border: "none", color: "#b74444", cursor: "pointer", fontSize: 14, padding: 0 }}>
                         x
                       </button>
                     </div>
@@ -356,7 +356,7 @@ export default function App() {
                       return (
                         <tr key={i} style={{ borderBottom: `1px solid ${T.rowBorder}` }}>
                           <td style={{ padding: "6px 10px", color: T.text }}>{series.label}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "right", color: point?.success_rate > 0.8 ? "#22c55e" : point?.success_rate > 0.5 ? "#f59e0b" : "#ef4444" }}>
+                          <td style={{ padding: "6px 10px", textAlign: "right", color: point?.success_rate > 0.8 ? "#388e3c" : point?.success_rate > 0.5 ? "#e07b39" : "#c75050" }}>
                             {point ? `${(point.success_rate * 100).toFixed(1)}%` : "—"}
                           </td>
                           <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
