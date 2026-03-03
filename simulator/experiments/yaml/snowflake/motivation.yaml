@@ -58,10 +58,11 @@ services:
     workers: 16
     queue_capacity: 1000
     arolla_retry_budget:
-      alpha: 0.3
+      alpha: 0.2
       beta_down: 0.3
       beta_up: 0.15
       window_ms: 1000
+      # max_retry_ratio: 0.1
     partial_failures:
       - type: partial_failure
         start_s: 20
