@@ -302,6 +302,11 @@ class HeatmapRequest(BaseModel):
     param_path_y: str = Field(description="Dot-separated path to Y-axis parameter")
     values_y: list = Field(description="Y-axis parameter values to sweep")
 
+class ParamCompareRequest(BaseModel):
+    config_path: str = Field(description="Base YAML config path")
+    param_name: str = Field(description="Short parameter name, e.g. 'p_fail', 'base_rps', 'workers'")
+    values: list[float] = Field(description="Parameter values to compare")
+
 
 # ============================================================
 # Frontend — serves JSX visualizations in the browser
@@ -854,9 +859,179 @@ async def run_heatmap(req: HeatmapRequest):
     }
 
 
+@app.post("/api/param_compare")
+async def run_param_compare(req: ParamCompareRequest):
+    """Run simulations varying a shared parameter across all strategies.
+
+    Metrics are computed over the **fault phase only** (the time window covered
+    by partial_failures / latency_spikes) so that the healthy steady-state
+    period does not dilute the comparison.  Falls back to whole-simulation
+    summary when no fault events are present.
+    """
+    import yaml
+    config_path = YAML_DIR / req.config_path
+    if not config_path.exists():
+        raise HTTPException(404, f"Config not found: {req.config_path}")
+
+    with open(config_path) as f:
+        base_yaml = yaml.safe_load(f)
+
+    # Expand short param name to all matching dot-paths
+    param_paths = _expand_broadcast_param(base_yaml, req.param_name)
+    if not param_paths:
+        raise HTTPException(400, f"No matching paths found for parameter '{req.param_name}'")
+
+    results = []
+    for val in req.values:
+        yaml_copy = json.loads(json.dumps(base_yaml))
+        for p in param_paths:
+            _set_nested(yaml_copy, p, val)
+
+        try:
+            yaml_str = yaml.dump(yaml_copy)
+            config = ConfigLoader.load_from_string(yaml_str)
+            t0 = time.time()
+            result = run_simulation(config)
+            elapsed = round(time.time() - t0, 2)
+
+            fault_events = result.get("fault_events", [])
+            per_client = _extract_fault_phase_metrics(result["clients"], fault_events)
+
+            results.append({
+                "param_value": val,
+                "elapsed_s": elapsed,
+                "per_client": per_client,
+            })
+        except Exception as e:
+            traceback.print_exc()
+            results.append({"param_value": val, "error": str(e)})
+
+    return {
+        "config": req.config_path,
+        "param_name": req.param_name,
+        "param_paths": param_paths,
+        "results": results,
+    }
+
+
 # ============================================================
 # Helpers
 # ============================================================
+
+def _extract_fault_phase_metrics(
+    clients: list, fault_events: list,
+) -> list[dict]:
+    """Compute per-client metrics restricted to the fault window.
+
+    Uses timeseries buckets where ``fault_start <= timepoint < fault_end``.
+    Falls back to whole-simulation summary when no fault events exist.
+    """
+    # Determine fault window
+    fault_start = fault_end = None
+    if fault_events:
+        fault_start = min(
+            fe["start_time_s"] for fe in fault_events if "start_time_s" in fe
+        )
+        fault_end = max(
+            fe["end_time_s"] for fe in fault_events if "end_time_s" in fe
+        )
+
+    per_client = []
+    for c in clients:
+        ts = c.get("timeseries", [])
+
+        if fault_start is not None and fault_end is not None and ts:
+            buckets = [
+                b for b in ts
+                if fault_start <= b["timepoint"] < fault_end
+            ]
+        else:
+            buckets = ts  # no fault → use everything
+
+        if not buckets:
+            # Fallback to whole-sim summary
+            s = c["summary"]
+            per_client.append({
+                "name": c["name"],
+                "success_rate": s["success_rate"],
+                "goodput_rps": s.get("goodput_rps", 0),
+                "amplification_factor": s.get("amplification_factor", 1.0),
+                "retry_efficiency": s.get("retry_efficiency", 0),
+                "p50": s.get("p50", 0),
+                "p95": s.get("p95", 0),
+                "p99": s.get("p99", 0),
+                "recovery_time_s": s.get("recovery_time_s"),
+            })
+            continue
+
+        # Aggregate timeseries buckets within the fault window
+        total_roots = sum(b.get("root_requests", 0) for b in buckets)
+        total_success = sum(b.get("success_root", 0) for b in buckets)
+        total_retries = sum(b.get("retries", 0) for b in buckets)
+        total_retry_fails = sum(b.get("failure_retry", 0) for b in buckets)
+        total_attempts = total_roots + total_retries
+
+        success_rate = total_success / total_roots if total_roots > 0 else 0
+        n_buckets = len(buckets)
+        goodput_rps = sum(b.get("goodput_rps", 0) for b in buckets) / n_buckets
+        amp = total_attempts / total_roots if total_roots > 0 else 1.0
+        retry_eff = (
+            (total_retries - total_retry_fails) / total_retries
+            if total_retries > 0 else 0
+        )
+
+        # p99 during fault: use max of per-bucket p99s as conservative estimate
+        p50_vals = [b.get("p50", 0) for b in buckets if b.get("p50", 0) > 0]
+        p95_vals = [b.get("p95", 0) for b in buckets if b.get("p95", 0) > 0]
+        p99_vals = [b.get("p99", 0) for b in buckets if b.get("p99", 0) > 0]
+
+        per_client.append({
+            "name": c["name"],
+            "success_rate": round(success_rate, 4),
+            "goodput_rps": round(goodput_rps, 2),
+            "amplification_factor": round(amp, 3),
+            "retry_efficiency": round(retry_eff, 3),
+            "p50": round(max(p50_vals), 2) if p50_vals else 0,
+            "p95": round(max(p95_vals), 2) if p95_vals else 0,
+            "p99": round(max(p99_vals), 2) if p99_vals else 0,
+            "recovery_time_s": c["summary"].get("recovery_time_s"),
+        })
+
+    return per_client
+
+
+def _expand_broadcast_param(yaml_dict: dict, param_name: str) -> list[str]:
+    """Expand a short param name to all matching dot-paths in the config."""
+    paths = []
+    if param_name == "p_fail":
+        for i, svc in enumerate(yaml_dict.get("services", [])):
+            for j, pf in enumerate(svc.get("partial_failures", [])):
+                if "p_fail" in pf:
+                    paths.append(f"services.{i}.partial_failures.{j}.p_fail")
+    elif param_name == "base_rps":
+        for i, c in enumerate(yaml_dict.get("clients", [])):
+            wl = c.get("workload")
+            if wl and "base_rps" in wl:
+                paths.append(f"clients.{i}.workload.base_rps")
+    elif param_name == "workers":
+        for i, svc in enumerate(yaml_dict.get("services", [])):
+            if "workers" in svc:
+                paths.append(f"services.{i}.workers")
+    elif param_name == "max_attempts":
+        for i, c in enumerate(yaml_dict.get("clients", [])):
+            retry = c.get("retry")
+            if retry and "max_attempts" in retry:
+                paths.append(f"clients.{i}.retry.max_attempts")
+    elif param_name == "attempt_timeout_ms":
+        for i, c in enumerate(yaml_dict.get("clients", [])):
+            to = c.get("timeout")
+            if to and "attempt_ms" in to:
+                paths.append(f"clients.{i}.timeout.attempt_ms")
+    elif param_name == "queue_capacity":
+        for i, svc in enumerate(yaml_dict.get("services", [])):
+            if "queue_capacity" in svc:
+                paths.append(f"services.{i}.queue_capacity")
+    return paths
 
 def _set_nested(d: dict, path: str, value):
     """Set a nested dict value by dot-separated path. Supports array indexing like 'clients.0.retry.max_attempts'."""

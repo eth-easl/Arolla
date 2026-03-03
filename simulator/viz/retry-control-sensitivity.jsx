@@ -46,6 +46,16 @@ async function apiListConfigs() {
   return res.json();
 }
 
+async function apiParamCompare(configPath, paramName, values) {
+  const res = await fetch(`${API_BASE}/api/param_compare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config_path: configPath, param_name: paramName, values }),
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
 async function apiSaveResults(analysisType, data, label = "") {
   const res = await fetch(`${API_BASE}/api/save_results`, {
     method: "POST",
@@ -467,6 +477,119 @@ function ChartLegend({ clients, T }) {
 }
 
 // ============================================================
+// Grouped Bar Chart — parameter comparison across strategies
+// ============================================================
+
+function GroupedBarChart({ compareResult, metricKey, yLabel, yFormat, T, width = 700, height = 240 }) {
+  if (!compareResult || !compareResult.results || compareResult.results.length === 0) return null;
+
+  const padL = 65, padR = 20, padT = 16, padB = 44;
+  const cW = width - padL - padR;
+  const cH = height - padT - padB;
+
+  const paramValues = compareResult.results.map(r => r.param_value);
+  const strategies = compareResult.results[0].per_client.map(c => c.name);
+  const nGroups = paramValues.length;
+  const nBars = strategies.length;
+
+  // Compute max value for Y scale
+  let maxVal = 0;
+  for (const r of compareResult.results) {
+    for (const c of r.per_client) {
+      const v = c[metricKey];
+      if (v != null && v > maxVal) maxVal = v;
+    }
+  }
+  if (maxVal === 0) maxVal = 1;
+  // Round up for nice ticks
+  const yMax = metricKey === "success_rate" || metricKey === "retry_efficiency"
+    ? Math.min(1.05, Math.ceil(maxVal * 10) / 10 + 0.05)
+    : Math.ceil(maxVal * 1.15);
+  if (yMax === 0) return null;
+
+  const groupWidth = cW / nGroups;
+  const barGap = 2;
+  const groupPad = groupWidth * 0.15;
+  const barAreaWidth = groupWidth - groupPad * 2;
+  const barWidth = Math.max(4, (barAreaWidth - barGap * (nBars - 1)) / nBars);
+
+  const yScale = (v) => padT + (1 - v / yMax) * cH;
+  const xGroupCenter = (gi) => padL + gi * groupWidth + groupWidth / 2;
+
+  // Y-axis ticks
+  const nTicks = 5;
+  const yTicks = [];
+  for (let i = 0; i <= nTicks; i++) {
+    yTicks.push((yMax / nTicks) * i);
+  }
+
+  return (
+    <svg width={width} height={height} style={{ overflow: "visible" }}>
+      {/* Grid lines */}
+      {yTicks.map((v, i) => (
+        <g key={i}>
+          <line x1={padL} y1={yScale(v)} x2={padL + cW} y2={yScale(v)} stroke={T.grid} strokeWidth={0.5} />
+          <text x={padL - 8} y={yScale(v) + 4} textAnchor="end" fontSize={10} fill={T.svgLabel} fontFamily="'JetBrains Mono', monospace">
+            {yFormat ? yFormat(v) : v.toFixed(2)}
+          </text>
+        </g>
+      ))}
+
+      {/* Bars */}
+      {compareResult.results.map((r, gi) => {
+        const groupX = padL + gi * groupWidth + groupPad;
+        return r.per_client.map((c, bi) => {
+          const v = c[metricKey] != null ? c[metricKey] : 0;
+          const style = getStyle(c.name, bi);
+          const x = groupX + bi * (barWidth + barGap);
+          const barH = Math.max(0, (v / yMax) * cH);
+          const y = padT + cH - barH;
+          return (
+            <g key={`${gi}-${bi}`}>
+              <rect x={x} y={y} width={barWidth} height={barH}
+                fill={style.color} opacity={0.85} rx={1} />
+              {/* Value label on top of bar if space */}
+              {barH > 14 && (
+                <text x={x + barWidth / 2} y={y - 3} textAnchor="middle" fontSize={8}
+                  fill={T.svgLabel} fontFamily="'JetBrains Mono', monospace">
+                  {yFormat ? yFormat(v) : v.toFixed(2)}
+                </text>
+              )}
+            </g>
+          );
+        });
+      })}
+
+      {/* X-axis labels */}
+      {paramValues.map((pv, gi) => (
+        <text key={gi} x={xGroupCenter(gi)} y={padT + cH + 18} textAnchor="middle"
+          fontSize={11} fill={T.svgAxis} fontFamily="'JetBrains Mono', monospace">
+          {typeof pv === "number" ? (pv < 1 ? pv.toFixed(2) : pv.toFixed(0)) : String(pv)}
+        </text>
+      ))}
+
+      {/* X-axis label */}
+      <text x={padL + cW / 2} y={height - 4} textAnchor="middle"
+        fontSize={11} fill={T.svgLabel} fontFamily="'JetBrains Mono', monospace">
+        {compareResult.param_name}
+      </text>
+
+      {/* Y-axis label */}
+      <text x={14} y={padT + cH / 2} textAnchor="middle"
+        fontSize={11} fill={T.svgLabel} fontFamily="'JetBrains Mono', monospace"
+        transform={`rotate(-90, 14, ${padT + cH / 2})`}>
+        {yLabel}
+      </text>
+
+      {/* Axes */}
+      <line x1={padL} y1={padT} x2={padL} y2={padT + cH} stroke={T.svgAxis} strokeWidth={1} />
+      <line x1={padL} y1={padT + cH} x2={padL + cW} y2={padT + cH} stroke={T.svgAxis} strokeWidth={1} />
+    </svg>
+  );
+}
+
+
+// ============================================================
 // Sweep Chart — single parameter with cliff detection
 // ============================================================
 
@@ -758,6 +881,21 @@ export default function App() {
   const [dashConfigPath, setDashConfigPath] = useState("");
   const [dashResult, setDashResult] = useState(null);
 
+  // --- Parameter Comparison (within Dashboard tab) ---
+  const [compareParam, setCompareParam] = useState("p_fail");
+  const [compareValues, setCompareValues] = useState("0.1, 0.3, 0.5, 0.7, 0.9");
+  const [compareResult, setCompareResult] = useState(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+
+  const PARAM_PRESETS = {
+    p_fail:             { label: "Failure Rate",        defaults: "0.1, 0.3, 0.5, 0.7, 0.9" },
+    base_rps:           { label: "Base RPS",            defaults: "50, 100, 150, 200, 250" },
+    workers:            { label: "Workers",             defaults: "4, 8, 16, 32, 64" },
+    max_attempts:       { label: "Max Attempts",        defaults: "1, 2, 3, 4, 6" },
+    attempt_timeout_ms: { label: "Attempt Timeout (ms)", defaults: "100, 150, 200, 300, 500" },
+    queue_capacity:     { label: "Queue Capacity",      defaults: "100, 500, 1000, 2000" },
+  };
+
   const loadConfigs = useCallback(async () => {
     try {
       const data = await apiListConfigs();
@@ -863,6 +1001,20 @@ export default function App() {
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
   }, [dashConfigPath]);
+
+  // --- Parameter comparison handler ---
+  const runComparison = useCallback(async () => {
+    if (!dashConfigPath) return;
+    const values = compareValues.split(",").map(s => parseFloat(s.trim())).filter(v => !isNaN(v));
+    if (values.length === 0) return;
+    setCompareLoading(true); setError(null);
+    setProgressInfo({ text: `Running ${values.length} simulations for ${PARAM_PRESETS[compareParam]?.label || compareParam}...`, current: 0, total: values.length, startTime: Date.now() });
+    try {
+      const data = await apiParamCompare(dashConfigPath, compareParam, values);
+      setCompareResult(data);
+    } catch (e) { setError(e.message); }
+    setCompareLoading(false); setProgressInfo(null);
+  }, [dashConfigPath, compareParam, compareValues]);
 
   const selectStyle = {
     background: T.inputBg, border: `1px solid ${T.border}`, color: T.text,
@@ -1408,6 +1560,89 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
+
+                  {/* ====== Parameter Comparison Section ====== */}
+                  <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 16, marginTop: 12 }}>
+                    <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 12px", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                      Parameter Comparison
+                    </h3>
+                    <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+                      <div>
+                        <label style={{ fontSize: 11, color: T.muted, display: "block", marginBottom: 4 }}>Parameter</label>
+                        <select value={compareParam} onChange={(e) => {
+                          setCompareParam(e.target.value);
+                          const preset = PARAM_PRESETS[e.target.value];
+                          if (preset) setCompareValues(preset.defaults);
+                        }} style={{ ...selectStyle, width: 180 }}>
+                          {Object.entries(PARAM_PRESETS).map(([k, v]) => (
+                            <option key={k} value={k}>{v.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 200 }}>
+                        <label style={{ fontSize: 11, color: T.muted, display: "block", marginBottom: 4 }}>Values (comma-separated)</label>
+                        <input type="text" value={compareValues} onChange={(e) => setCompareValues(e.target.value)}
+                          style={{ ...selectStyle, width: "100%" }} />
+                      </div>
+                      <button onClick={runComparison} disabled={compareLoading || !dashConfigPath}
+                        style={{ ...selectStyle, background: T.btnBg, border: `1px solid ${T.accent}`, color: T.accent,
+                          fontWeight: 600, padding: "7px 18px", opacity: compareLoading ? 0.5 : 1, cursor: compareLoading ? "wait" : "pointer" }}>
+                        {compareLoading ? "Running..." : "Run Comparison"}
+                      </button>
+                    </div>
+
+                    {compareResult && compareResult.results && compareResult.results.length > 0 && (
+                      <>
+                        {/* Legend — reuse strategy colors */}
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginBottom: 10 }}>
+                          {compareResult.results[0].per_client.map((c, i) => {
+                            const style = getStyle(c.name, i);
+                            return (
+                              <div key={i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                <div style={{ width: 12, height: 12, borderRadius: 2, background: style.color }} />
+                                <span style={{ fontSize: 11, color: T.text }}>{displayName(c.name)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Success Rate */}
+                        <div style={{ marginBottom: 10 }}>
+                          <h4 style={{ fontSize: 12, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>Success Rate</h4>
+                          <GroupedBarChart compareResult={compareResult} metricKey="success_rate"
+                            yLabel="Success Rate" yFormat={(v) => `${(v * 100).toFixed(0)}%`} T={T} />
+                        </div>
+
+                        {/* Goodput */}
+                        <div style={{ marginBottom: 10 }}>
+                          <h4 style={{ fontSize: 12, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>Goodput (RPS)</h4>
+                          <GroupedBarChart compareResult={compareResult} metricKey="goodput_rps"
+                            yLabel="Goodput (rps)" yFormat={(v) => v.toFixed(0)} T={T} />
+                        </div>
+
+                        {/* Amplification Factor */}
+                        <div style={{ marginBottom: 10 }}>
+                          <h4 style={{ fontSize: 12, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>Amplification Factor</h4>
+                          <GroupedBarChart compareResult={compareResult} metricKey="amplification_factor"
+                            yLabel="Amplification" yFormat={(v) => `${v.toFixed(1)}x`} T={T} />
+                        </div>
+
+                        {/* Retry Efficiency */}
+                        <div style={{ marginBottom: 10 }}>
+                          <h4 style={{ fontSize: 12, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>Retry Efficiency</h4>
+                          <GroupedBarChart compareResult={compareResult} metricKey="retry_efficiency"
+                            yLabel="Retry Efficiency" yFormat={(v) => `${(v * 100).toFixed(0)}%`} T={T} />
+                        </div>
+
+                        {/* P99 Latency */}
+                        <div style={{ marginBottom: 4 }}>
+                          <h4 style={{ fontSize: 12, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>P99 Latency (ms)</h4>
+                          <GroupedBarChart compareResult={compareResult} metricKey="p99"
+                            yLabel="P99 (ms)" yFormat={(v) => v.toFixed(0)} T={T} />
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </>
               ) : (
                 <div style={{
@@ -1417,8 +1652,8 @@ export default function App() {
                   <div style={{ padding: 70, color: T.faint, fontSize: 14 }}>
                     <p>Select a config and click "Run & Plot Metrics" to see the full dashboard</p>
                     <p style={{ fontSize: 12, marginTop: 10 }}>
-                      Shows 5 time-series charts: Success Rate, Goodput, Amplification, Retry Efficiency, and Tail Latency —
-                      plus per-strategy summary with recovery time.
+                      Shows time-series charts and strategy summary. After running, use Parameter Comparison
+                      to sweep a shared parameter and see grouped bar charts across strategies.
                     </p>
                   </div>
                 </div>
