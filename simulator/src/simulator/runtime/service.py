@@ -59,7 +59,7 @@ class _SrvRetryCtx:
         [bool, TimeDuration, DropReason, int, TimePoint, Optional[TimePoint]], None
     ]
     on_root_done: Callable[[], None]
-    retry_budget_remaining: Optional[List[int]] = None  # SYSNAME Level 2: shared mutable [B]
+    retry_budget_remaining: Optional[List[int]] = None  # Arolla Level 2: shared mutable [B]
     tenant_id: Optional[str] = None
 
 

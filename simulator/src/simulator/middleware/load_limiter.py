@@ -120,7 +120,7 @@ class CompositeLoadLimiterMiddleware(Middleware):
 
 class EndToEndRetryBudgetMiddleware(Middleware):
     """
-    SYSNAME Level 2: End-to-end per-request retry budget.
+    Arolla Level 2: End-to-end per-request retry budget.
 
     Blocks retries when the shared budget (stamped at ingress) is exhausted.
     This bounds total retries across all hops to B, preventing chain amplification.

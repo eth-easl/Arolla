@@ -34,7 +34,7 @@ def build_service(
         retry_budget=cfg.retry_budget,
         global_retry_budget=cfg.global_retry_budget,
         aimd_global_retry_budget=cfg.aimd_global_retry_budget,
-        sysname_retry_budget=cfg.sysname_retry_budget,
+        arolla_retry_budget=cfg.arolla_retry_budget,
     )
 
     service_cfg = ServiceConfig(
