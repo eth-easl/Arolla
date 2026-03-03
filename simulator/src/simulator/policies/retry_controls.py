@@ -343,6 +343,9 @@ class LimiterTimeBasedCircuitBreakerPolicy(LoadLimiter):
             return False, 0
         return True, 0
 
+    def applies_pre_queue_admission(self, is_retry: bool) -> bool:
+        return is_retry
+
 
 @dataclass
 class LimiterRetryBudgetPolicy(LoadLimiter):
@@ -375,6 +378,9 @@ class LimiterRetryBudgetPolicy(LoadLimiter):
             self._tokens -= self._retry_cost
             return True, 0
         return False, 0
+
+    def applies_pre_queue_admission(self, is_retry: bool) -> bool:
+        return is_retry
 
 
 @dataclass
@@ -504,7 +510,7 @@ class AIMDGlobalRetryBudget(LoadLimiter):
 
 
 # ---------------------------------------------------------------------------
-# SYSNAME: Goodput-Coupled Retry Budget (Level 1)
+# Arolla: Goodput-Coupled Retry Budget (Level 1)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -521,7 +527,7 @@ class _GoodputTenantState:
 @dataclass
 class GoodputCoupledRetryBudget(LoadLimiter):
     """
-    SYSNAME Level 1: Goodput-coupled retry admission control.
+    Arolla Level 1: Goodput-coupled retry admission control.
 
     Admits retries only when recent retry count < alpha * goodput_rate * window_seconds.
     Uses asymmetric EWMA: fast decay (beta_down) when goodput drops,

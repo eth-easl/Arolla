@@ -15,7 +15,7 @@ from simulator.config.schema import (
     RetryBudgetConfig,
     RetryConfig,
     RetryPolicyType,
-    SysnameRetryBudgetConfig,
+    ArollaRetryBudgetConfig,
     TimeoutConfig,
     GlobalRetryBudgetConfig,
     ClientConfigYAML,
@@ -113,9 +113,10 @@ def build_circuit_breaker(cfg: Optional[CircuitBreakerConfig]) -> Optional[LoadL
         )
 
     if cfg.type == CircuitBreakerType.TIME_BASED:
+        success_thresh = cfg.success_threshold if cfg.success_threshold is not None else (1.0 - cfg.failure_threshold)
         return LimiterTimeBasedCircuitBreakerPolicy(
             failure_threshold_rate=cfg.failure_threshold,
-            success_threshold_rate=cfg.success_threshold,
+            success_threshold_rate=success_thresh,
             min_requests=cfg.min_requests,
             window_duration=ms_to_ns(cfg.window_duration_ms),
             half_open_delay=ms_to_ns(cfg.half_open_delay_ms),
@@ -198,8 +199,8 @@ def build_aimd_global_retry_budget(
     )
 
 
-def build_sysname_retry_budget(
-    cfg: Optional[SysnameRetryBudgetConfig],
+def build_arolla_retry_budget(
+    cfg: Optional[ArollaRetryBudgetConfig],
 ) -> Optional[LoadLimiter]:
     if cfg is None:
         return None
@@ -219,11 +220,11 @@ def build_load_limiter(
     retry_budget: Optional[RetryBudgetConfig],
     global_retry_budget: Optional[GlobalRetryBudgetConfig],
     aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig],
-    sysname_retry_budget: Optional[SysnameRetryBudgetConfig] = None,
+    arolla_retry_budget: Optional[ArollaRetryBudgetConfig] = None,
 ) -> Optional[LoadLimiter]:
-    # Priority: sysname > circuit breaker > AIMD > global > local > rate limiter
-    if sysname_retry_budget is not None:
-        return build_sysname_retry_budget(sysname_retry_budget)
+    # Priority: arolla > circuit breaker > AIMD > global > local > rate limiter
+    if arolla_retry_budget is not None:
+        return build_arolla_retry_budget(arolla_retry_budget)
     if circuit_breaker is not None:
         return build_circuit_breaker(circuit_breaker)
     if aimd_global_retry_budget is not None:
