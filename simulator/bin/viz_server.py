@@ -20,12 +20,15 @@ Endpoints:
 
 import sys
 import json
+import math
 import time
 import hashlib
 import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -71,23 +74,42 @@ def run_simulation(config: ExperimentConfig) -> dict:
     sim.run(until=s_to_ns(max_duration))
     sim.run()  # drain
 
+    def _safe(v):
+        """Ensure float is JSON-serializable (replace NaN/Inf with 0)."""
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return 0
+        return v
+
     # Collect per-client summaries
     client_results = []
     for client in clients:
         metrics = client.metrics()
         summary = metrics.summary()
         df = metrics.to_dataframe(granularity_s=config.granularity_s)
-        # Replace NaN with 0 for JSON serialization (NaN occurs in latency
-        # percentiles for buckets with no successful completions)
+
+        # Add derived metric columns before NaN fill
         if not df.empty:
+            df['goodput_rps'] = df['success_root'] / config.granularity_s
+            df['retry_efficiency'] = np.where(
+                df['retries'] > 0,
+                (df['retries'] - df['failure_retry']) / df['retries'],
+                0.0,
+            )
+            df['amplification_factor'] = np.where(
+                df['root_requests'] > 0,
+                (df['root_requests'] + df['retries']) / df['root_requests'],
+                1.0,
+            )
+            # Replace NaN with 0 for JSON serialization
             df = df.fillna(0)
 
-        import math
-        def _safe(v):
-            """Ensure float is JSON-serializable (replace NaN/Inf with 0)."""
-            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                return 0
-            return v
+        # Summary-level derived metrics
+        total_retries_sum = float(df['retries'].sum()) if not df.empty else 0
+        retry_fails_sum = float(df['failure_retry'].sum()) if not df.empty else 0
+        retry_eff = (
+            (total_retries_sum - retry_fails_sum) / total_retries_sum
+            if total_retries_sum > 0 else 0.0
+        )
 
         client_results.append({
             "name": client.cfg.name,
@@ -104,6 +126,10 @@ def run_simulation(config: ExperimentConfig) -> dict:
                 "p99": _safe(round(summary.p99, 2)),
                 "mean": _safe(round(summary.mean, 2)),
                 "retries_per_root": _safe(round(summary.retries_per_root, 3)),
+                "goodput_rps": _safe(round(summary.succeeded / max_duration, 2)) if max_duration > 0 else 0,
+                "amplification_factor": _safe(round(
+                    summary.attempts_total / summary.total if summary.total > 0 else 1.0, 3)),
+                "retry_efficiency": _safe(round(retry_eff, 3)),
             },
             "timeseries": df.to_dict(orient="records"),
         })
@@ -129,12 +155,120 @@ def run_simulation(config: ExperimentConfig) -> dict:
             for e in fault_tracker.events
         ]
 
+    # Compute recovery time per client
+    for cr in client_results:
+        cr["summary"]["recovery_time_s"] = _compute_recovery_time(
+            cr["timeseries"], fault_events
+        )
+
+    # Compute fairness share shift (multi-client only)
+    fairness = _compute_fairness_share_shift(client_results, config)
+
     return {
         "name": config.name,
         "clients": client_results,
         "services": service_results,
         "fault_events": fault_events,
+        "fairness_share_shift": fairness,
     }
+
+
+# ============================================================
+# Derived metric helpers
+# ============================================================
+
+def _compute_recovery_time(
+    timeseries: list, fault_events: list, threshold: float = 0.95
+) -> Optional[float]:
+    """Seconds from last fault removal to goodput returning to `threshold` of pre-fault baseline.
+
+    Returns None if no fault events, no recovery detected, or insufficient data.
+    """
+    if not fault_events or not timeseries:
+        return None
+
+    last_fault_end = max(
+        fe["end_time_s"] for fe in fault_events if "end_time_s" in fe
+    )
+    first_fault_start = min(
+        fe["start_time_s"] for fe in fault_events if "start_time_s" in fe
+    )
+
+    # Baseline goodput = mean goodput_rps before any fault
+    baseline_buckets = [
+        b for b in timeseries if b["timepoint"] < first_fault_start
+    ]
+    if not baseline_buckets:
+        return None
+    baseline_goodput = sum(b.get("goodput_rps", 0) for b in baseline_buckets) / len(
+        baseline_buckets
+    )
+    if baseline_goodput <= 0:
+        return None
+
+    target = threshold * baseline_goodput
+
+    # Scan forward from fault end
+    post_fault = sorted(
+        (b for b in timeseries if b["timepoint"] >= last_fault_end),
+        key=lambda b: b["timepoint"],
+    )
+    for b in post_fault:
+        if b.get("goodput_rps", 0) >= target:
+            return round(b["timepoint"] - last_fault_end, 2)
+
+    return None  # never recovered
+
+
+def _compute_fairness_share_shift(
+    client_results: list, config: ExperimentConfig
+) -> Optional[float]:
+    """Worst-case goodput share shift: max_t max_i (actual_share_i(t) - fair_share_i).
+
+    fair_share_i is proportional to the client's configured base_rps.
+    A positive value means some client grabs more than its fair share.
+    Returns None for single-client experiments.
+    """
+    if len(client_results) < 2:
+        return None
+
+    # Determine each client's fair share from configured RPS
+    rps_list = []
+    for i, cr in enumerate(client_results):
+        # Try to read the configured base_rps from the experiment config
+        rps = 100.0  # default fallback
+        if hasattr(config, "clients") and i < len(config.clients):
+            wl = getattr(config.clients[i], "workload", None)
+            if wl and hasattr(wl, "base_rps"):
+                rps = float(wl.base_rps)
+        rps_list.append(rps)
+
+    total_rps = sum(rps_list)
+    fair_shares = [r / total_rps for r in rps_list]
+
+    # Index timeseries by timepoint for each client
+    ts_by_client = []
+    all_timepoints = set()
+    for cr in client_results:
+        ts_map = {}
+        for b in cr.get("timeseries", []):
+            tp = b["timepoint"]
+            ts_map[tp] = b.get("goodput_rps", 0)
+            all_timepoints.add(tp)
+        ts_by_client.append(ts_map)
+
+    max_shift = 0.0
+    for t in all_timepoints:
+        goodputs = [ts.get(t, 0) for ts in ts_by_client]
+        total_g = sum(goodputs)
+        if total_g <= 0:
+            continue
+        for i, g in enumerate(goodputs):
+            shift = (g / total_g) - fair_shares[i]
+            if shift > max_shift:
+                max_shift = shift
+
+    return round(max_shift, 4)
 
 
 # ============================================================
@@ -174,9 +308,9 @@ class HeatmapRequest(BaseModel):
 # ============================================================
 
 VIZ_PAGES = [
-    {"slug": "retry-control-sensitivity", "title": "Retry Control Sensitivity", "desc": "Time series, parameter sweeps, tornado chart, and heatmap for all retry strategies"},
-    {"slug": "retry-at-scale", "title": "The Scaling Wall", "desc": "How retry strategies perform as client count grows"},
-    {"slug": "chain-amplification", "title": "Chain Amplification", "desc": "Retry compounding across chain depth + client diversity"},
+    {"slug": "retry-control-sensitivity", "title": "Single-Client & Single-Service", "desc": "Compare retry strategies: parameter sensitivity, goodput, amplification, retry efficiency, recovery time"},
+    {"slug": "retry-at-scale", "title": "Multi-Client & Single-Service", "desc": "How retry strategies scale with client count: goodput, amplification, retry efficiency vs N"},
+    {"slug": "chain-amplification", "title": "Multi-Service", "desc": "Retry amplification across dependency chains and client diversity"},
 ]
 
 
@@ -525,7 +659,10 @@ async def run_sweep(req: SweepRequest):
                         "name": c["name"],
                         "success_rate": c["summary"]["success_rate"],
                         "p99": c["summary"]["p99"],
+                        "p95": c["summary"]["p95"],
                         "retries_per_root": c["summary"]["retries_per_root"],
+                        "goodput_rps": c["summary"].get("goodput_rps", 0),
+                        "retry_efficiency": c["summary"].get("retry_efficiency", 0),
                     }
                     for c in result["clients"]
                 ],
@@ -578,11 +715,15 @@ async def run_scaling(req: ScalingRequest):
             agg = _aggregate_clients(result["clients"])
             per_client = [c["summary"]["success_rate"] for c in result["clients"]]
 
+            # Compute fairness for this scaling point
+            fairness = _compute_fairness_share_shift(result["clients"], config)
+
             results.append({
                 "client_count": n,
                 "elapsed_s": elapsed,
                 **agg,
                 "per_client_success_rates": per_client,
+                "fairness_share_shift": fairness,
             })
         except Exception as e:
             traceback.print_exc()
@@ -656,6 +797,7 @@ async def run_chain(req: ChainRequest):
                 **agg,
                 "per_hop": per_hop,
             })
+
         except Exception as e:
             traceback.print_exc()
             results.append({"depth": depth, "error": str(e)})
@@ -737,14 +879,27 @@ def _aggregate_clients(clients: list) -> dict:
     total_succeeded = sum(c["summary"]["succeeded"] for c in clients)
     total_retries = sum(c["summary"]["total"] * c["summary"]["retries_per_root"] for c in clients)
 
+    p50_values = [c["summary"]["p50"] for c in clients if c["summary"]["total"] > 0]
+    p95_values = [c["summary"]["p95"] for c in clients if c["summary"]["total"] > 0]
     p99_values = [c["summary"]["p99"] for c in clients if c["summary"]["total"] > 0]
+    max_p50 = max(p50_values) if p50_values else 0
+    max_p95 = max(p95_values) if p95_values else 0
     max_p99 = max(p99_values) if p99_values else 0
+
+    # Aggregate goodput and retry efficiency
+    total_goodput = sum(c["summary"].get("goodput_rps", 0) for c in clients)
+    retry_effs = [c["summary"].get("retry_efficiency", 0) for c in clients if c["summary"]["total"] > 0]
+    avg_retry_eff = sum(retry_effs) / len(retry_effs) if retry_effs else 0
 
     return {
         "success_rate": total_succeeded / total_requests if total_requests > 0 else 0,
         "total_requests": total_requests,
         "total_succeeded": total_succeeded,
         "amplification": (total_requests + total_retries) / total_requests if total_requests > 0 else 1,
+        "goodput_rps": round(total_goodput, 2),
+        "retry_efficiency": round(avg_retry_eff, 3),
+        "p50": max_p50,
+        "p95": max_p95,
         "p99": max_p99,
     }
 
