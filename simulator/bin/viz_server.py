@@ -409,7 +409,7 @@ function useTheme() {
     }}
     body {{ background: var(--viz-bg-gradient); overflow-x: hidden; transition: background 0.3s; color: var(--viz-text); }}
     .back-nav {{
-      position: fixed; top: 12px; left: 16px; z-index: 1000;
+      position: fixed; top: 12px; right: 16px; z-index: 1000;
       display: flex; gap: 8px; align-items: center;
     }}
     .back-nav a, .back-nav button {{
@@ -597,6 +597,97 @@ async def list_configs():
     return {"configs": configs}
 
 
+@app.get("/api/strategies")
+async def get_strategies(config_path: str):
+    """Auto-discover strategies and sweepable parameters from a YAML config."""
+    import yaml
+    yaml_path = YAML_DIR / config_path
+    if not yaml_path.exists():
+        raise HTTPException(404, f"Config not found: {config_path}")
+
+    with open(yaml_path) as f:
+        yaml_dict = yaml.safe_load(f)
+
+    services = yaml_dict.get("services", [])
+    clients = yaml_dict.get("clients", [])
+    svc_by_name = {s["name"]: (i, s) for i, s in enumerate(services)}
+
+    # Full parameter specs per control type: (param_name, schema_default)
+    # schema_default=None means required or disabled-by-default (skip if absent)
+    CB_PARAMS = [
+        ("failure_threshold", None),
+        ("success_threshold", None),
+        ("half_open_delay_ms", None),
+        ("window_duration_ms", None),
+        ("min_requests", None),
+        ("failure_window_size", None),
+        ("success_window_size", None),
+    ]
+    RB_PARAMS = [
+        ("budget_ratio", None),
+        ("max_retries", None),
+        ("min_retries_per_sec", 10),
+    ]
+    AROLLA_PARAMS = [
+        ("alpha", 0.1),
+        ("beta_down", 0.3),
+        ("beta_up", 0.05),
+        ("window_ms", 1000.0),
+        ("success_rate_threshold", None),
+        ("success_rate_beta", 0.1),
+        ("max_retry_ratio", None),
+    ]
+
+    def _collect_params(config_dict, param_specs, path_prefix):
+        """Collect sweepable params from a config block, including schema defaults."""
+        sweeps = []
+        for param_name, schema_default in param_specs:
+            val = config_dict.get(param_name)
+            if val is None:
+                val = schema_default
+            if val is None:
+                continue  # truly optional and not set
+            sweeps.append({
+                "param": param_name,
+                "path": f"{path_prefix}.{param_name}",
+                "current": val,
+                "values": _default_sweep_range(param_name, val),
+            })
+        return sweeps
+
+    strategies = []
+    for ci, client in enumerate(clients):
+        name = client.get("name", f"client_{ci}")
+        sweeps = []
+
+        # Service-side control parameters only (skip shared retry/timeout config)
+        target = client.get("target_service", "")
+        if target in svc_by_name:
+            si, svc = svc_by_name[target]
+
+            cb = svc.get("circuit_breaker")
+            if cb:
+                sweeps.extend(_collect_params(cb, CB_PARAMS, f"services.{si}.circuit_breaker"))
+
+            rb = svc.get("retry_budget")
+            if rb:
+                sweeps.extend(_collect_params(rb, RB_PARAMS, f"services.{si}.retry_budget"))
+
+            ar = svc.get("arolla_retry_budget")
+            if ar:
+                sweeps.extend(_collect_params(ar, AROLLA_PARAMS, f"services.{si}.arolla_retry_budget"))
+
+        strategies.append({
+            "key": name,
+            "label": name,
+            "clientName": name,
+            "clientIndex": ci,
+            "sweeps": sweeps,
+        })
+
+    return {"strategies": strategies}
+
+
 @app.post("/api/run")
 async def run_from_file(req: RunConfigRequest):
     """Run a single experiment from a YAML config file."""
@@ -663,11 +754,14 @@ async def run_sweep(req: SweepRequest):
                     {
                         "name": c["name"],
                         "success_rate": c["summary"]["success_rate"],
-                        "p99": c["summary"]["p99"],
+                        "p50": c["summary"]["p50"],
                         "p95": c["summary"]["p95"],
+                        "p99": c["summary"]["p99"],
                         "retries_per_root": c["summary"]["retries_per_root"],
                         "goodput_rps": c["summary"].get("goodput_rps", 0),
+                        "amplification_factor": c["summary"].get("amplification_factor", 1.0),
                         "retry_efficiency": c["summary"].get("retry_efficiency", 0),
+                        "recovery_time_s": c["summary"].get("recovery_time_s"),
                     }
                     for c in result["clients"]
                 ],
@@ -843,7 +937,18 @@ async def run_heatmap(req: HeatmapRequest):
                     "elapsed_s": elapsed,
                     **agg,
                     "per_client": [
-                        {"name": c["name"], "success_rate": c["summary"]["success_rate"]}
+                        {
+                            "name": c["name"],
+                            "success_rate": c["summary"]["success_rate"],
+                            "p50": c["summary"]["p50"],
+                            "p95": c["summary"]["p95"],
+                            "p99": c["summary"]["p99"],
+                            "retries_per_root": c["summary"]["retries_per_root"],
+                            "goodput_rps": c["summary"].get("goodput_rps", 0),
+                            "amplification_factor": c["summary"].get("amplification_factor", 1.0),
+                            "retry_efficiency": c["summary"].get("retry_efficiency", 0),
+                            "recovery_time_s": c["summary"].get("recovery_time_s"),
+                        }
                         for c in result["clients"]
                     ],
                 })
@@ -1032,6 +1137,44 @@ def _expand_broadcast_param(yaml_dict: dict, param_name: str) -> list[str]:
             if "queue_capacity" in svc:
                 paths.append(f"services.{i}.queue_capacity")
     return paths
+
+def _default_sweep_range(param_name: str, current_value) -> list:
+    """Generate sensible default sweep values based on parameter name and current value."""
+    if current_value is None:
+        return []
+    v = float(current_value)
+
+    # Ratio parameters (0-1 range)
+    if param_name in ("alpha", "beta_down", "beta_up", "budget_ratio",
+                       "failure_threshold", "max_retry_ratio",
+                       "success_rate_threshold", "success_rate_beta"):
+        return [0.01, 0.05, 0.1, 0.2, 0.3, 0.5]
+
+    # Integer count parameters
+    if param_name in ("max_attempts",):
+        return [1, 2, 3, 4, 5, 6, 8]
+    if param_name in ("max_retries",):
+        return [1, 5, 10, 20, 50, 100]
+    if param_name in ("min_requests",):
+        return [5, 10, 20, 50, 100]
+    if param_name in ("min_retries_per_sec",):
+        return [0, 1, 5, 10, 20, 50]
+
+    # Time/delay parameters (ms)
+    if param_name.endswith("_ms"):
+        if v <= 0:
+            return [0, 50, 100, 200, 500, 1000]
+        # Geometric progression around current value
+        factors = [0.25, 0.5, 1.0, 2.0, 5.0, 10.0]
+        vals = sorted(set(round(v * f) for f in factors))
+        return [x for x in vals if x >= 0]
+
+    # Fallback: linear spread around current value
+    if v == 0:
+        return [0, 1, 2, 5, 10, 20]
+    factors = [0.25, 0.5, 1.0, 2.0, 4.0]
+    return sorted(set(round(v * f, 4) for f in factors))
+
 
 def _set_nested(d: dict, path: str, value):
     """Set a nested dict value by dot-separated path. Supports array indexing like 'clients.0.retry.max_attempts'."""
