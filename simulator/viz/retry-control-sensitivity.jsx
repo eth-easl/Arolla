@@ -860,7 +860,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [progressInfo, setProgressInfo] = useState(null);
-  const [savedPath, setSavedPath] = useState(null);
+
 
   // --- Tab 1: Parameter Sensitivity ---
   const [sensConfigPath, setSensConfigPath] = useState("");
@@ -915,21 +915,20 @@ export default function App() {
     if (!sensConfigPath) return;
     const strat = STRATEGIES[selectedStrategy];
     const sweep = strat.sweeps[selectedSweep];
-    setLoading(true); setError(null); setSavedPath(null);
+    setLoading(true); setError(null);
     setProgressInfo({ text: `Sweeping ${strat.label} / ${sweep.param}`, current: 0, total: sweep.values.length, startTime: Date.now() });
     try {
       const data = await apiSweep(sensConfigPath, sweep.path, sweep.values);
       const result = { strategy: strat, paramLabel: sweep.param, ...data };
       setSweepResult(result);
-      const saveRes = await apiSaveResults("sweep", result, `${strat.key}_${sweep.param.replace(/\s+/g, "_")}`);
-      setSavedPath(saveRes.path);
+      await apiSaveResults("sweep", result, `${strat.key}_${sweep.param.replace(/\s+/g, "_")}`);
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
   }, [sensConfigPath, selectedStrategy, selectedSweep]);
 
   const runTornado = useCallback(async () => {
     if (!sensConfigPath) return;
-    setLoading(true); setError(null); setSavedPath(null);
+    setLoading(true); setError(null);
     const results = [];
     let done = 0;
     const totalSweeps = STRATEGIES.reduce((s, st) => s + st.sweeps.length, 0);
@@ -962,8 +961,7 @@ export default function App() {
       }
       results.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
       setTornadoData(results);
-      const saveRes = await apiSaveResults("tornado", { entries: results, config: sensConfigPath }, "all_strategies");
-      setSavedPath(saveRes.path);
+      await apiSaveResults("tornado", { entries: results, config: sensConfigPath }, "all_strategies");
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
   }, [sensConfigPath]);
@@ -975,15 +973,14 @@ export default function App() {
     const sx = strat.sweeps[hmParamX];
     const sy = strat.sweeps[hmParamY];
     const gridSize = sx.values.length * sy.values.length;
-    setLoading(true); setError(null); setSavedPath(null);
+    setLoading(true); setError(null);
     setProgressInfo({ text: `Running ${sx.values.length}x${sy.values.length} grid (${gridSize} sims)`, current: 0, total: gridSize, startTime: Date.now() });
     try {
       const data = await apiHeatmap(sensConfigPath, sx.path, sx.values, sy.path, sy.values);
       const result = { strategy: strat, labelX: sx.param, labelY: sy.param,
         valuesX: sx.values, valuesY: sy.values, data: data.results };
       setHeatmapResult(result);
-      const saveRes = await apiSaveResults("heatmap", result, `${strat.key}_${sx.param}_vs_${sy.param}`.replace(/\s+/g, "_"));
-      setSavedPath(saveRes.path);
+      await apiSaveResults("heatmap", result, `${strat.key}_${sx.param}_vs_${sy.param}`.replace(/\s+/g, "_"));
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
   }, [sensConfigPath, hmStrategy, hmParamX, hmParamY]);
@@ -991,13 +988,12 @@ export default function App() {
   // --- Tab 2 handler ---
   const runDashboard = useCallback(async () => {
     if (!dashConfigPath) return;
-    setLoading(true); setError(null); setSavedPath(null);
+    setLoading(true); setError(null);
     setProgressInfo({ text: "Running simulation...", current: 0, total: 0, startTime: Date.now() });
     try {
       const data = await apiRun(dashConfigPath);
       setDashResult(data);
-      const saveRes = await apiSaveResults("dashboard", data, dashConfigPath.replace(/\//g, "_").replace(".yaml", ""));
-      setSavedPath(saveRes.path);
+      await apiSaveResults("dashboard", data, dashConfigPath.replace(/\//g, "_").replace(".yaml", ""));
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
   }, [dashConfigPath]);
@@ -1227,14 +1223,6 @@ export default function App() {
                   {error}
                 </div>
               )}
-              {savedPath && !loading && (
-                <div style={{
-                  background: T.hintBg, border: `1px solid ${T.border}`,
-                  borderRadius: 6, padding: "8px 12px", marginBottom: 14, fontSize: 11, color: T.muted,
-                }}>
-                  Saved to: <span style={{ color: T.accent }}>{savedPath}</span>
-                </div>
-              )}
             </div>
 
             {/* Right: Visualizations */}
@@ -1403,14 +1391,6 @@ export default function App() {
                   borderRadius: 6, padding: 12, marginBottom: 14, fontSize: 12, color: T.errorText,
                 }}>
                   {error}
-                </div>
-              )}
-              {savedPath && !loading && (
-                <div style={{
-                  background: T.hintBg, border: `1px solid ${T.border}`,
-                  borderRadius: 6, padding: "8px 12px", marginBottom: 14, fontSize: 11, color: T.muted,
-                }}>
-                  Saved to: <span style={{ color: T.accent }}>{savedPath}</span>
                 </div>
               )}
 
