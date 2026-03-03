@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 
 // ============================================================
 // API Client
@@ -56,6 +56,12 @@ async function apiParamCompare(configPath, paramName, values) {
   return res.json();
 }
 
+async function apiStrategies(configPath) {
+  const res = await fetch(`${API_BASE}/api/strategies?config_path=${encodeURIComponent(configPath)}`);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
 async function apiSaveResults(analysisType, data, label = "") {
   const res = await fetch(`${API_BASE}/api/save_results`, {
     method: "POST",
@@ -104,50 +110,7 @@ function getStyle(name, idx) {
   return STYLE_LIST[idx % STYLE_LIST.length];
 }
 
-const STRATEGIES = [
-  {
-    key: "three_retries",
-    label: "Fixed Retries",
-    color: "#2563eb",
-    clientName: "three_retries",
-    sweeps: [
-      { param: "Max Attempts", path: "clients.1.retry.max_attempts", values: [1, 2, 3, 4, 5, 6, 8] },
-      { param: "Retry Delay (ms)", path: "clients.1.retry.delay_ms", values: [0, 50, 100, 200, 500, 1000] },
-    ],
-  },
-  {
-    key: "exponential_backoff_jitter",
-    label: "Exp Backoff + Jitter",
-    color: "#ea7317",
-    clientName: "exponential_backoff_jitter",
-    sweeps: [
-      { param: "Max Attempts", path: "clients.2.retry.max_attempts", values: [1, 2, 3, 4, 5, 6, 8] },
-      { param: "Initial Delay (ms)", path: "clients.2.retry.initial_delay_ms", values: [10, 50, 100, 200, 500, 1000] },
-      { param: "Max Delay (ms)", path: "clients.2.retry.max_delay_ms", values: [200, 500, 1000, 2000, 5000, 10000] },
-    ],
-  },
-  {
-    key: "circuit_breaker",
-    label: "Circuit Breaker",
-    color: "#d63384",
-    clientName: "circuit_breaker",
-    sweeps: [
-      { param: "Failure Threshold", path: "clients.3.circuit_breaker.failure_threshold", values: [0.01, 0.05, 0.1, 0.2, 0.3, 0.5] },
-      { param: "Half-Open Delay (ms)", path: "clients.3.circuit_breaker.half_open_delay_ms", values: [50, 100, 200, 500, 1000, 2000] },
-      { param: "Window Duration (ms)", path: "clients.3.circuit_breaker.window_duration_ms", values: [100, 500, 1000, 2000, 5000] },
-    ],
-  },
-  {
-    key: "retry_budget",
-    label: "Client Retry Budget",
-    color: "#40916c",
-    clientName: "retry_budget",
-    sweeps: [
-      { param: "Budget Ratio", path: "clients.4.retry_budget.budget_ratio", values: [0.01, 0.05, 0.1, 0.2, 0.5, 1.0] },
-      { param: "Max Retries", path: "clients.4.retry_budget.max_retries", values: [1, 5, 10, 20, 50, 100] },
-    ],
-  },
-];
+// strategies are now fetched dynamically from the server via GET /api/strategies
 
 // ============================================================
 // Utilities
@@ -593,41 +556,69 @@ function GroupedBarChart({ compareResult, metricKey, yLabel, yFormat, T, width =
 // Sweep Chart — single parameter with cliff detection
 // ============================================================
 
-function SweepChart({ sweepResults, targetClient, strategyColor, T, width = 640, height = 320 }) {
+const SWEEP_METRICS = [
+  { key: "success_rate", label: "Success Rate", fmt: v => `${(v * 100).toFixed(0)}%`, pct: true },
+  { key: "retry_efficiency", label: "Retry Efficiency", fmt: v => `${(v * 100).toFixed(0)}%`, pct: true },
+  { key: "amplification_factor", label: "Amplification", fmt: v => `${v.toFixed(2)}x` },
+  { key: "recovery_time_s", label: "Recovery (s)", fmt: v => v != null ? `${v.toFixed(1)}` : "—" },
+  { key: "p95", label: "P95 Latency (ms)", fmt: v => `${v.toFixed(0)}` },
+];
+
+function SweepChart({ sweepResults, targetClient, strategyColor, metricKey = "success_rate", T, width = 640, height = 240 }) {
   if (!sweepResults || sweepResults.length === 0) return null;
+  const metric = SWEEP_METRICS.find(m => m.key === metricKey) || SWEEP_METRICS[0];
   const padL = 65, padR = 20, padT = 25, padB = 50;
   const cW = width - padL - padR;
   const cH = height - padT - padB;
   const n = sweepResults.length;
-  const yScale = (v) => padT + (1 - v) * cH;
   const xScale = (i) => padL + (i / Math.max(1, n - 1)) * cW;
 
   const data = sweepResults.map((d) => {
-    let sr = d.success_rate || 0;
+    let val = d[metricKey] || 0;
     if (d.per_client && targetClient) {
       const pc = d.per_client.find((c) => c.name === targetClient);
-      if (pc) sr = pc.success_rate;
+      if (pc && pc[metricKey] != null) val = pc[metricKey];
     }
-    return { ...d, client_sr: sr };
+    return { ...d, metricVal: val ?? 0 };
   });
+
+  const vals = data.map(d => d.metricVal).filter(v => v != null && isFinite(v));
+  let yMin, yMax;
+  if (metric.pct) {
+    yMin = 0; yMax = 1;
+  } else {
+    yMin = 0;
+    yMax = Math.max(0.01, ...vals) * 1.15;
+  }
+  const yScale = (v) => padT + (1 - (v - yMin) / (yMax - yMin)) * cH;
+
+  const ticks = metric.pct
+    ? [0, 0.25, 0.5, 0.75, 1]
+    : Array.from({ length: 5 }, (_, i) => yMin + (i / 4) * (yMax - yMin));
 
   return (
     <svg width={width} height={height} style={{ overflow: "visible" }}>
-      {[0, 0.25, 0.5, 0.75, 1].map((v) => (
-        <g key={v}>
+      {ticks.map((v, i) => (
+        <g key={i}>
           <line x1={padL} y1={yScale(v)} x2={padL + cW} y2={yScale(v)} stroke={T.grid} strokeWidth={0.5} />
-          <text x={padL - 10} y={yScale(v) + 4} textAnchor="end" fill={T.svgLabel} fontSize={11}
-            fontFamily="'JetBrains Mono', monospace">{(v * 100).toFixed(0)}%</text>
+          <text x={padL - 10} y={yScale(v) + 4} textAnchor="end" fill={T.svgLabel} fontSize={10}
+            fontFamily="'JetBrains Mono', monospace">{metric.fmt(v)}</text>
         </g>
       ))}
 
       <polyline
-        points={data.map((d, i) => `${xScale(i)},${yScale(d.client_sr)}`).join(" ")}
+        points={data.map((d, i) => `${xScale(i)},${yScale(d.metricVal)}`).join(" ")}
         fill="none" stroke={strategyColor || T.accent} strokeWidth={2.5} opacity={0.9} />
 
       {data.map((d, i) => (
-        <circle key={i} cx={xScale(i)} cy={yScale(d.client_sr)} r={4}
-          fill={strategyColor || T.accent} opacity={0.9} />
+        <g key={i}>
+          <circle cx={xScale(i)} cy={yScale(d.metricVal)} r={4}
+            fill={strategyColor || T.accent} opacity={0.9} />
+          <text x={xScale(i)} y={yScale(d.metricVal) - 8} textAnchor="middle"
+            fill={T.text} fontSize={9} fontFamily="'JetBrains Mono', monospace">
+            {metric.fmt(d.metricVal)}
+          </text>
+        </g>
       ))}
 
       {data.map((d, i) => (
@@ -635,30 +626,11 @@ function SweepChart({ sweepResults, targetClient, strategyColor, T, width = 640,
           fontFamily="'JetBrains Mono', monospace">{fmtVal(d.param_value)}</text>
       ))}
 
-      {(() => {
-        let maxDrop = 0, dropIdx = 0;
-        for (let i = 1; i < n; i++) {
-          const drop = data[i - 1].client_sr - data[i].client_sr;
-          if (drop > maxDrop) { maxDrop = drop; dropIdx = i; }
-        }
-        if (maxDrop > 0.05) {
-          return (
-            <g>
-              <line x1={xScale(dropIdx)} y1={padT} x2={xScale(dropIdx)} y2={padT + cH}
-                stroke="#b74444" strokeWidth={1.5} strokeDasharray="4,3" opacity={0.7} />
-              <text x={xScale(dropIdx)} y={padT - 4} textAnchor="middle" fill="#b74444" fontSize={10}
-                fontFamily="'JetBrains Mono', monospace">cliff</text>
-            </g>
-          );
-        }
-        return null;
-      })()}
-
       <text x={padL + cW / 2} y={height} textAnchor="middle" fill={T.svgAxis} fontSize={12}
         fontFamily="'JetBrains Mono', monospace">Parameter Value</text>
       <text x={10} y={padT + cH / 2} textAnchor="middle" fill={T.svgAxis} fontSize={12}
         fontFamily="'JetBrains Mono', monospace" transform={`rotate(-90, 10, ${padT + cH / 2})`}>
-        Success Rate</text>
+        {metric.label}</text>
     </svg>
   );
 }
@@ -667,26 +639,44 @@ function SweepChart({ sweepResults, targetClient, strategyColor, T, width = 640,
 // Tornado Chart — parameter impact ranking
 // ============================================================
 
-function TornadoChart({ tornadoData, T, width = 640 }) {
+function TornadoChart({ tornadoData, metricKey = "success_rate", T, width = 640 }) {
   if (!tornadoData || tornadoData.length === 0) return null;
+  const metric = SWEEP_METRICS.find(m => m.key === metricKey) || SWEEP_METRICS[0];
+  const deltaKey = `${metricKey}_delta`;
+
+  // Sort by absolute delta for this metric
+  const sorted = [...tornadoData].sort((a, b) => Math.abs(b[deltaKey] || 0) - Math.abs(a[deltaKey] || 0));
+
   const barH = 30, gap = 6;
   const padL = 220, padR = 80, padT = 30, padB = 40;
-  const totalH = padT + padB + tornadoData.length * (barH + gap);
+  const totalH = padT + padB + sorted.length * (barH + gap);
   const cW = width - padL - padR;
 
-  const maxDelta = Math.max(0.01, ...tornadoData.map((d) => Math.abs(d.delta)));
+  const maxDelta = Math.max(0.001, ...sorted.map((d) => Math.abs(d[deltaKey] || 0)));
   const xScale = (delta) => padL + ((delta / maxDelta + 1) / 2) * cW;
   const centerX = xScale(0);
+
+  // Format delta label
+  const fmtDelta = (v) => {
+    if (metric.pct) return `${v > 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
+    return `${v > 0 ? "+" : ""}${v.toFixed(2)}`;
+  };
+  const fmtAxis = (f) => {
+    const v = f * maxDelta;
+    if (metric.pct) return `${(v * 100).toFixed(0)}%`;
+    return v.toFixed(1);
+  };
 
   return (
     <svg width={width} height={totalH} style={{ overflow: "visible" }}>
       <line x1={centerX} y1={padT - 8} x2={centerX} y2={totalH - padB + 8}
         stroke={T.grid} strokeWidth={1} />
 
-      {tornadoData.map((d, i) => {
+      {sorted.map((d, i) => {
+        const delta = d[deltaKey] || 0;
         const y = padT + i * (barH + gap);
-        const xMin = xScale(Math.min(0, d.delta));
-        const xMax = xScale(Math.max(0, d.delta));
+        const xMin = xScale(Math.min(0, delta));
+        const xMax = xScale(Math.max(0, delta));
         const barWidth = Math.max(3, xMax - xMin);
         return (
           <g key={i}>
@@ -696,10 +686,10 @@ function TornadoChart({ tornadoData, T, width = 640 }) {
               <tspan fill={T.muted}> / {d.param}</tspan>
             </text>
             <rect x={xMin} y={y} width={barWidth} height={barH} fill={d.color} opacity={0.75} rx={3} />
-            <text x={d.delta >= 0 ? xMax + 6 : xMin - 6} y={y + barH / 2 + 4}
-              textAnchor={d.delta >= 0 ? "start" : "end"} fill={d.color} fontSize={11}
+            <text x={delta >= 0 ? xMax + 6 : xMin - 6} y={y + barH / 2 + 4}
+              textAnchor={delta >= 0 ? "start" : "end"} fill={d.color} fontSize={11}
               fontFamily="'JetBrains Mono', monospace" fontWeight={600}>
-              {d.delta > 0 ? "+" : ""}{(d.delta * 100).toFixed(1)}%
+              {fmtDelta(delta)}
             </text>
           </g>
         );
@@ -708,12 +698,12 @@ function TornadoChart({ tornadoData, T, width = 640 }) {
       {[-1, -0.5, 0, 0.5, 1].map((f) => (
         <text key={f} x={xScale(f * maxDelta)} y={totalH - 14} textAnchor="middle"
           fill={T.svgLabel} fontSize={10} fontFamily="'JetBrains Mono', monospace">
-          {f === 0 ? "0" : `${(f * maxDelta * 100).toFixed(0)}%`}
+          {f === 0 ? "0" : fmtAxis(f)}
         </text>
       ))}
 
       <text x={padL + cW / 2} y={totalH - 2} textAnchor="middle" fill={T.svgAxis} fontSize={12}
-        fontFamily="'JetBrains Mono', monospace">Change in Success Rate (min→max param)</text>
+        fontFamily="'JetBrains Mono', monospace">Change in {metric.label} (min→max param)</text>
     </svg>
   );
 }
@@ -722,38 +712,57 @@ function TornadoChart({ tornadoData, T, width = 640 }) {
 // Heatmap Chart — 2D parameter interaction
 // ============================================================
 
-function HeatmapChart({ heatmapData, valuesX, valuesY, labelX, labelY, targetClient, T, width = 520, height = 420 }) {
+function HeatmapChart({ heatmapData, valuesX, valuesY, labelX, labelY, targetClient,
+  metricKey = "success_rate", T, width = 520, height = 420 }) {
   if (!heatmapData || valuesX.length === 0 || valuesY.length === 0) return null;
+  const metric = SWEEP_METRICS.find(m => m.key === metricKey) || SWEEP_METRICS[0];
   const padL = 85, padR = 65, padT = 20, padB = 65;
   const cW = width - padL - padR;
   const cH = height - padT - padB;
   const cellW = cW / valuesX.length;
   const cellH = cH / valuesY.length;
 
+  // Extract metric values from data
   const dataMap = {};
+  const allVals = [];
   for (const d of heatmapData) {
-    let sr = d.success_rate || 0;
+    let val = d[metricKey] ?? 0;
     if (d.per_client && targetClient) {
       const pc = d.per_client.find((c) => c.name === targetClient);
-      if (pc) sr = pc.success_rate;
+      if (pc && pc[metricKey] != null) val = pc[metricKey];
     }
-    dataMap[`${d.x}_${d.y}`] = sr;
+    dataMap[`${d.x}_${d.y}`] = val;
+    if (val != null && isFinite(val)) allVals.push(val);
   }
+
+  // For percentage metrics (0-1 range), use the standard heat color
+  // For other metrics, normalize to 0-1 range and use blue-red scale
+  const vMin = metric.pct ? 0 : Math.min(0, ...allVals);
+  const vMax = metric.pct ? 1 : Math.max(0.01, ...allVals);
+  const normalize = (v) => metric.pct ? v : (v - vMin) / (vMax - vMin);
+  // For amplification/latency, lower is better → invert the color
+  const invertColor = metricKey === "amplification_factor" || metricKey === "p95" || metricKey === "recovery_time_s";
+  const cellColor = (v) => heatColor(invertColor ? 1 - normalize(v) : normalize(v));
+
+  // Legend ticks
+  const legendSteps = metric.pct
+    ? [1, 0.75, 0.5, 0.25, 0]
+    : Array.from({ length: 5 }, (_, i) => vMax - (i / 4) * (vMax - vMin));
 
   return (
     <svg width={width} height={height} style={{ overflow: "visible" }}>
       {valuesY.map((vy, yi) =>
         valuesX.map((vx, xi) => {
-          const sr = dataMap[`${vx}_${vy}`] ?? 0;
+          const val = dataMap[`${vx}_${vy}`] ?? 0;
           const x = padL + xi * cellW;
           const y = padT + (valuesY.length - 1 - yi) * cellH;
           return (
             <g key={`${xi}_${yi}`}>
               <rect x={x + 1} y={y + 1} width={cellW - 2} height={cellH - 2}
-                fill={heatColor(sr)} opacity={0.88} rx={3} />
+                fill={cellColor(val)} opacity={0.88} rx={3} />
               <text x={x + cellW / 2} y={y + cellH / 2 + 4} textAnchor="middle"
-                fill="#fff" fontSize={11} fontWeight={600}
-                fontFamily="'JetBrains Mono', monospace">{(sr * 100).toFixed(0)}%</text>
+                fill="#fff" fontSize={10} fontWeight={600}
+                fontFamily="'JetBrains Mono', monospace">{metric.fmt(val)}</text>
             </g>
           );
         })
@@ -780,11 +789,12 @@ function HeatmapChart({ heatmapData, valuesX, valuesY, labelX, labelY, targetCli
         {labelY}</text>
 
       <g transform={`translate(${width - 55}, ${padT})`}>
-        {[1, 0.75, 0.5, 0.25, 0].map((v, i) => (
+        {legendSteps.map((v, i) => (
           <g key={i} transform={`translate(0, ${i * 22})`}>
-            <rect x={0} y={0} width={14} height={18} fill={heatColor(v)} opacity={0.88} rx={2} />
+            <rect x={0} y={0} width={14} height={18}
+              fill={metric.pct ? heatColor(invertColor ? 1 - v : v) : cellColor(v)} opacity={0.88} rx={2} />
             <text x={20} y={13} fill={T.svgLabel} fontSize={9}
-              fontFamily="'JetBrains Mono', monospace">{(v * 100).toFixed(0)}%</text>
+              fontFamily="'JetBrains Mono', monospace">{metric.fmt(v)}</text>
           </g>
         ))}
       </g>
@@ -865,6 +875,7 @@ export default function App() {
   // --- Tab 1: Parameter Sensitivity ---
   const [sensConfigPath, setSensConfigPath] = useState("");
   const [sensSection, setSensSection] = useState("sweep"); // sweep | tornado | heatmap
+  const [strategies, setStrategies] = useState([]);
   // Sweep state
   const [selectedStrategy, setSelectedStrategy] = useState(0);
   const [selectedSweep, setSelectedSweep] = useState(0);
@@ -896,6 +907,21 @@ export default function App() {
     queue_capacity:     { label: "Queue Capacity",      defaults: "100, 500, 1000, 2000" },
   };
 
+  // Fetch strategies when sensitivity config changes
+  useEffect(() => {
+    if (!sensConfigPath) return;
+    apiStrategies(sensConfigPath).then((data) => {
+      // Filter out strategies with no sweepable params (e.g. no_control)
+      const withSweeps = (data.strategies || []).filter(s => s.sweeps.length > 0);
+      setStrategies(withSweeps);
+      setSelectedStrategy(0);
+      setSelectedSweep(0);
+      setHmStrategy(0);
+      setHmParamX(0);
+      setHmParamY(withSweeps.length > 0 && withSweeps[0].sweeps.length > 1 ? 1 : 0);
+    }).catch(() => {});
+  }, [sensConfigPath]);
+
   const loadConfigs = useCallback(async () => {
     try {
       const data = await apiListConfigs();
@@ -912,8 +938,9 @@ export default function App() {
 
   // --- Tab 1 handlers ---
   const runSweep = useCallback(async () => {
-    if (!sensConfigPath) return;
-    const strat = STRATEGIES[selectedStrategy];
+    if (!sensConfigPath || strategies.length === 0) return;
+    const strat = strategies[selectedStrategy];
+    if (!strat || !strat.sweeps[selectedSweep]) return;
     const sweep = strat.sweeps[selectedSweep];
     setLoading(true); setError(null);
     setProgressInfo({ text: `Sweeping ${strat.label} / ${sweep.param}`, current: 0, total: sweep.values.length, startTime: Date.now() });
@@ -924,37 +951,46 @@ export default function App() {
       await apiSaveResults("sweep", result, `${strat.key}_${sweep.param.replace(/\s+/g, "_")}`);
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
-  }, [sensConfigPath, selectedStrategy, selectedSweep]);
+  }, [sensConfigPath, selectedStrategy, selectedSweep, strategies]);
 
   const runTornado = useCallback(async () => {
-    if (!sensConfigPath) return;
+    if (!sensConfigPath || strategies.length === 0) return;
     setLoading(true); setError(null);
     const results = [];
     let done = 0;
-    const totalSweeps = STRATEGIES.reduce((s, st) => s + st.sweeps.length, 0);
+    const totalSweeps = strategies.reduce((s, st) => s + st.sweeps.length, 0);
     const totalSims = totalSweeps * 2;
     const startTime = Date.now();
     setProgressInfo({ text: "Starting tornado analysis...", current: 0, total: totalSims, startTime });
     try {
-      for (const strat of STRATEGIES) {
+      for (const strat of strategies) {
         for (const sweep of strat.sweeps) {
           setProgressInfo({ text: `${strat.label} / ${sweep.param}`, current: done * 2, total: totalSims, startTime });
           const vals = sweep.values;
           const data = await apiSweep(sensConfigPath, sweep.path, [vals[0], vals[vals.length - 1]]);
           const r = data.results || [];
           if (r.length >= 2) {
-            const getSR = (res) => {
+            const getMetric = (res, key) => {
               if (res.per_client) {
                 const pc = res.per_client.find((c) => c.name === strat.clientName);
-                if (pc) return pc.success_rate;
+                if (pc && pc[key] != null) return pc[key];
               }
-              return res.success_rate || 0;
+              return res[key] ?? 0;
             };
-            results.push({
-              strategy: strat.label, param: sweep.param, color: strat.color,
-              delta: getSR(r[r.length - 1]) - getSR(r[0]),
-              srMin: getSR(r[0]), srMax: getSR(r[r.length - 1]),
-            });
+            const entry = {
+              strategy: strat.label, param: sweep.param, color: getStyle(strat.clientName).color,
+              paramMin: vals[0], paramMax: vals[vals.length - 1],
+            };
+            for (const m of SWEEP_METRICS) {
+              const vMin = getMetric(r[0], m.key);
+              const vMax = getMetric(r[r.length - 1], m.key);
+              entry[`${m.key}_min`] = vMin;
+              entry[`${m.key}_max`] = vMax;
+              entry[`${m.key}_delta`] = (vMax ?? 0) - (vMin ?? 0);
+            }
+            // backwards compat
+            entry.delta = entry.success_rate_delta;
+            results.push(entry);
           }
           done++;
         }
@@ -964,12 +1000,12 @@ export default function App() {
       await apiSaveResults("tornado", { entries: results, config: sensConfigPath }, "all_strategies");
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
-  }, [sensConfigPath]);
+  }, [sensConfigPath, strategies]);
 
   const runHeatmap = useCallback(async () => {
-    if (!sensConfigPath) return;
-    const strat = STRATEGIES[hmStrategy];
-    if (strat.sweeps.length < 2 || hmParamX === hmParamY) return;
+    if (!sensConfigPath || strategies.length === 0) return;
+    const strat = strategies[hmStrategy];
+    if (!strat || strat.sweeps.length < 2 || hmParamX === hmParamY) return;
     const sx = strat.sweeps[hmParamX];
     const sy = strat.sweeps[hmParamY];
     const gridSize = sx.values.length * sy.values.length;
@@ -983,7 +1019,7 @@ export default function App() {
       await apiSaveResults("heatmap", result, `${strat.key}_${sx.param}_vs_${sy.param}`.replace(/\s+/g, "_"));
     } catch (e) { setError(e.message); }
     setLoading(false); setProgressInfo(null);
-  }, [sensConfigPath, hmStrategy, hmParamX, hmParamY]);
+  }, [sensConfigPath, hmStrategy, hmParamX, hmParamY, strategies]);
 
   // --- Tab 2 handler ---
   const runDashboard = useCallback(async () => {
@@ -1110,7 +1146,7 @@ export default function App() {
               </div>
 
               {/* Sweep controls */}
-              {sensSection === "sweep" && (
+              {sensSection === "sweep" && strategies.length > 0 && (
                 <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 16, marginBottom: 14 }}>
                   <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: "0.08em" }}>
                     Sweep Config
@@ -1120,51 +1156,116 @@ export default function App() {
                     <select value={selectedStrategy}
                       onChange={(e) => { setSelectedStrategy(parseInt(e.target.value)); setSelectedSweep(0); }}
                       style={{ ...selectStyle, width: "100%" }}>
-                      {STRATEGIES.map((s, i) => <option key={s.key} value={i}>{s.label}</option>)}
+                      {strategies.map((s, i) => <option key={s.key} value={i}>{s.label}</option>)}
                     </select>
                   </div>
+
+                  {/* All parameters for selected strategy */}
                   <div style={{ marginBottom: 10 }}>
-                    <label style={{ fontSize: 12, color: T.muted, display: "block", marginBottom: 4 }}>Parameter</label>
-                    <select value={selectedSweep} onChange={(e) => setSelectedSweep(parseInt(e.target.value))}
-                      style={{ ...selectStyle, width: "100%" }}>
-                      {STRATEGIES[selectedStrategy].sweeps.map((sw, i) => (
-                        <option key={i} value={i}>{sw.param}</option>
-                      ))}
-                    </select>
+                    <label style={{ fontSize: 12, color: T.muted, display: "block", marginBottom: 6 }}>Parameters</label>
+                    {strategies[selectedStrategy].sweeps.map((sw, swi) => (
+                      <div key={swi} style={{
+                        marginBottom: 8, padding: "6px 8px",
+                        background: swi === selectedSweep ? `${T.accent}15` : "transparent",
+                        border: `1px solid ${swi === selectedSweep ? T.accent : T.border}`,
+                        borderRadius: 4, cursor: "pointer",
+                      }} onClick={() => setSelectedSweep(swi)}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                          <span style={{ fontSize: 11, color: swi === selectedSweep ? T.accent : T.text, fontWeight: swi === selectedSweep ? 600 : 400 }}>
+                            {sw.param}
+                          </span>
+                          <span style={{ fontSize: 10, color: T.faint }}>current: {sw.current}</span>
+                        </div>
+                        <input
+                          value={sw.values.join(", ")}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            const vals = e.target.value.split(",").map(s => parseFloat(s.trim())).filter(v => !isNaN(v));
+                            setStrategies(prev => prev.map((st, si) =>
+                              si !== selectedStrategy ? st : {
+                                ...st,
+                                sweeps: st.sweeps.map((s, i) => i !== swi ? s : { ...s, values: vals }),
+                              }
+                            ));
+                          }}
+                          style={{ ...selectStyle, width: "100%", cursor: "text", fontSize: 10, padding: "4px 6px" }}
+                        />
+                      </div>
+                    ))}
                   </div>
-                  <div style={{ fontSize: 12, color: T.faint, marginBottom: 12 }}>
-                    Values: [{STRATEGIES[selectedStrategy].sweeps[selectedSweep].values.join(", ")}]
-                  </div>
+
                   <button onClick={runSweep} disabled={loading || !sensConfigPath} style={{
                     ...btnStyle, opacity: loading || !sensConfigPath ? 0.5 : 1,
                     cursor: loading ? "wait" : "pointer",
                   }}>
-                    {loading ? "Running sweep..." : "Run Sweep"}
+                    {loading ? "Running sweep..." : `Sweep ${strategies[selectedStrategy].sweeps[selectedSweep]?.param || "..."}`}
                   </button>
                 </div>
               )}
 
               {/* Tornado controls */}
-              {sensSection === "tornado" && (
+              {sensSection === "tornado" && strategies.length > 0 && (
                 <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 16, marginBottom: 14 }}>
                   <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: "0.08em" }}>
                     Tornado Analysis
                   </h3>
-                  <p style={{ fontSize: 12, color: T.muted, marginBottom: 12, lineHeight: 1.6 }}>
-                    For each strategy, sweeps every parameter between its min and max value
-                    to measure impact on success rate.
+                  <p style={{ fontSize: 12, color: T.muted, marginBottom: 8, lineHeight: 1.5 }}>
+                    Sweeps each parameter from min to max. Edit the values below to set the range.
                   </p>
+                  {strategies.map((strat, si) => (
+                    <div key={strat.key} style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 11, color: getStyle(strat.clientName).color, fontWeight: 600, marginBottom: 4 }}>
+                        {strat.label}
+                      </div>
+                      {strat.sweeps.map((sw, swi) => (
+                        <div key={swi} style={{ display: "flex", gap: 4, alignItems: "center", marginBottom: 4 }}>
+                          <span style={{ fontSize: 10, color: T.muted, width: 120, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {sw.param}
+                          </span>
+                          <input
+                            key={`${si}-${swi}-min-${sw.values[0]}`}
+                            defaultValue={sw.values[0] ?? ""}
+                            onBlur={(e) => {
+                              const v = parseFloat(e.target.value);
+                              if (isNaN(v)) return;
+                              setStrategies(prev => prev.map((st, i) =>
+                                i !== si ? st : { ...st, sweeps: st.sweeps.map((s, j) =>
+                                  j !== swi ? s : { ...s, values: [v, ...s.values.slice(1)] }
+                                )}
+                              ));
+                            }}
+                            style={{ ...selectStyle, width: 60, cursor: "text", fontSize: 10, padding: "3px 5px" }}
+                          />
+                          <span style={{ fontSize: 10, color: T.faint }}>→</span>
+                          <input
+                            key={`${si}-${swi}-max-${sw.values[sw.values.length - 1]}`}
+                            defaultValue={sw.values[sw.values.length - 1] ?? ""}
+                            onBlur={(e) => {
+                              const v = parseFloat(e.target.value);
+                              if (isNaN(v)) return;
+                              setStrategies(prev => prev.map((st, i) =>
+                                i !== si ? st : { ...st, sweeps: st.sweeps.map((s, j) =>
+                                  j !== swi ? s : { ...s, values: [...s.values.slice(0, -1), v] }
+                                )}
+                              ));
+                            }}
+                            style={{ ...selectStyle, width: 60, cursor: "text", fontSize: 10, padding: "3px 5px" }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ))}
                   <button onClick={runTornado} disabled={loading || !sensConfigPath} style={{
                     ...btnStyle, opacity: loading || !sensConfigPath ? 0.5 : 1,
                     cursor: loading ? "wait" : "pointer",
                   }}>
-                    {loading ? "Running..." : `Run Tornado (${STRATEGIES.reduce((s, st) => s + st.sweeps.length, 0)} sweeps)`}
+                    {loading ? "Running..." : `Run Tornado (${strategies.reduce((s, st) => s + st.sweeps.length, 0)} sweeps)`}
                   </button>
                 </div>
               )}
 
               {/* Heatmap controls */}
-              {sensSection === "heatmap" && (
+              {sensSection === "heatmap" && strategies.length > 0 && (
                 <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 16, marginBottom: 14 }}>
                   <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: "0.08em" }}>
                     2D Interaction
@@ -1173,8 +1274,8 @@ export default function App() {
                     <label style={{ fontSize: 12, color: T.muted, display: "block", marginBottom: 4 }}>Strategy</label>
                     <select value={hmStrategy} onChange={(e) => { setHmStrategy(parseInt(e.target.value)); setHmParamX(0); setHmParamY(1); }}
                       style={{ ...selectStyle, width: "100%" }}>
-                      {STRATEGIES.filter((s) => s.sweeps.length >= 2).map((s) => (
-                        <option key={s.key} value={STRATEGIES.indexOf(s)}>{s.label}</option>
+                      {strategies.filter((s) => s.sweeps.length >= 2).map((s) => (
+                        <option key={s.key} value={strategies.indexOf(s)}>{s.label}</option>
                       ))}
                     </select>
                   </div>
@@ -1182,23 +1283,49 @@ export default function App() {
                     <label style={{ fontSize: 12, color: T.muted, display: "block", marginBottom: 4 }}>X-axis Parameter</label>
                     <select value={hmParamX} onChange={(e) => setHmParamX(parseInt(e.target.value))}
                       style={{ ...selectStyle, width: "100%" }}>
-                      {STRATEGIES[hmStrategy].sweeps.map((sw, i) => (
+                      {strategies[hmStrategy].sweeps.map((sw, i) => (
                         <option key={i} value={i}>{sw.param}</option>
                       ))}
                     </select>
+                    <input
+                      value={strategies[hmStrategy].sweeps[hmParamX]?.values.join(", ") || ""}
+                      onChange={(e) => {
+                        const vals = e.target.value.split(",").map(s => parseFloat(s.trim())).filter(v => !isNaN(v));
+                        setStrategies(prev => prev.map((st, si) =>
+                          si !== hmStrategy ? st : {
+                            ...st,
+                            sweeps: st.sweeps.map((sw, swi) => swi !== hmParamX ? sw : { ...sw, values: vals }),
+                          }
+                        ));
+                      }}
+                      style={{ ...selectStyle, width: "100%", cursor: "text", marginTop: 4, fontSize: 11 }}
+                    />
                   </div>
                   <div style={{ marginBottom: 10 }}>
                     <label style={{ fontSize: 12, color: T.muted, display: "block", marginBottom: 4 }}>Y-axis Parameter</label>
                     <select value={hmParamY} onChange={(e) => setHmParamY(parseInt(e.target.value))}
                       style={{ ...selectStyle, width: "100%" }}>
-                      {STRATEGIES[hmStrategy].sweeps.map((sw, i) => (
+                      {strategies[hmStrategy].sweeps.map((sw, i) => (
                         <option key={i} value={i} disabled={i === hmParamX}>{sw.param}</option>
                       ))}
                     </select>
+                    <input
+                      value={strategies[hmStrategy].sweeps[hmParamY]?.values.join(", ") || ""}
+                      onChange={(e) => {
+                        const vals = e.target.value.split(",").map(s => parseFloat(s.trim())).filter(v => !isNaN(v));
+                        setStrategies(prev => prev.map((st, si) =>
+                          si !== hmStrategy ? st : {
+                            ...st,
+                            sweeps: st.sweeps.map((sw, swi) => swi !== hmParamY ? sw : { ...sw, values: vals }),
+                          }
+                        ));
+                      }}
+                      style={{ ...selectStyle, width: "100%", cursor: "text", marginTop: 4, fontSize: 11 }}
+                    />
                   </div>
                   {(() => {
-                    const sx = STRATEGIES[hmStrategy].sweeps[hmParamX];
-                    const sy = STRATEGIES[hmStrategy].sweeps[hmParamY];
+                    const sx = strategies[hmStrategy].sweeps[hmParamX];
+                    const sy = strategies[hmStrategy].sweeps[hmParamY];
                     const gridSize = (sx?.values.length || 0) * (sy?.values.length || 0);
                     return (
                       <button onClick={runHeatmap} disabled={loading || !sensConfigPath || hmParamX === hmParamY}
@@ -1228,23 +1355,31 @@ export default function App() {
             {/* Right: Visualizations */}
             <div style={{ flex: 1, minWidth: 0 }}>
               {/* Sweep */}
-              {sensSection === "sweep" && (
+              {sensSection === "sweep" && strategies.length > 0 && (
                 <>
                   <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 20, minHeight: 360 }}>
                     <h3 style={{ fontSize: 16, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>
-                      Parameter Sweep — {STRATEGIES[selectedStrategy].label}
+                      Parameter Sweep — {strategies[selectedStrategy].label}
                     </h3>
                     <p style={{ fontSize: 13, color: T.dim, margin: "0 0 16px" }}>
-                      {STRATEGIES[selectedStrategy].sweeps[selectedSweep].param} — showing {displayName(STRATEGIES[selectedStrategy].clientName)} success rate
+                      {strategies[selectedStrategy].sweeps[selectedSweep]?.param} — {displayName(strategies[selectedStrategy].clientName)}
                     </p>
                     {sweepResult ? (
                       <div style={{ overflowX: "auto" }}>
-                        <SweepChart
-                          sweepResults={sweepResult.results}
-                          targetClient={sweepResult.strategy.clientName}
-                          strategyColor={sweepResult.strategy.color}
-                          T={T} width={640} height={320}
-                        />
+                        {SWEEP_METRICS.map(m => (
+                          <div key={m.key} style={{ marginBottom: 16 }}>
+                            <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                              {m.label}
+                            </div>
+                            <SweepChart
+                              sweepResults={sweepResult.results}
+                              targetClient={sweepResult.strategy.clientName}
+                              strategyColor={getStyle(sweepResult.strategy.clientName).color}
+                              metricKey={m.key}
+                              T={T} width={640} height={200}
+                            />
+                          </div>
+                        ))}
                       </div>
                     ) : (
                       <div style={{ textAlign: "center", padding: 60, color: T.faint, fontSize: 14 }}>
@@ -1315,17 +1450,24 @@ export default function App() {
                     Parameter Impact Ranking
                   </h3>
                   <p style={{ fontSize: 13, color: T.dim, margin: "0 0 16px" }}>
-                    Which parameters cause the largest swing in success rate across all strategies
+                    Which parameters cause the largest swing across all strategies
                   </p>
                   {tornadoData ? (
                     <div style={{ overflowX: "auto" }}>
-                      <TornadoChart tornadoData={tornadoData} T={T} width={700} />
+                      {SWEEP_METRICS.map(m => (
+                        <div key={m.key} style={{ marginBottom: 20 }}>
+                          <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                            {m.label}
+                          </div>
+                          <TornadoChart tornadoData={tornadoData} metricKey={m.key} T={T} width={700} />
+                        </div>
+                      ))}
                     </div>
                   ) : (
                     <div style={{ textAlign: "center", padding: 60, color: T.faint, fontSize: 14 }}>
                       <p>Click "Run Tornado" to sweep all parameters across all strategies</p>
                       <p style={{ fontSize: 12, marginTop: 10 }}>
-                        Each bar shows how much a parameter changes the target strategy's success rate
+                        Each bar shows how much a parameter changes the metric
                         when swept from its minimum to maximum value.
                       </p>
                     </div>
@@ -1334,31 +1476,39 @@ export default function App() {
               )}
 
               {/* Heatmap */}
-              {sensSection === "heatmap" && (
+              {sensSection === "heatmap" && strategies.length > 0 && (
                 <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 20, minHeight: 360 }}>
                   <h3 style={{ fontSize: 16, color: T.text, margin: "0 0 4px", fontWeight: 600 }}>
-                    2D Parameter Interaction — {STRATEGIES[hmStrategy].label}
+                    2D Parameter Interaction — {strategies[hmStrategy].label}
                   </h3>
                   <p style={{ fontSize: 13, color: T.dim, margin: "0 0 16px" }}>
-                    How two parameters interact to determine success rate
+                    How two parameters interact across multiple metrics
                   </p>
                   {heatmapResult ? (
                     <div style={{ overflowX: "auto" }}>
-                      <HeatmapChart
-                        heatmapData={heatmapResult.data}
-                        valuesX={heatmapResult.valuesX}
-                        valuesY={heatmapResult.valuesY}
-                        labelX={heatmapResult.labelX}
-                        labelY={heatmapResult.labelY}
-                        targetClient={heatmapResult.strategy.clientName}
-                        T={T} width={520} height={420}
-                      />
+                      {SWEEP_METRICS.map(m => (
+                        <div key={m.key} style={{ marginBottom: 20 }}>
+                          <div style={{ fontSize: 12, color: T.muted, fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                            {m.label}
+                          </div>
+                          <HeatmapChart
+                            heatmapData={heatmapResult.data}
+                            valuesX={heatmapResult.valuesX}
+                            valuesY={heatmapResult.valuesY}
+                            labelX={heatmapResult.labelX}
+                            labelY={heatmapResult.labelY}
+                            targetClient={heatmapResult.strategy.clientName}
+                            metricKey={m.key}
+                            T={T} width={520} height={420}
+                          />
+                        </div>
+                      ))}
                     </div>
                   ) : (
                     <div style={{ textAlign: "center", padding: 60, color: T.faint, fontSize: 14 }}>
                       <p>Select a strategy and two parameters, then click "Run Heatmap"</p>
                       <p style={{ fontSize: 12, marginTop: 10 }}>
-                        Each cell shows the success rate for that combination of parameter values.
+                        Each cell shows metrics for that combination of parameter values.
                         Warning: this runs N×M simulations and may take a few minutes.
                       </p>
                     </div>
