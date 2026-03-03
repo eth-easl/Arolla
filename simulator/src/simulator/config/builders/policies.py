@@ -211,6 +211,7 @@ def build_arolla_retry_budget(
         window_duration=ms_to_ns(cfg.window_ms),
         success_rate_threshold=cfg.success_rate_threshold,
         success_rate_beta=cfg.success_rate_beta,
+        max_retry_ratio=cfg.max_retry_ratio,
     )
 
 

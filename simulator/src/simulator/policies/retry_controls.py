@@ -518,6 +518,8 @@ class _GoodputTenantState:
     """Per-tenant state for GoodputCoupledRetryBudget."""
     goodput_rate: float = 0.0          # asymmetric EWMA of goodput (requests/sec)
     goodput_count: int = 0             # goodput in current window
+    request_count: int = 0             # all requests (root + retry) in current window
+    request_rate: float = 0.0          # EWMA of total request rate (for burst cap)
     window_start: Optional[TimePoint] = None
     retry_timestamps: Deque[TimePoint] = field(default_factory=deque)
     retry_success_ewma: float = 0.5    # EWMA of retry success rate
@@ -542,6 +544,7 @@ class GoodputCoupledRetryBudget(LoadLimiter):
     window_duration: TimeDuration = 1_000_000_000      # 1 second in ns
     success_rate_threshold: Optional[float] = None     # beta; None = disabled
     success_rate_beta: float = 0.1                     # EWMA smoothing for retry success rate
+    max_retry_ratio: Optional[float] = None            # burst cap: max retries as fraction of request rate
 
     _tenants: Dict[str, _GoodputTenantState] = field(default_factory=dict)
 
@@ -560,10 +563,12 @@ class GoodputCoupledRetryBudget(LoadLimiter):
         while now - tenant.window_start >= self.window_duration:
             window_secs = self.window_duration / 1e9
             observed_rate = tenant.goodput_count / window_secs if window_secs > 0 else 0.0
+            observed_request_rate = tenant.request_count / window_secs if window_secs > 0 else 0.0
 
             if not tenant._initialized:
                 # Bootstrap: use first observation directly to avoid zero-start lockout
                 tenant.goodput_rate = observed_rate
+                tenant.request_rate = observed_request_rate
                 tenant._initialized = True
             else:
                 # Asymmetric EWMA: fast decay, slow growth
@@ -572,8 +577,11 @@ class GoodputCoupledRetryBudget(LoadLimiter):
                 else:
                     beta = self.beta_up
                 tenant.goodput_rate = (1 - beta) * tenant.goodput_rate + beta * observed_rate
+                # Request rate uses simple EWMA (symmetric, fast-tracking)
+                tenant.request_rate = 0.7 * tenant.request_rate + 0.3 * observed_request_rate
 
             tenant.goodput_count = 0
+            tenant.request_count = 0
             tenant.window_start += self.window_duration
 
     def _count_recent_retries(self, tenant: _GoodputTenantState, now: TimePoint) -> int:
@@ -593,6 +601,7 @@ class GoodputCoupledRetryBudget(LoadLimiter):
         tenant = self._get_tenant(tenant_id)
         self._maybe_advance_window(tenant, now)
 
+        tenant.request_count += 1
         if success:
             tenant.goodput_count += 1
 
@@ -614,6 +623,12 @@ class GoodputCoupledRetryBudget(LoadLimiter):
         # Compute budget: alpha * goodput_rate * window_seconds
         window_secs = self.window_duration / 1e9
         budget = self.alpha * tenant.goodput_rate * window_secs
+
+        # Burst cap: limit retries to max_retry_ratio of total request rate
+        # Prevents initial overshoot when goodput_rate is stale (pre-fault)
+        if self.max_retry_ratio is not None and tenant.request_rate > 0:
+            cap = self.max_retry_ratio * tenant.request_rate * window_secs
+            budget = min(budget, cap)
 
         # Bootstrap grace: allow retries when not yet initialized
         if not tenant._initialized and budget == 0:
