@@ -144,6 +144,7 @@ class ArollaRetryBudgetConfig(BaseModel):
     window_ms: float = Field(default=1000.0, gt=0, description="Window duration in ms")
     success_rate_threshold: Optional[float] = Field(default=None, ge=0, le=1, description="Retry success rate gate (beta); None = disabled")
     success_rate_beta: float = Field(default=0.1, gt=0, le=1, description="EWMA smoothing for retry success rate")
+    max_retry_ratio: Optional[float] = Field(default=None, gt=0, le=1, description="Burst cap: max retries as fraction of request rate; None = disabled")
 
 
 # ============================================================================
