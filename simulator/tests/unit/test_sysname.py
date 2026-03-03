@@ -1,4 +1,4 @@
-"""Tests for SYSNAME goodput-coupled retry budget (Level 1 + Level 2)."""
+"""Tests for Arolla goodput-coupled retry budget (Level 1 + Level 2)."""
 
 from __future__ import annotations
 
@@ -401,23 +401,23 @@ class TestLevel2ChainIntegration:
 # Config builder tests
 # ---------------------------------------------------------------------------
 
-class TestSysnameConfig:
-    """Test config schema and builder for SYSNAME."""
+class TestArollaConfig:
+    """Test config schema and builder for Arolla."""
 
-    def test_sysname_config_defaults(self):
-        from simulator.config.schema import SysnameRetryBudgetConfig
-        cfg = SysnameRetryBudgetConfig()
+    def test_arolla_config_defaults(self):
+        from simulator.config.schema import ArollaRetryBudgetConfig
+        cfg = ArollaRetryBudgetConfig()
         assert cfg.alpha == 0.1
         assert cfg.beta_down == 0.3
         assert cfg.beta_up == 0.05
         assert cfg.window_ms == 1000.0
         assert cfg.success_rate_threshold is None
 
-    def test_build_sysname_retry_budget(self):
-        from simulator.config.schema import SysnameRetryBudgetConfig
-        from simulator.config.builders.policies import build_sysname_retry_budget
-        cfg = SysnameRetryBudgetConfig(alpha=0.2, window_ms=500)
-        limiter = build_sysname_retry_budget(cfg)
+    def test_build_arolla_retry_budget(self):
+        from simulator.config.schema import ArollaRetryBudgetConfig
+        from simulator.config.builders.policies import build_arolla_retry_budget
+        cfg = ArollaRetryBudgetConfig(alpha=0.2, window_ms=500)
+        limiter = build_arolla_retry_budget(cfg)
         assert isinstance(limiter, GoodputCoupledRetryBudget)
         assert limiter.alpha == 0.2
         assert limiter.window_duration == ms_to_ns(500)
@@ -437,7 +437,7 @@ class TestSysnameConfig:
 # ---------------------------------------------------------------------------
 
 class TestV1AmplificationBound:
-    """V1: SYSNAME Level 1 should bound retry amplification to ~1+alpha."""
+    """V1: Arolla Level 1 should bound retry amplification to ~1+alpha."""
 
     def test_v1_amplification_bound(self):
         """With alpha=0.1 and 50% failure, amplification should be <= 1.15."""

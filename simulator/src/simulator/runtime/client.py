@@ -17,7 +17,7 @@ class ClientConfig:
     name: str = "client"
     retry: Optional['RetryPolicy'] = None
     timeout: Optional['Timeout'] = None
-    e2e_retry_budget: Optional[int] = None  # SYSNAME Level 2: max retries across all hops
+    e2e_retry_budget: Optional[int] = None  # Arolla Level 2: max retries across all hops
 
 
 @dataclass
@@ -26,7 +26,7 @@ class AttemptCtx:
     req: Request
     last_delay: TimeDuration = 0
     total_delay: TimeDuration = 0
-    _retry_budget_remaining: Optional[list] = None  # SYSNAME Level 2: shared [B]
+    _retry_budget_remaining: Optional[list] = None  # Arolla Level 2: shared [B]
 
 
 @dataclass
