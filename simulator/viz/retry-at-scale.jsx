@@ -33,85 +33,176 @@ async function apiSaveResults(analysisType, data, label = "") {
 }
 
 // ============================================================
-// Strategy configs to compare
+// Constants
 // ============================================================
 
-const DEFAULT_CLIENT_COUNTS = [1, 5, 10, 50, 100];
+const DEFAULT_CLIENT_COUNTS = [1, 5, 10, 50, 100, 500, 1000];
+// Strategy visual styles: vivid colors + distinct dash patterns (matching paper figures)
+const STRATEGY_STYLES = {
+  no_retries:                 { color: "#8b8b8b", dash: "3,4",       width: 2   },
+  three_retries:              { color: "#2563eb", dash: "",           width: 2.5 },
+  exponential_backoff_jitter: { color: "#ea7317", dash: "10,4",      width: 2.5 },
+  circuit_breaker:            { color: "#d63384", dash: "3,5",       width: 2.5 },
+  retry_budget:               { color: "#40916c", dash: "10,3,3,3",  width: 2.5 },
+  arolla_retry_budget:        { color: "#006d77", dash: "",           width: 3.5 },
+  arolla_budget:              { color: "#006d77", dash: "",           width: 3.5 },
+  arolla:                     { color: "#006d77", dash: "",           width: 3.5 },
+  sysname:                    { color: "#006d77", dash: "",           width: 3.5 },
+};
+const STYLE_LIST = [
+  { color: "#2563eb", dash: "",           width: 2.5 },
+  { color: "#ea7317", dash: "10,4",       width: 2.5 },
+  { color: "#d63384", dash: "3,5",        width: 2.5 },
+  { color: "#40916c", dash: "10,3,3,3",   width: 2.5 },
+  { color: "#006d77", dash: "",           width: 3   },
+  { color: "#8b6914", dash: "6,3",        width: 2   },
+  { color: "#8b8b8b", dash: "3,4",        width: 2   },
+];
+function getStyle(name, idx) {
+  if (name) {
+    const key = name.toLowerCase().replace(/-/g, "_");
+    if (STRATEGY_STYLES[key]) return STRATEGY_STYLES[key];
+    for (const [k, v] of Object.entries(STRATEGY_STYLES)) {
+      if (key.includes(k) || k.includes(key)) return v;
+    }
+  }
+  return STYLE_LIST[idx % STYLE_LIST.length];
+}
+
+function displayName(s) { return s.replace(/arolla[\w_]*/gi, "Arolla").replace(/sysname/gi, "Arolla"); }
 
 // ============================================================
-// SVG Charts
+// Reusable: ScalingMetricChart (log-scale X)
 // ============================================================
 
-function ScalingWallChart({ seriesData, clientCounts, selectedIdx, T, width = 640, height = 360 }) {
+function ScalingMetricChart({
+  seriesData, clientCounts, metricKey, yLabel, yDomain, yFormat, selectedIdx,
+  T, width = 340, height = 240,
+}) {
   if (!seriesData || seriesData.length === 0) return null;
 
-  const padL = 60, padR = 20, padT = 25, padB = 55;
+  const padL = 56, padR = 14, padT = 22, padB = 48;
   const cW = width - padL - padR;
   const cH = height - padT - padB;
 
-  const n = clientCounts.length;
-  const xScale = (i) => padL + (i / Math.max(1, n - 1)) * cW;
-  const yScale = (v) => padT + (1 - v) * cH;
+  // Log-scale X
+  const logCounts = clientCounts.map((c) => Math.log10(Math.max(1, c)));
+  const minLog = Math.min(...logCounts);
+  const maxLog = Math.max(...logCounts);
+  const logRange = maxLog - minLog || 1;
+  const xScale = (i) => padL + ((logCounts[i] - minLog) / logRange) * cW;
 
-  const colors = ["#4a86c8", "#e07b39", "#5ba05b", "#c75050", "#7a6cb2", "#c4853e", "#8b8b8b"];
+  // Y-axis domain
+  let yMin = 0, yMax = 1;
+  if (yDomain) {
+    [yMin, yMax] = yDomain;
+  } else {
+    // Auto-scale from data
+    let allVals = [];
+    for (const s of seriesData) {
+      for (const r of (s.results || [])) {
+        const v = r[metricKey];
+        if (v != null && isFinite(v)) allVals.push(v);
+      }
+    }
+    if (allVals.length > 0) {
+      yMin = Math.min(0, Math.min(...allVals));
+      yMax = Math.max(...allVals) * 1.1 || 1;
+    }
+  }
+  const yRange = yMax - yMin || 1;
+  const yScale = (v) => padT + ((yMax - v) / yRange) * cH;
+
+  // Y tick values
+  const nTicks = 5;
+  const yTicks = Array.from({ length: nTicks }, (_, i) => yMin + (i / (nTicks - 1)) * yRange);
+
+  const fmt = yFormat || ((v) => {
+    if (yMax <= 1.5 && yMin >= -0.5) return `${(v * 100).toFixed(0)}%`;
+    if (v >= 1000) return `${(v / 1000).toFixed(1)}k`;
+    return v.toFixed(v < 10 ? 1 : 0);
+  });
 
   return (
     <svg width={width} height={height} style={{ overflow: "visible" }}>
-      {[0, 0.25, 0.5, 0.75, 1].map((v) => (
-        <g key={v}>
+      {yTicks.map((v, i) => (
+        <g key={i}>
           <line x1={padL} y1={yScale(v)} x2={padL + cW} y2={yScale(v)} stroke={T.grid} strokeWidth={0.5} />
-          <text x={padL - 8} y={yScale(v) + 4} textAnchor="end" fill={T.svgLabel} fontSize={11}
-            fontFamily="'JetBrains Mono', monospace">{(v * 100).toFixed(0)}%</text>
+          <text x={padL - 6} y={yScale(v) + 4} textAnchor="end" fill={T.svgLabel} fontSize={10}
+            fontFamily="'JetBrains Mono', monospace">{fmt(v)}</text>
         </g>
       ))}
 
-      {selectedIdx >= 0 && selectedIdx < n && (
-        <rect x={xScale(selectedIdx) - 5} y={padT} width={10} height={cH}
-          fill={T.accent} opacity={0.06} rx={4} />
+      {selectedIdx >= 0 && selectedIdx < clientCounts.length && (
+        <rect x={xScale(selectedIdx) - 4} y={padT} width={8} height={cH}
+          fill={T.accent} opacity={0.06} rx={3} />
       )}
 
       {seriesData.map((series, si) => {
         const results = series.results || [];
         if (results.length === 0) return null;
-        const points = results.map((d, i) => `${xScale(i)},${yScale(d.success_rate || 0)}`).join(" ");
-        const color = colors[si % colors.length];
+        const pts = results.map((d, i) => {
+          const v = d[metricKey];
+          return v != null && isFinite(v) ? `${xScale(i)},${yScale(v)}` : null;
+        }).filter(Boolean);
+        if (pts.length === 0) return null;
+        const style = getStyle(series.config_name, si);
         return (
           <g key={si}>
-            <polyline points={points} fill="none" stroke={color} strokeWidth={2.5} opacity={0.85} />
-            {results.map((d, i) => (
-              <circle key={i} cx={xScale(i)} cy={yScale(d.success_rate || 0)} r={3.5}
-                fill={color} opacity={selectedIdx === i ? 1 : 0.7}
-                stroke={selectedIdx === i ? T.text : "none"} strokeWidth={selectedIdx === i ? 1.5 : 0} />
-            ))}
+            <polyline points={pts.join(" ")} fill="none" stroke={style.color}
+              strokeWidth={style.width} strokeDasharray={style.dash || undefined} opacity={0.9} />
+            {results.map((d, i) => {
+              const v = d[metricKey];
+              if (v == null || !isFinite(v)) return null;
+              return (
+                <circle key={i} cx={xScale(i)} cy={yScale(v)} r={3}
+                  fill={style.color} opacity={selectedIdx === i ? 1 : 0.6}
+                  stroke={selectedIdx === i ? T.text : "none"} strokeWidth={selectedIdx === i ? 1.5 : 0} />
+              );
+            })}
           </g>
         );
       })}
 
       {clientCounts.map((c, i) => (
-        <text key={i} x={xScale(i)} y={height - 14} textAnchor="middle"
-          fill={selectedIdx === i ? T.accent : T.svgLabel} fontSize={12}
+        <text key={i} x={xScale(i)} y={height - 12} textAnchor="middle"
+          fill={selectedIdx === i ? T.accent : T.svgLabel} fontSize={10}
           fontWeight={selectedIdx === i ? 600 : 400}
           fontFamily="'JetBrains Mono', monospace">{c}</text>
       ))}
 
-      <text x={padL + cW / 2} y={height} textAnchor="middle" fill={T.svgAxis} fontSize={12}
-        fontFamily="'JetBrains Mono', monospace">Number of Clients</text>
-      <text x={8} y={padT + cH / 2} textAnchor="middle" fill={T.svgAxis} fontSize={12}
-        fontFamily="'JetBrains Mono', monospace" transform={`rotate(-90, 8, ${padT + cH / 2})`}>
-        Success Rate
+      <text x={padL + cW / 2} y={height} textAnchor="middle" fill={T.svgAxis} fontSize={10}
+        fontFamily="'JetBrains Mono', monospace">Client Count N (log)</text>
+      <text x={6} y={padT + cH / 2} textAnchor="middle" fill={T.svgAxis} fontSize={10}
+        fontFamily="'JetBrains Mono', monospace" transform={`rotate(-90, 6, ${padT + cH / 2})`}>
+        {yLabel}
       </text>
-
-      <g transform={`translate(${padL + 8}, ${padT + 4})`}>
-        {seriesData.map((series, i) => (
-          <g key={i} transform={`translate(${(i % 3) * 190}, ${Math.floor(i / 3) * 18})`}>
-            <rect x={0} y={-8} width={12} height={3} rx={1} fill={colors[i % colors.length]} opacity={0.9} />
-            <text x={16} y={-3} fill={T.text} fontSize={11} fontFamily="'JetBrains Mono', monospace">
-              {series.label}
-            </text>
-          </g>
-        ))}
-      </g>
     </svg>
+  );
+}
+
+// ============================================================
+// Chart legend (shared across all panels)
+// ============================================================
+
+function ChartLegend({ seriesData, T }) {
+  if (!seriesData || seriesData.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", marginBottom: 10 }}>
+      {seriesData.map((s, i) => {
+        const style = getStyle(s.config_name, i);
+        return (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: T.text }}>
+            <svg width={24} height={6}>
+              <line x1={0} y1={3} x2={24} y2={3}
+                stroke={style.color} strokeWidth={style.width}
+                strokeDasharray={style.dash || undefined} />
+            </svg>
+            {displayName(s.label)}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -168,7 +259,7 @@ export default function App() {
     }
     setSeriesData(results);
     try {
-      const saveRes = await apiSaveResults("scaling", { series: results, clientCounts, totalRps }, "scaling_wall");
+      const saveRes = await apiSaveResults("scaling", { series: results, clientCounts, totalRps }, "multi_client");
       setSavedPath(saveRes.path);
     } catch (e) { /* save failure is non-critical */ }
     setLoading(false);
@@ -195,19 +286,19 @@ export default function App() {
     }}>
       <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
 
-      <div style={{ maxWidth: 1060, margin: "0 auto" }}>
+      <div style={{ maxWidth: 1120, margin: "0 auto" }}>
         <div style={{ marginBottom: 24, borderBottom: `1px solid ${T.border}`, paddingBottom: 14 }}>
           <h1 style={{ fontSize: 24, fontWeight: 700, color: T.accent, margin: 0 }}>
-            The Scaling Wall
+            Multi-Client & Single-Service
           </h1>
           <p style={{ fontSize: 14, color: T.dim, margin: "6px 0 0" }}>
-            Compare how different retry strategies perform as client count grows — using the real simulator
+            How retry strategies scale with client count — goodput, amplification, retry efficiency vs N
           </p>
         </div>
 
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
           {/* Left — Controls */}
-          <div style={{ width: 300, flexShrink: 0 }}>
+          <div style={{ width: 280, flexShrink: 0 }}>
             <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 16, marginBottom: 14 }}>
               <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: "0.08em" }}>
                 Configs to Compare
@@ -230,7 +321,7 @@ export default function App() {
                       border: `1px solid ${T.border}`, borderRadius: 4, fontSize: 12,
                     }}>
                       <span style={{ flex: 1, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {c.split("/").pop().replace(".yaml", "")}
+                        {displayName(c.split("/").pop().replace(".yaml", ""))}
                       </span>
                       <button onClick={() => removeConfig(c)}
                         style={{ background: "none", border: "none", color: "#b74444", cursor: "pointer", fontSize: 14, padding: 0 }}>
@@ -309,78 +400,145 @@ export default function App() {
             )}
           </div>
 
-          {/* Right — Chart */}
+          {/* Right — Chart Grid */}
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 20, minHeight: 400 }}>
-              <h3 style={{ fontSize: 16, color: T.text, margin: "0 0 14px", fontWeight: 600 }}>
-                Success Rate vs. Client Count
-              </h3>
-              {seriesData.length > 0 ? (
-                <div style={{ overflowX: "auto" }}>
-                  <ScalingWallChart
-                    seriesData={seriesData} clientCounts={clientCounts}
-                    selectedIdx={selectedClientIdx} T={T} width={640} height={360}
-                  />
+            {seriesData.length > 0 ? (
+              <>
+                <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: "14px 16px 6px" }}>
+                  <ChartLegend seriesData={seriesData} T={T} />
                 </div>
-              ) : (
-                <div style={{ textAlign: "center", padding: 70, color: T.faint, fontSize: 14 }}>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+                  {/* Success Rate vs N */}
+                  <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: "12px 10px" }}>
+                    <h4 style={{ fontSize: 12, color: T.muted, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Success Rate vs N
+                    </h4>
+                    <ScalingMetricChart
+                      seriesData={seriesData} clientCounts={clientCounts} metricKey="success_rate"
+                      yLabel="Success Rate" yDomain={[0, 1]}
+                      yFormat={(v) => `${(v * 100).toFixed(0)}%`}
+                      selectedIdx={selectedClientIdx} T={T} />
+                  </div>
+
+                  {/* Amplification vs N */}
+                  <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: "12px 10px" }}>
+                    <h4 style={{ fontSize: 12, color: T.muted, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Amplification vs N
+                    </h4>
+                    <ScalingMetricChart
+                      seriesData={seriesData} clientCounts={clientCounts} metricKey="amplification"
+                      yLabel="Amplification A"
+                      yFormat={(v) => `${v.toFixed(1)}x`}
+                      selectedIdx={selectedClientIdx} T={T} />
+                  </div>
+
+                  {/* Goodput vs N */}
+                  <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: "12px 10px" }}>
+                    <h4 style={{ fontSize: 12, color: T.muted, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Goodput vs N
+                    </h4>
+                    <ScalingMetricChart
+                      seriesData={seriesData} clientCounts={clientCounts} metricKey="goodput_rps"
+                      yLabel="Goodput (RPS)"
+                      yFormat={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0)}
+                      selectedIdx={selectedClientIdx} T={T} />
+                  </div>
+
+                  {/* Retry Efficiency vs N */}
+                  <div style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: "12px 10px" }}>
+                    <h4 style={{ fontSize: 12, color: T.muted, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                      Retry Efficiency vs N
+                    </h4>
+                    <ScalingMetricChart
+                      seriesData={seriesData} clientCounts={clientCounts} metricKey="retry_efficiency"
+                      yLabel="Retry Efficiency"  yDomain={[0, 1]}
+                      yFormat={(v) => `${(v * 100).toFixed(0)}%`}
+                      selectedIdx={selectedClientIdx} T={T} />
+                  </div>
+                </div>
+
+                {/* Summary table */}
+                <div style={{
+                  marginTop: 10, background: T.panel, border: `1px solid ${T.border}`,
+                  borderRadius: 8, padding: 16, overflowX: "auto",
+                }}>
+                  <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 10px", textTransform: "uppercase" }}>
+                    At N = {selectedCount}
+                  </h3>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${T.border}` }}>
+                        <th style={{ textAlign: "left", padding: "5px 8px", color: T.muted }}>Config</th>
+                        <th style={{ textAlign: "right", padding: "5px 8px", color: T.muted }}>Success</th>
+                        <th style={{ textAlign: "right", padding: "5px 8px", color: T.muted }}>Amplif.</th>
+                        <th style={{ textAlign: "right", padding: "5px 8px", color: T.muted }}>Goodput</th>
+                        <th style={{ textAlign: "right", padding: "5px 8px", color: T.muted }}>Retry Eff.</th>
+                        <th style={{ textAlign: "right", padding: "5px 8px", color: T.muted }}>Fairness</th>
+                        <th style={{ textAlign: "right", padding: "5px 8px", color: T.muted }}>P99</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {seriesData.map((series, i) => {
+                        const point = (series.results || [])[selectedClientIdx];
+                        return (
+                          <tr key={i} style={{ borderBottom: `1px solid ${T.rowBorder}` }}>
+                            <td style={{ padding: "5px 8px", color: getStyle(series.config_name, i).color, fontWeight: 600 }}>
+                              {displayName(series.label)}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right",
+                              color: point?.success_rate > 0.8 ? "#388e3c" : point?.success_rate > 0.5 ? "#e07b39" : "#c75050" }}>
+                              {point ? `${(point.success_rate * 100).toFixed(1)}%` : "—"}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: T.text }}>
+                              {point?.amplification ? `${point.amplification.toFixed(2)}x` : "—"}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: T.text }}>
+                              {point?.goodput_rps != null ? `${point.goodput_rps.toFixed(1)}` : "—"}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: T.text }}>
+                              {point?.retry_efficiency != null ? `${(point.retry_efficiency * 100).toFixed(1)}%` : "—"}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: T.text }}>
+                              {point?.fairness_share_shift != null ? `${(point.fairness_share_shift * 100).toFixed(1)}%` : "—"}
+                            </td>
+                            <td style={{ padding: "5px 8px", textAlign: "right", color: T.text }}>
+                              {point?.p99 ? `${point.p99.toFixed(0)}` : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <div style={{
+                background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, padding: 20, minHeight: 400,
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>
+                <div style={{ textAlign: "center", color: T.faint, fontSize: 14 }}>
                   <p>Add configs to compare, then click "Run Scaling Study"</p>
-                  <p style={{ fontSize: 12, marginTop: 10 }}>
-                    Each config represents a different retry strategy. The simulator will run each
-                    at varying client counts while keeping total RPS constant.
+                  <p style={{ fontSize: 12, marginTop: 10, maxWidth: 420 }}>
+                    Each config represents a different retry strategy. The simulator runs each
+                    at varying client counts (log scale) while keeping total RPS constant.
+                    Compare success rate, amplification, goodput, and retry efficiency.
                   </p>
                 </div>
-              )}
-            </div>
-
-            {seriesData.length > 0 && (
-              <div style={{
-                marginTop: 12, background: T.panel, border: `1px solid ${T.border}`,
-                borderRadius: 8, padding: 16, overflowX: "auto",
-              }}>
-                <h3 style={{ fontSize: 13, color: T.accent, margin: "0 0 10px", textTransform: "uppercase" }}>
-                  At {selectedCount} Clients
-                </h3>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: `1px solid ${T.border}` }}>
-                      <th style={{ textAlign: "left", padding: "6px 10px", color: T.muted }}>Config</th>
-                      <th style={{ textAlign: "right", padding: "6px 10px", color: T.muted }}>Success Rate</th>
-                      <th style={{ textAlign: "right", padding: "6px 10px", color: T.muted }}>Amplification</th>
-                      <th style={{ textAlign: "right", padding: "6px 10px", color: T.muted }}>P99 (ms)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {seriesData.map((series, i) => {
-                      const point = (series.results || [])[selectedClientIdx];
-                      return (
-                        <tr key={i} style={{ borderBottom: `1px solid ${T.rowBorder}` }}>
-                          <td style={{ padding: "6px 10px", color: T.text }}>{series.label}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "right", color: point?.success_rate > 0.8 ? "#388e3c" : point?.success_rate > 0.5 ? "#e07b39" : "#c75050" }}>
-                            {point ? `${(point.success_rate * 100).toFixed(1)}%` : "—"}
-                          </td>
-                          <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
-                            {point?.amplification ? `${point.amplification.toFixed(2)}x` : "—"}
-                          </td>
-                          <td style={{ padding: "6px 10px", textAlign: "right", color: T.text }}>
-                            {point?.p99 ? `${point.p99.toFixed(0)}` : "—"}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
               </div>
             )}
 
             <div style={{
-              marginTop: 12, padding: "12px 16px",
+              marginTop: 10, padding: "12px 16px",
               background: T.hintBg, border: `1px solid ${T.border}`, borderRadius: 6,
               fontSize: 12, color: T.dim, lineHeight: 1.7,
             }}>
               <strong style={{ color: T.muted }}>How it works:</strong> For each config, the simulator runs with N client replicas
-              sharing the total RPS. The server adjusts <code style={{ color: T.accent }}>replicas</code> and <code style={{ color: T.accent }}>base_rps</code> per client.
-              Start server: <code style={{ color: T.accent }}>cd simulator && python3 bin/viz_server.py</code>
+              sharing the total RPS. X-axis is log-scaled. Metrics:
+              <strong> Goodput</strong> = successful RPS,
+              <strong> Amplification</strong> = total attempts / original requests,
+              <strong> Retry Efficiency</strong> = fraction of retries that succeed,
+              <strong> Fairness</strong> = max goodput share shift (0 = fair).
             </div>
           </div>
         </div>
