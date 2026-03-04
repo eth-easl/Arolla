@@ -35,11 +35,11 @@ services:
     #   window_duration_ms: 1000
     #   min_requests: 20
     #   half_open_delay_ms: 500
-    # arolla_retry_budget:
-    #   alpha: 0.1
-    #   beta_down: 0.3
-    #   beta_up: 0.15
-    #   window_ms: 1000
+    arolla_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.15
+      window_ms: 1000
 
 
 clients:
