@@ -13,6 +13,7 @@ Endpoints:
     POST /api/run_inline    — Run a single experiment from inline YAML string
     POST /api/sweep         — Run a parameter sweep (vary one param)
     POST /api/scaling       — Run scaling study (vary client count)
+    POST /api/multi_client_sweep — Run multi-client 2D sweep (p_fail × replicas)
     POST /api/chain         — Run chain depth study
     POST /api/heatmap       — Run 2D parameter heatmap sweep
     GET  /api/configs       — List available YAML configs
@@ -301,6 +302,12 @@ class HeatmapRequest(BaseModel):
     values_x: list = Field(description="X-axis parameter values to sweep")
     param_path_y: str = Field(description="Dot-separated path to Y-axis parameter")
     values_y: list = Field(description="Y-axis parameter values to sweep")
+
+class MultiClientSweepRequest(BaseModel):
+    config_path: str = Field(description="Multi-client YAML config path")
+    p_fail_values: Optional[list[float]] = Field(default=None, description="Override p_fail sweep values")
+    replicas_values: Optional[list[int]] = Field(default=None, description="Override replicas sweep values")
+    fixed_total_rps: Optional[float] = Field(default=None, description="Keep total RPS constant (divide by N). None = use per-client base_rps as-is.")
 
 class ParamCompareRequest(BaseModel):
     config_path: str = Field(description="Base YAML config path")
@@ -832,6 +839,196 @@ async def run_scaling(req: ScalingRequest):
         "config": req.config_path,
         "total_rps": req.total_rps,
         "results": results,
+    }
+
+
+@app.post("/api/multi_client_sweep")
+async def run_multi_client_sweep(req: MultiClientSweepRequest):
+    """Run a 2D sweep over p_fail × replicas for a multi-client config.
+
+    Discovers p_fail and replicas list values from the YAML, then runs
+    every (p_fail, replicas) combination.  Returns per-strategy metrics
+    grouped for easy plotting (X = failure rate, lines = strategy × replicas).
+    """
+    import yaml
+    from itertools import product as cartesian
+
+    config_path = YAML_DIR / req.config_path
+    if not config_path.exists():
+        raise HTTPException(404, f"Config not found: {req.config_path}")
+
+    with open(config_path) as f:
+        base_yaml = yaml.safe_load(f)
+
+    # --- discover p_fail values -----------------------------------------------
+    p_fail_values = req.p_fail_values
+    if p_fail_values is None:
+        # Auto-detect from first service's partial_failures
+        for svc in base_yaml.get("services", []):
+            for pf in svc.get("partial_failures", []):
+                v = pf.get("p_fail")
+                if isinstance(v, list):
+                    p_fail_values = [float(x) for x in v]
+                    break
+            if p_fail_values:
+                break
+    if not p_fail_values:
+        raise HTTPException(400, "No p_fail sweep values found in config or request")
+
+    # --- discover replicas values ---------------------------------------------
+    replicas_values = req.replicas_values
+    if replicas_values is None:
+        for cl in base_yaml.get("clients", []):
+            v = cl.get("replicas")
+            if isinstance(v, list):
+                replicas_values = [int(x) for x in v]
+                break
+    if not replicas_values:
+        replicas_values = [1]  # fallback: single replica
+
+    # --- discover client names ------------------------------------------------
+    client_names = [c["name"] for c in base_yaml.get("clients", [])]
+
+    # --- run the grid ---------------------------------------------------------
+    grid_results = []  # flat list of {p_fail, replicas, clients: [...]}
+    total_runs = len(p_fail_values) * len(replicas_values)
+    run_idx = 0
+
+    for pf_val, rep_val in cartesian(p_fail_values, replicas_values):
+        run_idx += 1
+        yaml_copy = json.loads(json.dumps(base_yaml))
+
+        # Set ALL services' p_fail to the scalar value
+        for svc in yaml_copy.get("services", []):
+            for pf_entry in svc.get("partial_failures", []):
+                if "p_fail" in pf_entry:
+                    pf_entry["p_fail"] = pf_val
+
+        # Set ALL clients' replicas to the scalar value
+        for cl in yaml_copy.get("clients", []):
+            if "replicas" in cl or isinstance(cl.get("replicas"), list):
+                cl["replicas"] = rep_val
+            # Keep total RPS constant: divide by N replicas
+            if req.fixed_total_rps is not None and "workload" in cl:
+                cl["workload"]["base_rps"] = req.fixed_total_rps / rep_val
+
+        try:
+            yaml_str = yaml.dump(yaml_copy)
+            config = ConfigLoader.load_from_string(yaml_str)
+            t0 = time.time()
+            result = run_simulation(config)
+            elapsed = round(time.time() - t0, 2)
+
+            per_client = []
+            for c in result["clients"]:
+                s = c["summary"]
+                total = s["total"]
+                total_attempts = total * (1 + s["retries_per_root"]) if total > 0 else 0
+                per_client.append({
+                    "name": c["name"],
+                    "success_rate": s["success_rate"],
+                    "goodput_rps": s.get("goodput_rps", 0),
+                    "amplification_factor": s.get("amplification_factor", 1.0),
+                    "retry_efficiency": s.get("retry_efficiency", 0),
+                    "total_requests": total,
+                    "total_attempts": round(total_attempts),
+                    "p50": s["p50"],
+                    "p95": s["p95"],
+                    "p99": s["p99"],
+                    "recovery_time_s": s.get("recovery_time_s"),
+                })
+
+            grid_results.append({
+                "p_fail": pf_val,
+                "replicas": rep_val,
+                "elapsed_s": elapsed,
+                "clients": per_client,
+            })
+        except Exception as e:
+            traceback.print_exc()
+            grid_results.append({
+                "p_fail": pf_val,
+                "replicas": rep_val,
+                "error": str(e),
+            })
+
+    # --- aggregate replicas and reshape into per-strategy series ----------------
+    # With replicas=N the simulator creates N clients named "strategy.0",
+    # "strategy.1", etc.  We aggregate them back into a single data point per
+    # (base_strategy, replicas, p_fail).
+
+    def _base_name(name: str) -> str:
+        """Strip trailing '.N' replica suffix → base strategy name."""
+        if "." in name and name.rsplit(".", 1)[-1].isdigit():
+            return name.rsplit(".", 1)[0]
+        return name
+
+    strategies = {}  # key = (base_name, replicas)
+    for gr in grid_results:
+        if "error" in gr:
+            continue
+
+        # Group this run's clients by base name
+        from collections import defaultdict
+        buckets = defaultdict(list)
+        for cl in gr["clients"]:
+            buckets[_base_name(cl["name"])].append(cl)
+
+        for base, members in buckets.items():
+            key = (base, gr["replicas"])
+            if key not in strategies:
+                strategies[key] = {
+                    "client_name": base,
+                    "replicas": gr["replicas"],
+                    "points": [],
+                }
+
+            n = len(members)
+            avg_sr = sum(m["success_rate"] for m in members) / n
+            sum_goodput = sum(m["goodput_rps"] for m in members)
+            sum_requests = sum(m["total_requests"] for m in members)
+            sum_attempts = sum(m["total_attempts"] for m in members)
+            avg_amp = sum_attempts / sum_requests if sum_requests > 0 else 1.0
+            retry_effs = [m["retry_efficiency"] for m in members if m["total_requests"] > 0]
+            avg_re = sum(retry_effs) / len(retry_effs) if retry_effs else 0
+            max_p50 = max(m["p50"] for m in members)
+            max_p95 = max(m["p95"] for m in members)
+            max_p99 = max(m["p99"] for m in members)
+
+            strategies[key]["points"].append({
+                "p_fail": gr["p_fail"],
+                "success_rate": avg_sr,
+                "goodput_rps": round(sum_goodput, 2),
+                "amplification_factor": round(avg_amp, 4),
+                "retry_efficiency": round(avg_re, 4),
+                "total_requests": sum_requests,
+                "total_attempts": sum_attempts,
+                "p50": max_p50,
+                "p95": max_p95,
+                "p99": max_p99,
+            })
+
+    # Compute load_pct for each series (relative to its p_fail=0 baseline)
+    series_list = list(strategies.values())
+    for series in series_list:
+        pts = series["points"]
+        # Sort by p_fail
+        pts.sort(key=lambda p: p["p_fail"])
+        # Baseline = first point (lowest p_fail)
+        baseline_attempts = pts[0]["total_attempts"] if pts else 1
+        for pt in pts:
+            pt["load_pct"] = (
+                100.0 * pt["total_attempts"] / baseline_attempts
+                if baseline_attempts > 0 else 100.0
+            )
+
+    return {
+        "config": req.config_path,
+        "p_fail_values": p_fail_values,
+        "replicas_values": replicas_values,
+        "client_names": client_names,
+        "total_runs": total_runs,
+        "series": series_list,
     }
 
 
