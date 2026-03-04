@@ -26,9 +26,9 @@ services:
     #   decrease_factor: 0.5   # Cut by 50% if >10% failure
     #   window_ms: 1000        # Update every 1s
     #   failure_threshold: 0.1
-    # retry_budget:
-    #   budget_ratio: 0.1
-    #   max_retries: 30
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
     # circuit_breaker:
     #   type: time_based
     #   failure_threshold: 0.1
