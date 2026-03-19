@@ -22,6 +22,10 @@ from simulator.policies.aimd_retry_budget import AIMDGlobalRetryBudget
 from simulator.policies.retry import RetryBudgetPolicy
 from simulator.policies.server_retry_budget import GlobalRetryBudget
 
+# RL
+from simulator.metrics.live_buffer import LiveMetricsBuffer
+from simulator.policies.retry import FixedBackoffRetryPolicy
+from simulator.policies.load_limiter import LimiterRetryBudgetPolicy
 
 @dataclass(frozen=True)
 class ServiceConfig:
@@ -97,13 +101,18 @@ class ServiceRuntime:
     _events: List[tuple] = field(default_factory=list, init=False, repr=False)
     _record_events: bool = field(default=False, init=False, repr=False)
 
-    def bind(self, seed: Optional[int] = None, record_events: bool = False):
+    # Per-service live metrics buffer for real-time aggregation
+    _live_buffer: Optional[LiveMetricsBuffer] = field(default=None, init=False, repr=False)
+
+    def bind(self, seed: Optional[int] = None, record_events: bool = False, enable_live_buffer: bool = False):
         self.in_flight = 0
         self.queue.clear()
         self._seq = 0
         self._middleware_chain = self._build_middleware_chain()
         self._record_events = record_events
         self._events = []
+
+        self._live_buffer = LiveMetricsBuffer() if enable_live_buffer else None
         
         initial_seed = seed if seed is not None else 0
         self._rng = random.Random(initial_seed)
@@ -114,6 +123,15 @@ class ServiceRuntime:
     def events(self) -> List[tuple]:
         """Return recorded events: (timestamp_ns, latency_ns, success, drop_reason, queue_size, attempt_num, is_retry)"""
         return self._events
+
+    @property
+    def live_buffer(self) -> Optional[LiveMetricsBuffer]:
+        return self._live_buffer
+
+    def enable_live_buffer(self) -> None:
+        """Activate the live metrics buffer (used by RL env). No-op if already active."""
+        if self._live_buffer is None:
+            self._live_buffer = LiveMetricsBuffer()
 
     def submit_request(
         self,
@@ -496,6 +514,18 @@ class ServiceRuntime:
                 ctx.attempt,    # attempt_num
                 ctx.attempt > 1,  # is_retry
             ))
+
+        # Record event to live metrics buffer
+        if self._live_buffer is not None:
+            self._live_buffer.record_event(
+                end_time, 
+                svc_time, 
+                success, 
+                drop_reason,
+                queue_size, 
+                ctx.attempt, 
+                ctx.attempt > 1,
+            )
         
         # Notify caller about attempt completion
         ctx.on_attempt_done(
@@ -556,3 +586,31 @@ class ServiceRuntime:
             middlewares.append(LoadLimiterMiddleware(self.cfg.load_limiter))
         
         return MiddlewareChain(middlewares)
+
+    def update_retry_config(
+    self,
+    max_attempts: Optional[int] = None,
+    delay_ns: Optional[TimeDuration] = None,
+    budget_ratio: Optional[float] = None,
+    budget_max_retries: Optional[int] = None,
+    ):
+        """Swap policy objects in the middleware chain at runtime."""
+        if self._middleware_chain is None:
+            return
+
+        for mw in self._middleware_chain.middlewares:
+            if isinstance(mw, RetryMiddleware) and (max_attempts is not None or delay_ns is not None):
+                old = mw.policy
+                if isinstance(old, FixedBackoffRetryPolicy):
+                    mw.policy = FixedBackoffRetryPolicy(
+                        max_attempts=max_attempts if max_attempts is not None else old.max_attempts,
+                        delay=delay_ns if delay_ns is not None else old.delay,
+                    )
+
+            if isinstance(mw, LoadLimiterMiddleware) and (budget_ratio is not None or budget_max_retries is not None):
+                old = mw.limiter
+                if isinstance(old, LimiterRetryBudgetPolicy):
+                    mw.limiter = LimiterRetryBudgetPolicy(
+                        budget_ratio=budget_ratio if budget_ratio is not None else old.budget_ratio,
+                        max_retries=budget_max_retries if budget_max_retries is not None else old.max_retries,
+                    )
