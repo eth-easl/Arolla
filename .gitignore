@@ -217,3 +217,8 @@ results*/
 calibration/configs/
 calibration/data/
 calibration/reports/
+
+# RL training artifacts
+tb_logs/
+*.zip
+fault_events.json
