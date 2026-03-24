@@ -222,3 +222,5 @@ calibration/reports/
 tb_logs/
 *.zip
 fault_events.json
+simulator/vecnormalize_stats.pkl
+simulator/eval_logs/
