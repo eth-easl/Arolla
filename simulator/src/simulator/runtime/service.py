@@ -614,3 +614,13 @@ class ServiceRuntime:
                         budget_ratio=budget_ratio if budget_ratio is not None else old.budget_ratio,
                         max_retries=budget_max_retries if budget_max_retries is not None else old.max_retries,
                     )
+
+    def update_token_bucket(self, refill_rate=None, bucket_capacity=None):
+        """Update the token bucket parameters at runtime"""
+        
+        limiter = self.cfg.load_limiter
+        if isinstance(limiter, GlobalRetryBudget):
+            if refill_rate is not None:
+                limiter.refill_rate = refill_rate
+            if bucket_capacity is not None:
+                limiter.max_tokens = bucket_capacity

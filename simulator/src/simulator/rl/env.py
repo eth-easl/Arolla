@@ -13,16 +13,15 @@ class RetrySimEnv(gym.Env):
         self.yaml_path = yaml_path
         self.decision_interval_ns = s_to_ns(decision_interval_s)
 
-        # Action: [max_attempts, delay_index, budget_index]
-        # max_attempts: 0=1, 1=2, 2=3, 3=4
-        # delay_index:  0=50ms, 1=100ms, 2=200ms, 3=300ms, 4=500ms, 5=750ms, 6=1000ms
-        # budget_index: 0=0.02, 1=0.05, 2=0.10, 3=0.20, 4=0.50
-        self.action_space = spaces.MultiDiscrete([4, 7, 5])
-        self.max_attempts_map = [1, 2, 3, 4]
-        self.delay_map = [ms_to_ns(d) for d in [50, 100, 200, 300, 500, 750, 1000]]
-        self.budget_map = [0.02, 0.05, 0.10, 0.20, 0.50]
+        # Action Space
+        # [refill_rate_index, bucket_capacity_index]
+        # refill_rate_index: 0=5, 1=15, 2=30, 3=60, 4=120
+        # bucket_capacity_index: 0=5, 1=10, 2=20, 3=50, 4=100
+        self.action_space = spaces.MultiDiscrete([5, 5])
+        self.refill_rate_map = [5, 15, 30, 60, 120]
+        self.bucket_capacity_map = [5, 10, 20, 50, 100]
 
-        # observation
+        # Observation Space
         self.observation_space = spaces.Box(
             low=0.0, high=np.inf, shape=(13,), dtype=np.float32
         )
@@ -53,21 +52,19 @@ class RetrySimEnv(gym.Env):
         # Advance to first decision point
         self.next_decision_time = self.decision_interval_ns
         self.sim.run(until=self.next_decision_time)
-
+        
         obs = self._get_obs()
         return obs, {}
 
     def step(self, action):
         # Decode action
-        max_attempts = self.max_attempts_map[action[0]]
-        delay_ns = self.delay_map[action[1]]
-        budget_ratio = self.budget_map[action[2]]
+        refill_rate = self.refill_rate_map[action[0]]
+        bucket_capacity = self.bucket_capacity_map[action[1]]
 
         # Apply action
-        self.service.update_retry_config(
-            max_attempts=max_attempts,
-            delay_ns=delay_ns,
-            budget_ratio=budget_ratio,
+        self.service.update_token_bucket(
+            refill_rate=refill_rate,
+            bucket_capacity=bucket_capacity,
         )
 
         # Advance simulation
@@ -100,9 +97,8 @@ class RetrySimEnv(gym.Env):
             "fail_deadline": obs_dict["fail_deadline"],
             "fail_queue_full": obs_dict["fail_queue_full"],
             "reward": reward,
-            "action_max_attempts": max_attempts,
-            "action_delay_ms": delay_ns / 1e6,
-            "action_budget_ratio": budget_ratio,
+            "action_refill_rate": refill_rate,
+            "action_bucket_capacity": bucket_capacity,
         })
 
         return obs, reward, done, False, {"metrics": obs_dict}
