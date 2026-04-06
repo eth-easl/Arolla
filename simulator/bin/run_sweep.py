@@ -195,15 +195,28 @@ def run_simulation_instance(config: ExperimentConfig, output_dir: Path, verbose:
                 }
                 results.append(res)
 
-        # Fault events
-        if fault_tracker:
-             # simple json dump if fault_tracker supports it
-             pass 
+        # Collect per-tenant admission stats from load limiter middleware
+        all_admission = {}
+        for svc_name, svc_rt in services.items():
+            stats = svc_rt.get_admission_stats()
+            all_admission.update(stats)
+
+        # Attach admission stats to each client result
+        if all_admission:
+            for res in results:
+                # Reconstruct tenant_id (client.cfg.name)
+                base = res['client_name']
+                rid = res['replica_id']
+                # Try both "name.rid" and plain "name"
+                tenant_id = f"{base}.{rid}"
+                stats = all_admission.get(tenant_id) or all_admission.get(base, {})
+                res['limiter_retry_requested'] = stats.get('requested', 0)
+                res['limiter_retry_admitted'] = stats.get('admitted', 0)
 
     except Exception as e:
         print(f"Error running simulation: {e}", file=sys.stderr)
         return []
-        
+
     return results
 
 def main():
@@ -364,7 +377,31 @@ def main():
                      shutil.copy(src, client_dir / dest_name)
                      copied_destinations.add(dest_name)
 
-    # 4b. Cleanup run folders
+    # 4b. Write admission_summary.json (per-combo, per-base-client)
+    import json
+    admission_summary = {}
+    for res in all_results:
+        run_path = res.get('run_dir', '')
+        run_name = Path(run_path).name if run_path else ''
+        if run_name.startswith('run_'):
+            run_name = run_name[4:]
+        if not run_name:
+            continue
+        client = res['client_name']
+        if run_name not in admission_summary:
+            admission_summary[run_name] = {}
+        if client not in admission_summary[run_name]:
+            admission_summary[run_name][client] = {'requested': 0, 'admitted': 0}
+        admission_summary[run_name][client]['requested'] += res.get('limiter_retry_requested', 0)
+        admission_summary[run_name][client]['admitted'] += res.get('limiter_retry_admitted', 0)
+
+    if admission_summary:
+        admission_path = run_dir / 'admission_summary.json'
+        with open(admission_path, 'w') as f:
+            json.dump(admission_summary, f, indent=2)
+        print(f"✓ Admission stats saved to: {admission_path}")
+
+    # 4c. Cleanup run folders
     # detailed runs are now duplicated in by_client, so we can remove the run_ folders
     for item in run_dir.iterdir():
         if item.is_dir() and item.name.startswith("run_"):
