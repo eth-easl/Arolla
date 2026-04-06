@@ -1,0 +1,84 @@
+# Sensitivity sweep: Arolla Goodput-Coupled Retry Budget (server-side)
+# Sweep alpha × p_fail to show parameter robustness
+
+name: sensitivity_arolla
+seed: 43232
+
+services:
+  - name: svc
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: [0.1, 0.3, 0.5, 0.7, 0.9]
+    arolla_retry_budget:
+      alpha: [0.01, 0.05, 0.1, 0.2, 0.5]
+      beta_down: 0.3
+      beta_up: 0.15
+      window_ms: 1000
+
+clients:
+  - name: three_retries
+    replicas: 1
+    target_service: svc
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload: &default_workload
+      base_rps: 40
+      duration_s: 70
+      rng_seed: 1
+
+  - name: exponential_backoff_jitter
+    replicas: 1
+    target_service: svc
+    retry:
+      type: jittered
+      max_attempts: 4
+      initial_delay_ms: 100
+      max_delay_ms: 2000
+      jitter_mode: full
+    timeout:
+      attempt_ms: 192
+    workload: *default_workload
+
+  - name: circuit_breaker
+    replicas: 1
+    target_service: svc
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 1000
+      min_requests: 20
+      half_open_delay_ms: 500
+    timeout:
+      attempt_ms: 192
+    workload: *default_workload
+
+  - name: retry_budget
+    replicas: 1
+    target_service: svc
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
+    workload: *default_workload
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
