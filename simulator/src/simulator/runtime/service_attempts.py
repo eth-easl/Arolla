@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import heapq
+from collections import defaultdict
 from functools import partial
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from simulator.core.engine import Simulator
 from simulator.core.types import DropReason, TimeDuration, TimePoint
@@ -10,6 +11,10 @@ from simulator.policies.retry import RetryContext
 
 
 class _ServiceAttemptMixin:
+    # Per-tenant retry admission counters (set in ServiceRuntime.bind())
+    _admission_requested: Dict[str, int]
+    _admission_admitted: Dict[str, int]
+
     def submit_request(
         self,
         sim: Simulator,
@@ -25,6 +30,9 @@ class _ServiceAttemptMixin:
         if self.cfg.load_limiter is not None:
             should_check = self.cfg.load_limiter.applies_pre_queue_admission(is_retry)
             if should_check:
+                tenant = tenant_id or '__global__'
+                self._admission_requested[tenant] += 1
+
                 check_ctx = RetryContext(attempt=1, now=sim.timestep, tenant_id=tenant_id)
                 allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
                 if not allowed:
@@ -37,6 +45,7 @@ class _ServiceAttemptMixin:
                         None,
                     )
                     return
+                self._admission_admitted[tenant] += 1
 
         from simulator.runtime.service import _SrvRetryCtx  # local import avoids cycle
 

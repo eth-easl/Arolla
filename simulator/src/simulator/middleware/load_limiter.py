@@ -5,7 +5,8 @@ This middleware handles admission control and retry limiting based on
 LoadLimiter policies (circuit breakers, rate limiters, retry budgets).
 """
 
-from typing import Callable
+from collections import defaultdict
+from typing import Callable, Dict
 from simulator.middleware.base import Middleware, AttemptContext
 from simulator.policies.load_limiter import LoadLimiter
 from simulator.policies.retry import RetryContext
@@ -14,32 +15,36 @@ from simulator.policies.retry import RetryContext
 class LoadLimiterMiddleware(Middleware):
     """
     Handles load limiting (circuit breaking, rate limiting, retry budgets).
-    
+
     This middleware:
     1. Records attempt results for state tracking (e.g., circuit breaker state)
     2. Decides whether to allow retries based on limiter state
     3. Can override retry decisions from RetryMiddleware
-    
+    4. Tracks per-tenant retry admission stats (requested vs admitted)
+
     Note: This middleware should typically run AFTER RetryMiddleware in the chain,
     so it can veto retry decisions based on system health.
     """
-    
+
     def __init__(self, limiter: LoadLimiter):
         """
         Create load limiter middleware.
-        
+
         Args:
             limiter: The load limiter policy (circuit breaker, rate limiter, etc.)
         """
         self.limiter = limiter
-    
+        # Per-tenant retry admission tracking
+        self._retry_requested: Dict[str, int] = defaultdict(int)
+        self._retry_admitted: Dict[str, int] = defaultdict(int)
+
     def process_attempt(
-        self, 
-        ctx: AttemptContext, 
+        self,
+        ctx: AttemptContext,
         next_fn: Callable[[AttemptContext], None]
     ) -> None:
         """Process attempt and apply load limiting"""
-        
+
         # Record result for state tracking (circuit breakers, budgets, etc.)
         if hasattr(self.limiter, 'add_result'):
             self.limiter.add_result(
@@ -54,24 +59,46 @@ class LoadLimiterMiddleware(Middleware):
             next_fn(ctx)
             return
 
+        # Client wants to retry — track the request
+        tenant = ctx.tenant_id or '__global__'
+        self._retry_requested[tenant] += 1
+
         # Check if limiter allows retry (may consume a token from budget)
         retry_ctx = RetryContext(
             attempt=ctx.attempt_number, now=ctx.end_time, tenant_id=ctx.tenant_id,
         )
         limiter_allows_retry, limiter_delay = self.limiter.next_delay(retry_ctx)
-        
+
         if not limiter_allows_retry:
             # Limiter blocks retry (e.g., circuit breaker open, budget exhausted)
             ctx.should_retry = False
             ctx.metadata['limiter_blocked'] = True
             ctx.metadata['limiter_reason'] = self._get_limiter_reason()
-        elif limiter_delay > ctx.retry_delay:
-            # Limiter allows retry but with longer delay (e.g., rate limiting)
-            ctx.retry_delay = limiter_delay
-            ctx.metadata['limiter_delay_applied'] = True
-        
+        else:
+            # Limiter admits the retry
+            self._retry_admitted[tenant] += 1
+            if limiter_delay > ctx.retry_delay:
+                # Limiter allows retry but with longer delay (e.g., rate limiting)
+                ctx.retry_delay = limiter_delay
+                ctx.metadata['limiter_delay_applied'] = True
+
         # Pass to next middleware
         next_fn(ctx)
+
+    def get_admission_stats(self) -> Dict[str, Dict[str, int]]:
+        """Return per-tenant retry admission stats.
+
+        Returns:
+            Dict mapping tenant_id -> {'requested': N, 'admitted': M}
+        """
+        tenants = set(self._retry_requested) | set(self._retry_admitted)
+        return {
+            tenant: {
+                'requested': self._retry_requested[tenant],
+                'admitted': self._retry_admitted[tenant],
+            }
+            for tenant in tenants
+        }
     
     def _get_limiter_reason(self) -> str:
         """Get human-readable reason for limiter blocking retry"""

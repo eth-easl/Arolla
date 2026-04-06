@@ -92,6 +92,8 @@ class ServiceRuntime(
         return self.dependencies[0] if self.dependencies else None
 
     def bind(self, seed: Optional[int] = None, record_events: bool = False):
+        from collections import defaultdict
+
         self.in_flight = 0
         self.queue.clear()
         self._seq = 0
@@ -99,9 +101,28 @@ class ServiceRuntime(
         self._record_events = record_events
         self._events = []
         self._rng = random.Random(seed if seed is not None else 0)
+        # Pre-queue admission counters (used by _ServiceAttemptMixin.submit_request)
+        self._admission_requested = defaultdict(int)
+        self._admission_admitted = defaultdict(int)
         return self
 
     @property
     def events(self) -> List[tuple]:
         """(timestamp_ns, latency_ns, success, drop_reason, queue_size, attempt_num, is_retry)."""
         return self._events
+
+    def get_admission_stats(self) -> dict:
+        """Get per-tenant retry admission stats from pre-queue admission check.
+
+        Returns dict mapping tenant_id -> {'requested': N, 'admitted': M},
+        or empty dict if no load limiter is configured.
+        """
+        if not hasattr(self, '_admission_requested'):
+            return {}
+        result = {}
+        for tenant in self._admission_requested:
+            result[tenant] = {
+                'requested': self._admission_requested[tenant],
+                'admitted': self._admission_admitted.get(tenant, 0),
+            }
+        return result
