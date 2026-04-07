@@ -78,8 +78,22 @@ start_clients() {
       ${profiles_arg:+--profiles \"${profiles_arg}\"} \
       --output-dir \"${REMOTE_METRICS_DIR}\" \
       > \"${REMOTE_LOG_FILE}\" 2>&1 < /dev/null &
-    echo \$! > \"${REMOTE_PID_FILE}\"
-    echo \"started pid=\$(cat \"${REMOTE_PID_FILE}\")\"
+    pid=\$!
+    echo \$pid > \"${REMOTE_PID_FILE}\"
+
+    # Liveness check: traffic_gen.py can exit immediately on bad config
+    # (no profiles selected, missing fields, parse errors, etc.). nohup
+    # captures the PID before exit, so without this check the orchestrator
+    # would happily wait through a multi-minute experiment with no traffic.
+    sleep 2
+    if ! kill -0 \$pid 2>/dev/null; then
+      echo \"ERROR: traffic_gen.py exited within 2s of launch (pid=\$pid)\" >&2
+      echo \"--- last 30 lines of \${REMOTE_LOG_FILE} ---\" >&2
+      tail -n 30 \"${REMOTE_LOG_FILE}\" >&2 || echo \"(log unreadable)\" >&2
+      rm -f \"${REMOTE_PID_FILE}\"
+      exit 1
+    fi
+    echo \"started pid=\$pid\"
   '"
 }
 
