@@ -53,6 +53,15 @@ SCENARIO="sustained-failure"
 POLICIES_CSV="no-control,circuit-breaker,envoy-retry-budget,arolla"
 CLIENT_PROFILES=""          # empty → run all profiles from profiles/; else a CSV subset
 FAULT_MANIFEST_OVERRIDE=""  # empty → use scenario's default; else override
+
+# CPU-stress trigger (chaos-mesh StressChaos). When CPU_STRESS_TARGET is set,
+# the trigger replaces the Istio fault manifest during the fault window.
+# Used to reproduce Huang et al. "Metastable Failures in the Wild" (OSDI '22)
+# Figure 5: a transient CPU restriction on a stateful component that pushes
+# the system from vulnerable into metastable.
+CPU_STRESS_TARGET=""        # empty → no CPU stress; else workload label (e.g. "cartservice")
+CPU_STRESS_LOAD=80          # % CPU per stress worker (paper Fig 5: 80%=metastable, 78%=recovers)
+CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 # Per-run output goes under outputs/prototype/runs/<timestamp>/ at the repo
 # root. This sits alongside outputs/{basic,client_count,metastable}/ which
 # hold simulator plots, namespaced under outputs/prototype/ to avoid collision.
@@ -131,6 +140,22 @@ Options:
                                   faults/cartservice-50pct.yaml (relative
                                                   to manifests/online-boutique/)
                                 Default: whatever the scenario config sets.
+      --cpu-stress-target <name>  Apply a chaos-mesh StressChaos to the
+                                given workload (pod label app=<name>) during
+                                the fault window, INSTEAD OF the Istio fault
+                                manifest. Used to reproduce Huang et al.
+                                OSDI '22 Figure 5 metastability triggers.
+                                Requires chaos-mesh installed cluster-wide.
+                                Common target: cartservice
+                                Default: (no CPU stress; use fault manifest)
+      --cpu-stress-load <pct>     CPU% to consume per stress worker.
+                                Paper Figure 5: 80% is metastable for their
+                                MongoDB setup; 78% recovers cleanly. The
+                                threshold for online-boutique will differ —
+                                sweep this value to find it.
+                                Default: ${CPU_STRESS_LOAD}
+      --cpu-stress-workers <n>    Number of concurrent stress-ng workers.
+                                Default: ${CPU_STRESS_WORKERS}
   -o, --output <dir>            Output root directory.
                                 Default: ${OUTPUT_ROOT}/<timestamp>
       --warmup <sec>            Override warmup duration
@@ -159,6 +184,9 @@ while (( $# > 0 )); do
     -p|--policies)        POLICIES_CSV="$2"; shift 2 ;;
     -c|--client-profiles) CLIENT_PROFILES="$2"; shift 2 ;;
     -F|--fault-manifest)  FAULT_MANIFEST_OVERRIDE="$2"; shift 2 ;;
+    --cpu-stress-target)  CPU_STRESS_TARGET="$2"; shift 2 ;;
+    --cpu-stress-load)    CPU_STRESS_LOAD="$2"; shift 2 ;;
+    --cpu-stress-workers) CPU_STRESS_WORKERS="$2"; shift 2 ;;
     -o|--output)          OUTPUT_ROOT="$2"; shift 2 ;;
     --warmup)        WARMUP_SEC="$2"; shift 2 ;;
     --prefault)      PREFAULT_SEC="$2"; shift 2 ;;
@@ -225,6 +253,21 @@ fi
 SERVICE_RETRIES_PATH="${PROTO_DIR}/${FAULT_DIR_REL}/service-retries.yaml"
 [[ -f "${SERVICE_RETRIES_PATH}" ]] || warn "service-retries.yaml not found at ${SERVICE_RETRIES_PATH} — fault removal will use kubectl delete instead of apply-to-restore"
 
+# CPU-stress template path. Only consulted when --cpu-stress-target is set;
+# the runner sed-substitutes the placeholders and pipes the result into
+# kubectl apply at fault_start.
+CHAOS_CPU_STRESS_TEMPLATE="${PROTO_DIR}/${FAULT_DIR_REL}/chaos/cart-cpu-stress.yaml"
+CHAOS_STRESS_RESOURCE="stresschaos/experiment-cpu-stress"
+
+# Validation: --cpu-stress-target requires a non-zero fault window (the
+# trigger fires during the fault phase).
+if [[ -n "${CPU_STRESS_TARGET}" ]]; then
+  (( FAULT_SEC > 0 )) || \
+    err "--cpu-stress-target requires --fault > 0 (the trigger fires during the fault window)"
+  [[ -f "${CHAOS_CPU_STRESS_TEMPLATE}" ]] || \
+    err "chaos template not found: ${CHAOS_CPU_STRESS_TEMPLATE}"
+fi
+
 # --------------------------------------------------------------------------- #
 # Resolve policies and output directory
 # --------------------------------------------------------------------------- #
@@ -259,6 +302,11 @@ Experiment plan
 ================================================================================
 Scenario        : ${SCENARIO_TITLE:-${SCENARIO}}
 Fault manifest  : ${FAULT_DIR_REL}/${SCENARIO_FAULT_MANIFEST}
+Trigger         : $(if [[ -n "${CPU_STRESS_TARGET}" ]]; then
+    echo "chaos-mesh CPU stress (target=${CPU_STRESS_TARGET}, load=${CPU_STRESS_LOAD}%, workers=${CPU_STRESS_WORKERS}, duration=${FAULT_SEC}s)"
+  else
+    echo "Istio fault manifest"
+  fi)
 Policies (${TOTAL_POLICIES})   : ${POLICIES[*]}
 Client profiles : ${CLIENT_PROFILES:-(all profiles from profiles/)}
 Output dir      : ${RUN_DIR}
@@ -300,6 +348,30 @@ if [[ -n "${CLIENT_PROFILES}" ]]; then
   CLIENT_PROFILES_JSON="[$(printf '"%s",' "${_cp_arr[@]}" | sed 's/,$//')]"
 fi
 
+# Trigger descriptor — captures whether the fault window applied an Istio
+# fault manifest or a chaos-mesh CPU stress (mutually exclusive).
+if [[ -n "${CPU_STRESS_TARGET}" ]]; then
+  TRIGGER_JSON=$(cat <<EOF
+  "trigger": {
+    "kind": "cpu_stress",
+    "target": "${CPU_STRESS_TARGET}",
+    "load_pct": ${CPU_STRESS_LOAD},
+    "workers": ${CPU_STRESS_WORKERS},
+    "duration_sec": ${FAULT_SEC}
+  }
+EOF
+)
+else
+  TRIGGER_JSON=$(cat <<EOF
+  "trigger": {
+    "kind": "istio_fault",
+    "manifest": "${SCENARIO_FAULT_MANIFEST}",
+    "duration_sec": ${FAULT_SEC}
+  }
+EOF
+)
+fi
+
 cat > "${RUN_DIR}/experiment.json" <<EOF
 {
   "scenario": "${SCENARIO}",
@@ -312,6 +384,7 @@ cat > "${RUN_DIR}/experiment.json" <<EOF
   "fault_sec": ${FAULT_SEC},
   "recovery_sec": ${RECOVERY_SEC},
   "cooldown_sec": ${COOLDOWN_SEC},
+${TRIGGER_JSON},
   "run_ts": "${RUN_TS}",
   "cluster": {
     "master": "${MASTER_HOST}",
@@ -335,6 +408,9 @@ cleanup() {
   else
     kubectl delete --ignore-not-found -f "${FAULT_MANIFEST_PATH}" >/dev/null 2>&1 || true
   fi
+  # Best-effort: clean up any lingering chaos-mesh CPU-stress resource.
+  # No-op if chaos-mesh isn't installed or the resource doesn't exist.
+  kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null 2>&1 || true
   ssh_client "if [[ -f ${REMOTE_PID_FILE} ]]; then kill \$(cat ${REMOTE_PID_FILE}) 2>/dev/null || true; rm -f ${REMOTE_PID_FILE}; fi" >/dev/null 2>&1 || true
   exit "${code}"
 }
@@ -424,6 +500,8 @@ run_single() {
   else
     kubectl delete --ignore-not-found -f "${FAULT_MANIFEST_PATH}" >/dev/null 2>&1 || true
   fi
+  # Best-effort: drop any lingering chaos-mesh CPU-stress from a prior run.
+  kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null 2>&1 || true
   ssh_client "rm -rf ${REMOTE_METRICS_DIR} ${REMOTE_PID_FILE} ${REMOTE_LOG_FILE}; mkdir -p ${REMOTE_METRICS_DIR}"
 
   # ---- Switch policy ----
@@ -469,28 +547,48 @@ run_single() {
   # ---- Fault window (skipped entirely when FAULT_SEC=0) ----
   # When --fault 0 is passed we're running a clean baseline with no fault
   # injection at all — the "fault" and "recovery" labels become purely
-  # nominal phase markers in the timeline, but no VirtualService ever gets
-  # perturbed. This is the recommended way to measure a healthy baseline.
+  # nominal phase markers in the timeline, but nothing ever gets perturbed.
+  # This is the recommended way to measure a healthy baseline.
+  #
+  # When --cpu-stress-target is set, the trigger is a chaos-mesh StressChaos
+  # applied to one pod of that workload, INSTEAD OF the Istio fault manifest.
+  # This is the OSDI '22 metastability methodology — a transient CPU
+  # restriction on a stateful component, applied for FAULT_SEC seconds.
   if (( FAULT_SEC > 0 )); then
-    # ---- Inject fault ----
-    phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
-    kubectl apply -f "${FAULT_MANIFEST_PATH}" >/dev/null
-    wait_until "${t_fault_end}"
+    if [[ -n "${CPU_STRESS_TARGET}" ]]; then
+      # ---- Trigger A: chaos-mesh CPU stress ----
+      phase "[${policy}] applying CPU stress: target=${CPU_STRESS_TARGET} load=${CPU_STRESS_LOAD}% workers=${CPU_STRESS_WORKERS} duration=${FAULT_SEC}s"
+      sed -e "s|__TARGET__|${CPU_STRESS_TARGET}|g" \
+          -e "s|__LOAD__|${CPU_STRESS_LOAD}|g" \
+          -e "s|__WORKERS__|${CPU_STRESS_WORKERS}|g" \
+          -e "s|__DURATION__|${FAULT_SEC}|g" \
+          "${CHAOS_CPU_STRESS_TEMPLATE}" \
+        | kubectl apply -f -
+      wait_until "${t_fault_end}"
 
-    # ---- Remove fault ----
-    # Apply the base routing config (chain retries, no abort/timeout) which
-    # has the same VirtualService names as the fault manifest, so kubectl
-    # apply replaces the faulted entries in-place. Falling back to `delete`
-    # would also remove the chain-retry config and produce an unrealistic
-    # recovery.
-    phase "[${policy}] remove fault (restore base routing)"
-    if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-      kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null
+      phase "[${policy}] removing CPU stress (chaos-mesh auto-cleanup is a backstop)"
+      kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null
     else
-      kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
+      # ---- Trigger B: Istio fault manifest ----
+      phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
+      kubectl apply -f "${FAULT_MANIFEST_PATH}" >/dev/null
+      wait_until "${t_fault_end}"
+
+      # ---- Remove fault ----
+      # Apply the base routing config (chain retries, no abort/timeout)
+      # which has the same VirtualService names as the fault manifest, so
+      # kubectl apply replaces the faulted entries in-place. Falling back
+      # to `delete` would also remove the chain-retry config and produce
+      # an unrealistic recovery.
+      phase "[${policy}] remove fault (restore base routing)"
+      if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
+        kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null
+      else
+        kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
+      fi
     fi
   else
-    log "[${policy}] fault window = 0s, skipping fault injection (clean baseline run)"
+    log "[${policy}] fault window = 0s, skipping trigger (clean baseline run)"
   fi
 
   # ---- Recovery ----

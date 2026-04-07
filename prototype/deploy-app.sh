@@ -147,6 +147,8 @@ upload_manifests() {
     # part of the base app:
     #   policies/  — retry-admission policies, switched by deploy-policy.sh
     #   faults/    — fault-injection manifests, toggled by run-experiment.sh
+    #   chaos/     — chaos-mesh templates (e.g. CPU stress), toggled by
+    #                run-experiment.sh's --cpu-stress-target flag
     # Uploading these would cause `kubectl apply -R` below to install every
     # policy + fault at once, which is never what we want during app deploy.
     local sub_yaml_found=0
@@ -155,7 +157,7 @@ upload_manifests() {
         local dirname
         dirname=$(basename "$subdir")
         case "${dirname}" in
-            policies|faults)
+            policies|faults|chaos)
                 info "Skipping experiment-infrastructure subdir: ${dirname}/ (managed by deploy-policy.sh / run-experiment.sh)"
                 continue
                 ;;
