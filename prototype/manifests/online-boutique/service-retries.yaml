@@ -95,7 +95,7 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 23ms      # measured p99 = 2.1ms (C# + Redis hop)
+      perTryTimeout: 50ms
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:
@@ -190,7 +190,7 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 8ms      # not in calibration_report; estimate ~5ms p99 (Go, in-memory)
+      perTryTimeout: 50ms  
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:
