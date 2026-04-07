@@ -1,0 +1,66 @@
+# Baseline 2: Circuit breaker (Envoy outlier detection, failure-rate mode).
+#
+# Paper §6.1: "Envoy's per-service outlier detection with ejection threshold
+# θ = 50% error rate and base ejection time 5 s."
+#
+# Istio's DestinationRule.outlierDetection only exposes consecutive-error
+# fields (consecutive5xxErrors, consecutiveGatewayErrors, interval,
+# baseEjectionTime, maxEjectionPercent, minHealthPercent). It does NOT expose
+# Envoy's `failure_percentage_threshold`, which is the actual "eject when
+# error rate ≥ θ%" mechanism the paper describes.
+#
+# To match the paper we patch Envoy directly via EnvoyFilter (same approach
+# envoy-retry-budget.yaml uses). The MERGE patch sets
+# cluster.outlier_detection.* fields on every SIDECAR_OUTBOUND cluster.
+#
+# Key fields (see envoy.config.cluster.v3.OutlierDetection):
+#   failure_percentage_threshold          → θ (paper: 50)
+#   enforcing_failure_percentage          → 100 = enforce (Envoy default: 0 = disabled)
+#   failure_percentage_minimum_hosts      → below this host count, ejection is skipped
+#   failure_percentage_request_volume     → minimum per-host requests in the window
+#   interval                              → evaluation window
+#   base_ejection_time                    → paper: 5s
+#   max_ejection_percent                  → cap on simultaneous ejections
+#
+# Usage:
+#   kubectl delete -f policies/arolla.yaml             --ignore-not-found
+#   kubectl delete -f policies/envoy-retry-budget.yaml --ignore-not-found
+#   kubectl delete -f policies/no-control.yaml         --ignore-not-found
+#   kubectl apply  -f policies/circuit-breaker.yaml
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: arolla-baseline-circuit-breaker
+  namespace: online-boutique
+spec:
+  configPatches:
+  - applyTo: CLUSTER
+    match:
+      context: SIDECAR_OUTBOUND
+    patch:
+      operation: MERGE
+      value:
+        outlier_detection:
+          # Trip when failure rate ≥ 50% (paper: θ = 50%).
+          failure_percentage_threshold:
+            value: 50
+          # Envoy defaults enforcing_failure_percentage to 0 (disabled).
+          # Set to 100 so the threshold actually ejects hosts.
+          enforcing_failure_percentage:
+            value: 100
+          # A single host can trip the breaker (Online Boutique typically
+          # has 1 replica per service in the default deployment).
+          failure_percentage_minimum_hosts:
+            value: 1
+          # Require at least 10 requests in the evaluation window before
+          # considering ejection — prevents tripping on a single early error.
+          failure_percentage_request_volume:
+            value: 10
+          interval: 1s            # evaluate every 1s
+          base_ejection_time: 5s  # paper: 5s
+          max_ejection_percent: 100
+          # Keep the consecutive-5xx path off so only the failure-percentage
+          # path is in play (matches what the paper describes).
+          enforcing_consecutive_5xx:
+            value: 0
