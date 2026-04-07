@@ -4,20 +4,28 @@ External Online Boutique traffic generator (runs on CLIENT_HOST).
 
 Profiles live as JSON files in profiles/. Each profile defines:
 
-  * A fleet of `count` worker instances sending requests at `rate_rps_per_client`.
-  * A weighted mix of request types (single requests or multi-step workflows).
-  * A SKU pool — `{sku}` placeholders in paths/bodies are substituted per pick.
-  * A retry policy (max retries, backoff, retry-on-status list).
+  * A "mode" — "closed-loop" (default) or "open-loop"
+  * A weighted mix of request types (single requests or multi-step workflows)
+  * A SKU pool — `{sku}` placeholders in paths/bodies are substituted per pick
+  * A retry policy (max retries, backoff, retry-on-status list)
 
-Each worker loops forever:
-  1. Weighted-random pick one entry from `requests`.
-  2. Generate a fresh session UUID (shared across a workflow's steps) and a
-     fresh SKU from `sku_pool`.
-  3. Execute the request (or workflow) with the profile's retry policy.
-     Each attempt sends `X-Attempt-Number` (counter starts at 1, increments
-     per retry), `X-Request-ID`, `X-Retry-Client-Type`, `X-Retry-Client-Worker`,
-     and `Cookie: shop_session-id=<uuid>`.
-  4. Sleep to hit the target RPS and repeat.
+Two load-generation modes:
+
+  closed-loop (default):
+    `count` workers, each with its own persistent HTTP/1.1 connection.
+    Each worker loops: pick request → execute (with retries) → sleep to
+    hit `rate_rps_per_client` → repeat. Offered RPS is bounded by
+    `count / per-request-latency`. Self-throttles when the backend slows.
+    Schema fields: count, rate_rps_per_client.
+
+  open-loop:
+    One firer coroutine fires requests on a wall-clock schedule, regardless
+    of whether previous requests have completed. In-flight count grows
+    unbounded if the backend slows (capped by `max_inflight` for safety).
+    A bounded `pool_size` of HTTP connections is shared by all in-flight
+    tasks via async lease/return. Offered RPS is exactly `rate_rps`,
+    matching real production traffic semantics.
+    Schema fields: rate_rps, pool_size, max_inflight (optional).
 
 One CSV row is written per HTTP attempt. Schema:
 
@@ -48,24 +56,24 @@ from typing import Any, Optional
 # Concurrent HTTP calls are issued through asyncio.to_thread(), which uses the
 # loop's default ThreadPoolExecutor. That defaults to min(32, cpu_count+4) —
 # typically ~12 on a d430 — which caps real parallelism regardless of how many
-# workers a profile requests. Bump it so `count: 50` actually means 50 parallel
-# requests and not "queue 50 through 12 threads".
-DEFAULT_HTTP_THREAD_POOL_SIZE = 256
+# workers a profile requests. Bump it so high pool_size or count values
+# actually produce parallel HTTP calls.
+DEFAULT_HTTP_THREAD_POOL_SIZE = 1024
 
 
 # ---------------------------------------------------------------------------
-# Persistent HTTP connection per worker
+# Persistent HTTP connection (one per worker in closed-loop, pooled in open-loop)
 # ---------------------------------------------------------------------------
 #
 # urllib.request.urlopen does not reuse connections — every call does a fresh
 # TCP handshake (+ optional TLS). Under load that adds hundreds of ms per
 # attempt and saturates the kernel conntrack/tw_reuse tables. We fix this by
-# holding one `http.client.HTTPConnection` per worker with HTTP keep-alive.
+# holding `http.client.HTTPConnection` instances with HTTP keep-alive.
 #
-# This class is NOT thread-safe. Each worker owns its own instance; we rely on
-# the fact that a single asyncio worker only ever has one outstanding
-# to_thread() at a time, so the connection is never touched by two threads
-# concurrently.
+# This class is NOT thread-safe. In closed-loop, each worker owns its own
+# instance. In open-loop, the ConnectionPool below ensures only one coroutine
+# holds a session at a time (via asyncio.Queue), so within asyncio.to_thread
+# the connection is also accessed by only one thread.
 class KeepAliveSession:
     """One persistent HTTP/1.1 connection. Reconnects on error."""
 
@@ -136,13 +144,76 @@ class KeepAliveSession:
 
 
 # ---------------------------------------------------------------------------
+# ConnectionPool — bounded async pool of KeepAliveSessions for open-loop mode
+# ---------------------------------------------------------------------------
+#
+# In open-loop mode, the firer dispatches requests at a fixed wall-clock rate
+# regardless of how many are already in flight. We don't want each request to
+# open a fresh TCP connection (that would saturate the gateway's connection
+# pool and the kernel's ephemeral-port range), so requests share a bounded
+# pool of persistent HTTP/1.1 connections.
+#
+# acquire() blocks if all sessions are checked out, which is exactly the
+# back-pressure behavior we want — under cluster overload, the in-flight
+# count grows because requests pile up waiting for a connection slot.
+class ConnectionPool:
+    """Bounded async pool of KeepAliveSessions, leased per request."""
+
+    def __init__(self, host: str, port: int, size: int, timeout_s: float) -> None:
+        self.host = host
+        self.port = port
+        self.size = size
+        self.timeout_s = timeout_s
+        self._pool: asyncio.Queue[Optional[KeepAliveSession]] = asyncio.Queue(maxsize=size)
+        # Pre-fill with placeholders. The actual KeepAliveSession is created
+        # lazily on first acquire so we don't open all `size` TCP connections
+        # at startup before any traffic is fired.
+        for _ in range(size):
+            self._pool.put_nowait(None)
+
+    async def acquire(self) -> KeepAliveSession:
+        """Block until a session is available. Lazily create if first time."""
+        slot = await self._pool.get()
+        if slot is None:
+            slot = KeepAliveSession(self.host, self.port, self.timeout_s)
+        return slot
+
+    def release(self, session: KeepAliveSession) -> None:
+        """Return a session to the pool. Always succeeds (queue is bounded but pre-allocated)."""
+        try:
+            self._pool.put_nowait(session)
+        except asyncio.QueueFull:
+            # Should never happen — we put exactly `size` items in __init__
+            # and never add more. If it does, something is leaking. Drop
+            # the session safely.
+            session.close()
+
+    async def close_all(self) -> None:
+        """Drain the pool and close all open sessions."""
+        for _ in range(self.size):
+            try:
+                slot = self._pool.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if slot is not None:
+                slot.close()
+
+
+# ---------------------------------------------------------------------------
 # Profile loading + normalization
 # ---------------------------------------------------------------------------
 
 def normalize_profile(p: dict[str, Any]) -> dict[str, Any]:
     """Backfill defaults and convert legacy `paths:` profiles to the new schema."""
+    p.setdefault("mode", "closed-loop")
+    # Closed-loop fields:
     p.setdefault("count", 1)
     p.setdefault("rate_rps_per_client", 1.0)
+    # Open-loop fields:
+    p.setdefault("rate_rps", 0)            # 0 → not configured
+    p.setdefault("pool_size", 0)            # 0 → not configured
+    p.setdefault("max_inflight", 0)         # 0 → unbounded (with safety warning)
+    # Shared fields:
     p.setdefault("timeout_s", 2.0)
     p.setdefault("retries", 0)
     p.setdefault("backoff", {})
@@ -270,7 +341,7 @@ async def append_csv(line: str, out_csv: Path, lock: asyncio.Lock) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Worker: one request attempt (with retries) → CSV rows
+# Core execution: one HTTP step with retries → CSV rows
 # ---------------------------------------------------------------------------
 
 async def execute_step(
@@ -290,6 +361,9 @@ async def execute_step(
     """
     Run a single request step with the profile's retry policy.
     Returns True if the final attempt was ok (so a workflow can advance).
+
+    The session is provided by the caller — closed-loop workers pass their
+    long-lived session, open-loop firer passes a session leased from the pool.
     """
     name = str(profile.get("name", "client"))
     max_retries = int(profile.get("retries", 0))
@@ -371,6 +445,76 @@ async def execute_step(
     return final_ok
 
 
+# ---------------------------------------------------------------------------
+# execute_logical_request — pick from mix, run step or workflow
+#
+# This is the unit of work shared by both modes. Closed-loop workers call it
+# in a loop with their own session; the open-loop firer calls it as a
+# fire-and-forget task with a leased pool session.
+# ---------------------------------------------------------------------------
+
+async def execute_logical_request(
+    *,
+    profile: dict[str, Any],
+    worker_idx: int,
+    session: KeepAliveSession,
+    host_header: str,
+    headers_base: dict[str, str],
+    requests_mix: list,
+    weights: list,
+    sku_pool: list,
+    out_csv: Path,
+    csv_lock: asyncio.Lock,
+    stop_event: asyncio.Event,
+) -> None:
+    # Weighted pick from the request mix.
+    picked = random.choices(requests_mix, weights=weights, k=1)[0]
+
+    # Fresh shop session per top-level pick — workflows share it across steps,
+    # single requests just use it once. Frontend's `shop_session-id` cookie
+    # identifies the cart.
+    session_id = str(uuid.uuid4())
+    sku = random.choice(sku_pool) if sku_pool else ""
+
+    if "workflow" in picked:
+        # Sequential steps sharing session+sku. Abort the workflow if any
+        # step fails (can't checkout without successful add-to-cart).
+        for step in picked["workflow"]:
+            step_ok = await execute_step(
+                step=step,
+                profile=profile,
+                worker_idx=worker_idx,
+                session=session,
+                host_header=host_header,
+                headers_base=headers_base,
+                session_id=session_id,
+                sku=sku,
+                out_csv=out_csv,
+                csv_lock=csv_lock,
+                stop_event=stop_event,
+            )
+            if not step_ok or stop_event.is_set():
+                break
+    else:
+        await execute_step(
+            step=picked,
+            profile=profile,
+            worker_idx=worker_idx,
+            session=session,
+            host_header=host_header,
+            headers_base=headers_base,
+            session_id=session_id,
+            sku=sku,
+            out_csv=out_csv,
+            csv_lock=csv_lock,
+            stop_event=stop_event,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Closed-loop worker — owns one session, loops forever
+# ---------------------------------------------------------------------------
+
 async def client_worker(
     profile: dict[str, Any],
     worker_idx: int,
@@ -406,48 +550,19 @@ async def client_worker(
         while not stop_event.is_set():
             loop_started = time.time()
 
-            # Weighted pick from the request mix.
-            picked = random.choices(requests_mix, weights=weights, k=1)[0]
-
-            # Fresh shop session per top-level pick — workflows share it, single
-            # requests just use it once. Frontend's `shop_session-id` cookie
-            # identifies the cart.
-            session_id = str(uuid.uuid4())
-            sku = random.choice(sku_pool) if sku_pool else ""
-
-            if "workflow" in picked:
-                # Sequential steps sharing session+sku. Abort the workflow if
-                # any step fails (can't checkout without successful add-to-cart).
-                for step in picked["workflow"]:
-                    step_ok = await execute_step(
-                        step=step,
-                        profile=profile,
-                        worker_idx=worker_idx,
-                        session=session,
-                        host_header=host_header,
-                        headers_base=headers_base,
-                        session_id=session_id,
-                        sku=sku,
-                        out_csv=out_csv,
-                        csv_lock=csv_lock,
-                        stop_event=stop_event,
-                    )
-                    if not step_ok or stop_event.is_set():
-                        break
-            else:
-                await execute_step(
-                    step=picked,
-                    profile=profile,
-                    worker_idx=worker_idx,
-                    session=session,
-                    host_header=host_header,
-                    headers_base=headers_base,
-                    session_id=session_id,
-                    sku=sku,
-                    out_csv=out_csv,
-                    csv_lock=csv_lock,
-                    stop_event=stop_event,
-                )
+            await execute_logical_request(
+                profile=profile,
+                worker_idx=worker_idx,
+                session=session,
+                host_header=host_header,
+                headers_base=headers_base,
+                requests_mix=requests_mix,
+                weights=weights,
+                sku_pool=sku_pool,
+                out_csv=out_csv,
+                csv_lock=csv_lock,
+                stop_event=stop_event,
+            )
 
             elapsed = time.time() - loop_started
             sleep_s = interval - elapsed
@@ -458,6 +573,164 @@ async def client_worker(
                     pass
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# Open-loop firer — fixed-schedule fire-and-forget, shared connection pool
+# ---------------------------------------------------------------------------
+
+async def _open_loop_one(
+    *,
+    profile: dict[str, Any],
+    fire_idx: int,
+    pool: ConnectionPool,
+    host_header: str,
+    headers_base: dict[str, str],
+    requests_mix: list,
+    weights: list,
+    sku_pool: list,
+    out_csv: Path,
+    csv_lock: asyncio.Lock,
+    stop_event: asyncio.Event,
+    inflight_sem: Optional[asyncio.Semaphore],
+) -> None:
+    """One fire-and-forget logical request: lease a session, run, return it."""
+    if stop_event.is_set():
+        return
+    # Hold the in-flight semaphore (if any) for the entire duration of the
+    # request, so it actually bounds concurrency rather than just gating dispatch.
+    if inflight_sem is not None:
+        if inflight_sem.locked():
+            # Client itself is overloaded — drop this request and log it.
+            await append_csv(
+                f"{time.time():.6f},{profile.get('name','client')},{fire_idx},"
+                f"client-overload,client-overload,DROP,/,1,0,-1,0,0.000000\n",
+                out_csv, csv_lock,
+            )
+            return
+        await inflight_sem.acquire()
+    try:
+        session = await pool.acquire()
+        try:
+            await execute_logical_request(
+                profile=profile,
+                worker_idx=fire_idx,
+                session=session,
+                host_header=host_header,
+                headers_base=headers_base,
+                requests_mix=requests_mix,
+                weights=weights,
+                sku_pool=sku_pool,
+                out_csv=out_csv,
+                csv_lock=csv_lock,
+                stop_event=stop_event,
+            )
+        finally:
+            pool.release(session)
+    finally:
+        if inflight_sem is not None:
+            inflight_sem.release()
+
+
+async def open_loop_firer(
+    profile: dict[str, Any],
+    target_host: str,
+    target_port: int,
+    host_header: str,
+    out_csv: Path,
+    csv_lock: asyncio.Lock,
+    stop_event: asyncio.Event,
+) -> None:
+    """
+    Fire requests on a wall-clock schedule at exactly `rate_rps`, regardless
+    of whether prior requests have completed. Each fire is a fire-and-forget
+    asyncio task that leases a session from a shared pool, runs, and returns.
+    """
+    name = str(profile.get("name", "client"))
+    rate_rps = float(profile.get("rate_rps", 0) or 0)
+    pool_size = int(profile.get("pool_size", 0) or 0)
+    max_inflight = int(profile.get("max_inflight", 0) or 0)
+    timeout_s = float(profile.get("timeout_s", 2.0))
+    requests_mix = list(profile.get("requests", []))
+    weights = [float(r.get("weight", 1)) for r in requests_mix]
+    sku_pool = list(profile.get("sku_pool", []))
+
+    if rate_rps <= 0:
+        print(f"[err] profile {name}: open-loop mode requires rate_rps > 0",
+              file=sys.stderr)
+        return
+    if pool_size <= 0:
+        print(f"[err] profile {name}: open-loop mode requires pool_size > 0",
+              file=sys.stderr)
+        return
+    if not requests_mix:
+        print(f"[warn] profile {name}: no requests, firer idle", file=sys.stderr)
+        return
+
+    headers_base = {
+        "User-Agent": f"retry-study-client/{name}",
+        "X-Retry-Client-Type": name,
+        "X-Retry-Client-Worker": "open-loop",
+    }
+
+    pool = ConnectionPool(target_host, target_port, pool_size, timeout_s)
+    inflight_sem: Optional[asyncio.Semaphore] = (
+        asyncio.Semaphore(max_inflight) if max_inflight > 0 else None
+    )
+
+    interval = 1.0 / rate_rps
+    next_fire = time.monotonic()
+    fire_idx = 0
+    fired_tasks: list[asyncio.Task] = []
+
+    try:
+        while not stop_event.is_set():
+            now = time.monotonic()
+            sleep_for = next_fire - now
+            if sleep_for > 0:
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=sleep_for)
+                    break  # stop requested
+                except asyncio.TimeoutError:
+                    pass
+            # Schedule the next fire BEFORE dispatching, so the schedule
+            # doesn't drift if dispatch takes nontrivial time.
+            next_fire += interval
+            fire_idx += 1
+
+            task = asyncio.create_task(_open_loop_one(
+                profile=profile,
+                fire_idx=fire_idx,
+                pool=pool,
+                host_header=host_header,
+                headers_base=headers_base,
+                requests_mix=requests_mix,
+                weights=weights,
+                sku_pool=sku_pool,
+                out_csv=out_csv,
+                csv_lock=csv_lock,
+                stop_event=stop_event,
+                inflight_sem=inflight_sem,
+            ))
+            fired_tasks.append(task)
+
+            # Periodically reap completed tasks so the list doesn't grow forever.
+            if fire_idx % 1000 == 0:
+                fired_tasks = [t for t in fired_tasks if not t.done()]
+    finally:
+        # Wait for in-flight requests to complete (with a hard cap so shutdown
+        # doesn't hang forever).
+        if fired_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*fired_tasks, return_exceptions=True),
+                    timeout=max(5.0, timeout_s * 2),
+                )
+            except asyncio.TimeoutError:
+                for t in fired_tasks:
+                    if not t.done():
+                        t.cancel()
+        await pool.close_all()
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +762,8 @@ async def main_async(args) -> int:
     loop = asyncio.get_running_loop()
 
     # Replace the default ThreadPoolExecutor with a much larger one so high
-    # `count` values in profiles actually produce parallel HTTP calls.
+    # `count` (closed-loop) or `pool_size` (open-loop) values actually produce
+    # parallel HTTP calls.
     loop.set_default_executor(
         concurrent.futures.ThreadPoolExecutor(
             max_workers=DEFAULT_HTTP_THREAD_POOL_SIZE,
@@ -521,11 +795,10 @@ async def main_async(args) -> int:
     csv_lock = asyncio.Lock()
     tasks = []
     for p in profiles:
-        count = int(p.get("count", 1))
-        for i in range(count):
-            tasks.append(asyncio.create_task(client_worker(
+        mode = str(p.get("mode", "closed-loop")).lower()
+        if mode == "open-loop":
+            tasks.append(asyncio.create_task(open_loop_firer(
                 profile=p,
-                worker_idx=i,
                 target_host=target_host,
                 target_port=target_port,
                 host_header=args.host_header or "",
@@ -533,6 +806,23 @@ async def main_async(args) -> int:
                 csv_lock=csv_lock,
                 stop_event=stop_event,
             )))
+        elif mode == "closed-loop":
+            count = int(p.get("count", 1))
+            for i in range(count):
+                tasks.append(asyncio.create_task(client_worker(
+                    profile=p,
+                    worker_idx=i,
+                    target_host=target_host,
+                    target_port=target_port,
+                    host_header=args.host_header or "",
+                    out_csv=out_csv,
+                    csv_lock=csv_lock,
+                    stop_event=stop_event,
+                )))
+        else:
+            print(f"[err] profile {p.get('name')}: unknown mode {mode!r} "
+                  f"(expected 'closed-loop' or 'open-loop')", file=sys.stderr)
+            return 3
 
     print(json.dumps({
         "event": "startup",

@@ -1,61 +1,113 @@
 # Client profiles
 
 Each JSON file in this directory defines one *client type*. At runtime
-`traffic_gen.py` loads all `*.json` files, spawns `count` workers per profile,
-and has each worker loop forever: weighted-pick a request, execute it (with
-retries per the profile's policy), sleep to hit the target RPS, repeat.
+`traffic_gen.py` loads all `*.json` files and spawns load generators
+according to each profile's `mode`. There are two load-generation modes:
 
-## Schema
+| Mode | What it models | When to use |
+|---|---|---|
+| **`closed-loop`** (default) | N patient users, each waits for response before next | Functional tests, latency measurement, capacity finding without overload risk |
+| **`open-loop`** | Fixed-rate firing schedule, fire-and-forget, in-flight grows under overload | Metastability experiments, real production traffic semantics, overload testing |
+
+The two modes share the same request mix, retry policy, and CSV output schema.
+The differences are entirely in *how* requests are dispatched.
+
+## Closed-loop schema
+
+The default. `count` worker tasks, each owning one persistent HTTP/1.1
+connection, each looping `pick → execute → sleep` to target the per-worker rate.
 
 ```json
 {
   "name": "checkout",
   "description": "Human-readable description, optional",
+  "mode": "closed-loop",          // optional; closed-loop is the default
 
-  "count": 3,                     // concurrent workers of this profile
-  "rate_rps_per_client": 0.5,     // per-worker send rate
-  "timeout_s": 3.0,               // per-attempt HTTP timeout
+  "count": 3,                     // concurrent workers (= TCP connections to gateway)
+  "rate_rps_per_client": 0.5,     // per-worker target send rate
+  "timeout_s": 3.0,               // per-HTTP-attempt timeout
 
   "sku_pool": ["OLJCESPC7Z", "..."],     // {sku} in paths/bodies resolves to
                                           // one of these (per top-level pick)
 
-  "requests": [                   // weighted request mix
-    {
-      "name": "home",              // used in the CSV request_type column
-      "weight": 15,                 // relative weight; sums don't need to be 100
-      "method": "GET",
-      "path": "/"
-    },
-    {
-      "name": "add-to-cart",
-      "weight": 20,
-      "method": "POST",
-      "path": "/cart",
-      "body": "product_id={sku}&quantity=1",
-      "content_type": "application/x-www-form-urlencoded"
-    },
-    {
-      "name": "checkout-flow",
-      "weight": 20,
-      "workflow": [               // multi-step, sharing one session cookie
-        { "name": "checkout-add",   "method": "POST", "path": "/cart",
-          "body": "product_id={sku}&quantity=1" },
-        { "name": "checkout-place", "method": "POST", "path": "/cart/checkout",
-          "body": "email=..." }
-      ]
-    }
-  ],
+  "requests": [ /* weighted request mix — see below */ ],
 
-  "retries": 3,                                    // max retries per step
-  "backoff": {                                     // applied between retries
-    "mode": "exponential",                          // "none" | "fixed" | "exponential"
-    "base_s": 0.1,
-    "max_s": 2.0,
-    "jitter": "full"                                // "none" | "full"
-  },
-  "retry_on_status": [500, 502, 503, 504]         // 0 = network error, always retryable
+  "retries": 3,
+  "backoff": { "mode": "exponential", "base_s": 0.1, "max_s": 2.0, "jitter": "full" },
+  "retry_on_status": [0, 500, 502, 503, 504]
 }
 ```
+
+**Properties of closed-loop:**
+
+- Maximum offered RPS = `count × rate_rps_per_client` *only when the system
+  is fast enough*. Under overload, per-request latency grows, workers stall,
+  and the actual offered rate drops.
+- In-flight request count is bounded by `count`. The client cannot DoS the
+  backend by piling on more concurrent requests than `count`.
+- Each worker holds one TCP connection for its lifetime. `count` is also the
+  total number of TCP connections to the gateway.
+
+## Open-loop schema
+
+A single firer coroutine fires requests on a wall-clock schedule. Requests
+are fire-and-forget: the firer schedules the next request based on
+`rate_rps`, regardless of whether previous requests have completed. A
+bounded `pool_size` of HTTP connections is shared by all in-flight tasks.
+
+```json
+{
+  "name": "stress",
+  "mode": "open-loop",            // required for open-loop mode
+
+  "rate_rps": 200,                // target firing rate (requests/sec)
+  "pool_size": 60,                // shared HTTP connection pool size
+  "max_inflight": 5000,           // hard cap on concurrent in-flight (0 = unbounded)
+  "timeout_s": 3.0,               // per-HTTP-attempt timeout
+
+  "sku_pool": [...],
+  "requests": [ /* same as closed-loop */ ],
+
+  "retries": 3,
+  "backoff": { "mode": "none" },
+  "retry_on_status": [0, 500, 502, 503, 504]
+}
+```
+
+**Properties of open-loop:**
+
+- Offered RPS is **exactly `rate_rps`**, regardless of backend latency. The
+  firer schedules the next fire based on wall-clock, not on request completion.
+- In-flight count grows when the backend is slow. By Little's Law,
+  `in-flight ≈ rate_rps × per_request_latency`. At 200 rps and 2-second
+  latency, that's 400 concurrent in-flight requests.
+- **`pool_size` bounds the number of TCP connections** to the gateway, NOT
+  the number of in-flight requests. If all sessions are checked out when
+  the firer dispatches a new request, the new request waits for one to
+  return. This adds queueing delay at the client but doesn't drop requests.
+- **`max_inflight` is a safety valve**: when in-flight count reaches this,
+  new fires are dropped immediately and logged as `status: -1` rows in the
+  CSV (`request_type: client-overload`). Set to 0 for unbounded.
+
+**When to use open-loop:**
+
+- Reproducing metastable failure modes (closed-loop has built-in
+  back-pressure that prevents the metastable trap)
+- Modeling real production traffic where users don't wait politely
+- Capacity tests where you want to know "what happens if we offer 10× capacity?"
+
+**When NOT to use open-loop:**
+
+- The gateway has a tight connection-pool limit you haven't raised. Open-loop
+  will hit the gateway's pool before the backend, and you'll measure the
+  gateway's failure mode instead of the backend's. Either scale the gateway
+  first or stay with closed-loop.
+- You want predictable, repeatable load. Open-loop's in-flight depth depends
+  on backend latency, which can vary between runs.
+
+## Shared schema (both modes)
+
+These fields apply identically to closed-loop and open-loop:
 
 ### Weights
 
