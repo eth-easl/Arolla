@@ -1,0 +1,47 @@
+# Arolla — server-side retry admission (paper §4, Algorithm 1, aggregate-only MVP).
+#
+# Applies to every sidecar in the online-boutique namespace. Each upstream
+# cluster gets its own Wasm VM with an independent token bucket, so bucket
+# state does NOT leak across services.
+#
+# Build the .wasm first:
+#   cd prototype/arolla-filter && make build
+#
+# The `url:` below contains a `__MASTER_IP__` placeholder; it is substituted
+# at apply time by prototype/deploy-policy.sh (which reads MASTER_IP from
+# k8s-config.sh, or resolves it via SSH to the master node). To apply this
+# manifest directly, run:
+#
+#   sed "s/__MASTER_IP__/<ip>/g" policies/arolla.yaml | kubectl apply -f -
+#
+# Usage (preferred):
+#   prototype/deploy-policy.sh apply arolla
+#   prototype/deploy-policy.sh remove arolla
+#
+# Tuning `pluginConfig`:
+#   r        — event refill (tokens per successful response)
+#   capacity — bucket cap (max tokens held)
+#   t        — time refill (tokens per second, regardless of traffic)
+#   Paper defaults: r=0.1, capacity=10.0, t=1.0.
+---
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: arolla
+  namespace: online-boutique
+spec:
+  # No `selector` → attaches to every sidecar in the namespace. Add
+  # `selector.matchLabels:` if you only want the filter on a subset of
+  # services (e.g. matchLabels: {app: cartservice}).
+  phase: AUTHN      # early in the filter chain — reject retries before routing
+  # __MASTER_IP__ is substituted by deploy-policy.sh at apply time.
+  url: http://__MASTER_IP__:8000/arolla_filter.wasm
+  # Fail closed if the wasm binary can't be fetched — better to drop traffic
+  # than to silently disable retry admission.
+  failStrategy: FAIL_CLOSE
+  pluginConfig:
+    r: 0.1
+    capacity: 10.0
+    t: 1.0
+    attempt_header: "x-attempt-number"
+    reject_status: 429
