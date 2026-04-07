@@ -71,7 +71,6 @@ REMOTE_EOF
 APP_NAME="" APP_NS="" APP_GATEWAY_NAME="" APP_HOST="" APP_DEPLOYMENTS=""
 APP_STATEFULSETS="" APP_WAIT_JOBS=""
 APP_DIR="" REMOTE_MANIFESTS_DIR=""
-ENABLE_FAULT_INJECTION=0
 
 load_app() {
     local app="$1"
@@ -142,12 +141,25 @@ upload_manifests() {
         scp ${scp_opts} "$f" "${SSH_USER}@${MASTER_HOST}:${REMOTE_MANIFESTS_DIR}/" >/dev/null
     done
 
-    # Upload subdirectories (e.g. services/) preserving structure
+    # Upload subdirectories (e.g. services/) preserving structure.
+    #
+    # Skip subdirectories that are managed *per-experiment* rather than as
+    # part of the base app:
+    #   policies/  — retry-admission policies, switched by deploy-policy.sh
+    #   faults/    — fault-injection manifests, toggled by run-experiment.sh
+    # Uploading these would cause `kubectl apply -R` below to install every
+    # policy + fault at once, which is never what we want during app deploy.
     local sub_yaml_found=0
     for subdir in "${APP_DIR}"/*/; do
         [[ -d "$subdir" ]] || continue
         local dirname
         dirname=$(basename "$subdir")
+        case "${dirname}" in
+            policies|faults)
+                info "Skipping experiment-infrastructure subdir: ${dirname}/ (managed by deploy-policy.sh / run-experiment.sh)"
+                continue
+                ;;
+        esac
         eval "$(ssh_cmd "$MASTER_HOST")" "mkdir -p ${REMOTE_MANIFESTS_DIR}/${dirname}"
         for f in "${subdir}"*.yaml; do
             [[ -f "$f" ]] || continue
@@ -180,13 +192,6 @@ get_node_port() {
 do_deploy() {
     banner "Deploying: ${APP_NAME}"
     info "Manifests: ${APP_DIR}/"
-    if [[ "$(basename "${APP_DIR}")" == "online-boutique" ]]; then
-        if [[ "${ENABLE_FAULT_INJECTION}" == "1" ]]; then
-            info "Fault injection: ENABLED (fault-injection.yaml will be applied)"
-        else
-            info "Fault injection: DISABLED (fault-injection.yaml will be removed if present)"
-        fi
-    fi
     echo ""
 
     upload_manifests
@@ -218,21 +223,14 @@ do_deploy() {
             echo ''
         fi
 
-        # Apply all manifests recursively (idempotent for namespace.yaml)
+        # Apply all manifests recursively (idempotent for namespace.yaml).
+        # Note: upload_manifests excludes the policies/ and faults/ subdirs,
+        # so this only applies the base app (services + gateway + routes).
+        # Experiment policies and faults are managed by deploy-policy.sh and
+        # prototype/experiments/run-experiment.sh.
         echo '=== Applying all manifests ==='
         kubectl apply -R -f \${M}/
         echo ''
-
-        # Optional app-specific fault injection toggle (online-boutique).
-        if [[ \"$(basename "${APP_DIR}")\" == \"online-boutique\" ]]; then
-            if [[ \"${ENABLE_FAULT_INJECTION}\" != \"1\" ]]; then
-                if [[ -f \"\${M}/fault-injection.yaml\" ]]; then
-                    echo 'Disabling optional fault injection (fault-injection.yaml)…'
-                    kubectl delete -f \"\${M}/fault-injection.yaml\" --ignore-not-found 2>/dev/null || true
-                    echo ''
-                fi
-            fi
-        fi
 
         # Wait for deployments
         echo '=== Waiting for pods ==='
@@ -413,8 +411,10 @@ do_app_help() {
     echo "  --cleanup   Remove all resources"
     echo "  --help      Show this help"
     if [[ "$app_slug" == "online-boutique" ]]; then
-        echo "  --fault-injection      (Deploy only) apply fault-injection.yaml"
-        echo "  --no-fault-injection   (Deploy only) ensure fault-injection.yaml is not active (default)"
+        echo ""
+        echo "Per-experiment policies and faults are managed by:"
+        echo "  prototype/deploy-policy.sh       (policies)"
+        echo "  prototype/experiments/run-experiment.sh  (faults + timeline)"
     fi
     echo ""
     echo "Manifests:"
@@ -468,7 +468,7 @@ main() {
     local app="$1"; shift
     local action=""
 
-    # Parse app-specific options (allow deploy modifiers + one action)
+    # Parse app-specific options (one action at a time)
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --test|--status|--cleanup|--help|-h)
@@ -477,12 +477,6 @@ main() {
                     exit 1
                 fi
                 action="$1"
-                ;;
-            --fault-injection)
-                ENABLE_FAULT_INJECTION=1
-                ;;
-            --no-fault-injection)
-                ENABLE_FAULT_INJECTION=0
                 ;;
             *)
                 err "Unknown option: $1 (try --help)"
