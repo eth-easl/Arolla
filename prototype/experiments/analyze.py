@@ -229,6 +229,44 @@ def parse_istio_duration_buckets(
     return result
 
 
+def client_latency_timeseries(df: pd.DataFrame, t_ref: float, t_end: float,
+                              bin_sec: float = 1.0) -> Dict[str, pd.Series]:
+    """
+    Per-second client-observed latency percentiles (p50, p95, p99).
+
+    Returns {percentile_name -> pd.Series} where each series is indexed by
+    bin (seconds since t_ref) and the value is that percentile of latencies
+    in that bin (in milliseconds). Bins outside the observed data range
+    stay NaN so matplotlib draws gaps.
+
+    Counts ALL attempts (not just successful ones), so this surfaces both
+    healthy-tail latency and failure-induced latency spikes uniformly.
+    """
+    empty = {"p50": pd.Series(dtype=float),
+             "p95": pd.Series(dtype=float),
+             "p99": pd.Series(dtype=float)}
+    if df.empty or "latency_s" not in df.columns:
+        return empty
+
+    window = df[(df["timestamp"] >= t_ref) & (df["timestamp"] <= t_end)].copy()
+    if window.empty:
+        return empty
+    window["bin"] = ((window["timestamp"] - t_ref) // bin_sec).astype(int)
+    window["latency_ms"] = window["latency_s"] * 1000.0
+
+    grouped = window.groupby("bin")["latency_ms"]
+    p50 = grouped.quantile(0.50)
+    p95 = grouped.quantile(0.95)
+    p99 = grouped.quantile(0.99)
+
+    n_bins = int((t_end - t_ref) // bin_sec) + 1
+    return {
+        "p50": p50.reindex(range(n_bins)),
+        "p95": p95.reindex(range(n_bins)),
+        "p99": p99.reindex(range(n_bins)),
+    }
+
+
 def client_latency_by_phase(df: pd.DataFrame, t_ref: float,
                             experiment: dict) -> Dict[str, np.ndarray]:
     """
@@ -655,6 +693,83 @@ def print_latency_summary(runs: Dict[str, dict]) -> None:
     print()
 
 
+def plot_latency_timeseries(runs: Dict[str, dict], out_path: Path, experiment: dict):
+    """
+    Per-second client-observed latency percentiles (p50/p95/p99) over time,
+    one row per policy, log-scale y-axis. Useful for spotting:
+
+      - tail-latency growth as load builds
+      - mesh-retry-induced latency plateaus (p99 climbing toward client timeout)
+      - the moment a fault trigger fires (sudden latency spike)
+      - whether recovery is monotone or oscillating
+    """
+    _apply_paper_style()
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+    n = len(ordered)
+    if n == 0:
+        return
+
+    # Scenario coordinates (same as the other timeseries plots)
+    prefault_sec = float(experiment.get("prefault_sec", 0))
+    fault_sec    = float(experiment.get("fault_sec", 0))
+    recovery_sec = float(experiment.get("recovery_sec", 0))
+    cooldown_sec = float(experiment.get("cooldown_sec", 0))
+    total = prefault_sec + fault_sec + recovery_sec + cooldown_sec
+    fault_start_x = prefault_sec
+    fault_end_x   = prefault_sec + fault_sec
+
+    pct_colors = {
+        "p50": "#1f77b4",   # blue
+        "p95": "#ff7f0e",   # orange
+        "p99": "#d62728",   # red
+    }
+    pct_labels = {"p50": "p50", "p95": "p95", "p99": "p99"}
+
+    fig, axes = plt.subplots(n, 1, figsize=(7.2, 3.0 * n), sharex=True, squeeze=False)
+
+    for row, policy in enumerate(ordered):
+        ax = axes[row][0]
+        d = runs[policy]
+        lat_ts = d.get("client_latency_ts") or {}
+
+        for pct in ("p50", "p95", "p99"):
+            ts = lat_ts.get(pct)
+            if ts is None or ts.empty:
+                continue
+            ax.plot(ts.index, ts.values,
+                    label=pct_labels[pct], color=pct_colors[pct], linewidth=1.6)
+
+        # Fault region shading
+        if fault_sec > 0:
+            ax.axvspan(fault_start_x, fault_end_x, color="lightgray",
+                       alpha=0.55, zorder=0)
+            ymin, ymax = ax.get_ylim()
+            ax.text(
+                (fault_start_x + fault_end_x) / 2.0,
+                ymax * 0.92, "fault",
+                ha="center", va="top",
+                fontsize=11, fontstyle="italic", color="#555555",
+            )
+
+        ax.set_yscale("log")
+        ax.set_ylabel("Client latency (ms)")
+        if total > 0:
+            ax.set_xlim(0, total)
+        ax.grid(True, which="both", alpha=0.25, linewidth=0.5)
+        ax.legend(loc="upper right", frameon=True, fancybox=False,
+                  edgecolor="#888888", framealpha=0.95, fontsize=10)
+        if n > 1:
+            ax.set_title(POLICY_LABELS.get(policy, policy),
+                         fontsize=12, loc="left", pad=4)
+
+    axes[-1][0].set_xlabel("Time (s)")
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
 def plot_latency_cdf(runs: Dict[str, dict], out_path: Path, experiment: dict):
     """
     Two-panel CDF plot (side-by-side):
@@ -915,6 +1030,9 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         df, t_ref, t_cooldown_end, bin_sec=1.0, smooth_win=5,
     )
     rates = request_rate_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
+    client_latency_ts = client_latency_timeseries(
+        df, t_ref, t_cooldown_end, bin_sec=1.0,
+    )
     amp = amplification(df, t_fault_start, t_fault_end)
     reff = retry_efficiency_pct(df, t_fault_start, t_fault_end)
 
@@ -982,6 +1100,7 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         "goodput": goodput,
         "success_rate": success_rate,
         "rates": rates,
+        "client_latency_ts": client_latency_ts,
         "client_latency_by_phase": client_latency_phase,
         "service_buckets": service_buckets,
         "service_buckets_scoped": service_buckets_scoped,
@@ -1058,6 +1177,7 @@ def main():
     print(f"\nplots:")
     plot_rps(runs, plots_dir / "rps.pdf", experiment)
     plot_success_rate(runs, plots_dir / "success-rate.pdf", experiment)
+    plot_latency_timeseries(runs, plots_dir / "latency-ts.pdf", experiment)
     plot_latency_cdf(runs, plots_dir / "latency-cdf.pdf", experiment)
     plot_bar(runs, "amplification",
              ylabel="Retry amplification (attempts / first attempts)",
