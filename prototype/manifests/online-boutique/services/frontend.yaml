@@ -84,10 +84,10 @@ spec:
           value: "0"
         resources:
           requests:
-            cpu: 100m
+            cpu: 1000m
             memory: 64Mi
           limits:
-            cpu: 200m
+            cpu: 1000m
             memory: 128Mi
 ---
 apiVersion: v1
