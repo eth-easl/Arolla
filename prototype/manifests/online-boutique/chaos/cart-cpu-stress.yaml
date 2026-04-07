@@ -1,0 +1,77 @@
+# Chaos Mesh StressChaos — CPU restriction trigger for metastability experiments.
+#
+# Implements the trigger mechanism from Huang et al. "Metastable Failures in
+# the Wild" (OSDI '22), §4.1 Figure 5: a transient CPU restriction on a
+# stateful component, applied for a short period, after which the system
+# either recovers (vulnerable region) or stays trapped (metastable region).
+#
+# In the paper:
+#   `docker update --cpus 0.4 mongo-primary` for 10 seconds
+#   (80% reduction → metastable; 78% reduction → recovers cleanly)
+#
+# Here:
+#   chaos-mesh applies a cgroup-level CPU stressor to one cartservice pod
+#   for the same duration. The mechanism is functionally equivalent — both
+#   go through Linux CFS bandwidth control — but Kubernetes-native and
+#   doesn't require privileged access to the docker daemon on each node.
+#
+# Placeholders (substituted at apply time by run-experiment.sh):
+#   __TARGET__    pod label app=<value>     (e.g. "cartservice")
+#   __LOAD__      CPU% to consume per worker (50-90; paper Fig 5 uses 80)
+#   __WORKERS__   number of stress-ng worker threads (typically 1)
+#   __DURATION__  trigger duration in seconds (paper uses 10)
+#
+# Prerequisites:
+#   chaos-mesh installed in the chaos-mesh namespace:
+#     helm repo add chaos-mesh https://charts.chaos-mesh.org
+#     helm install chaos-mesh chaos-mesh/chaos-mesh \
+#         -n chaos-mesh --create-namespace --version 2.7.0
+#   (One-time setup; chaos-mesh runs as a controller + per-node daemon set.)
+#
+# Manual usage (without run-experiment.sh):
+#   sed -e 's/__TARGET__/cartservice/' \
+#       -e 's/__LOAD__/80/' \
+#       -e 's/__WORKERS__/1/' \
+#       -e 's/__DURATION__/10/' \
+#       chaos/cart-cpu-stress.yaml | kubectl apply -f -
+#
+#   # ...the trigger fires for 10s and chaos-mesh auto-cleans up...
+#
+#   kubectl delete stresschaos experiment-cpu-stress -n online-boutique \
+#       --ignore-not-found
+#
+# Tuning notes:
+#   - `load: 80` consumes 80% of one core's worth of CPU time per worker.
+#     Combined with cartservice's existing CPU usage, this competes for
+#     the pod's cgroup CPU quota and starves the application thread.
+#   - Increase `workers` if cartservice has multiple cores or you need
+#     deeper starvation. Each worker is one stress-ng thread.
+#   - For finer-grained control over the CFS quota itself, use a
+#     `resource_strategy` chaos type instead. StressChaos is the simplest
+#     approximation of `docker update --cpus`.
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: experiment-cpu-stress
+  namespace: online-boutique
+spec:
+  # `mode: one` picks a single matching pod. cartservice has one replica
+  # by default in the demo, so this is deterministic. If you scale cart
+  # to multiple replicas, switch to `mode: all` or `mode: random-max-percent`.
+  mode: one
+  selector:
+    namespaces:
+    - online-boutique
+    labelSelectors:
+      app: __TARGET__
+
+  stressors:
+    cpu:
+      workers: __WORKERS__
+      load: __LOAD__
+
+  # Chaos-mesh auto-cleans up after this duration (safety net in case the
+  # orchestrator dies mid-run). The orchestrator ALSO explicitly deletes
+  # the resource at fault_end, so this duration acts as a backstop only.
+  duration: __DURATION__s
