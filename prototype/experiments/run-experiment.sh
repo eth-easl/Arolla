@@ -341,58 +341,130 @@ fi
 mkdir -p "${RUN_DIR}"
 
 # Write the top-level experiment descriptor. analyze.py reads this.
-# Build the client_profiles JSON array from the CSV (empty CSV → empty array).
-CLIENT_PROFILES_JSON="[]"
+#
+# Goal: experiment.json should fully describe what was actually run, so that
+# a year from now we can replay or interpret a result without re-reading
+# every YAML and JSON file the runner touched. That means embedding:
+#
+#   - the full content of each profile in `client_profiles` (not just names),
+#     so future profile edits don't retroactively change what old runs mean
+#   - the trigger descriptor (cpu_stress or istio_fault) — already done, kept
+#   - the resolved fault manifest path ONLY when the trigger uses one
+#   - the resolved policy and profile lists, even when they come from defaults
+#
+# We delegate the JSON building to Python because nested objects + arrays in
+# bash heredocs were a bug source and embedding profile JSON in bash
+# string-interpolation would be even worse.
+
+# Resolve the actual list of profiles that will run. If CLIENT_PROFILES is
+# empty (= "use all profiles in the dir"), enumerate the directory so the
+# experiment.json records the real set, not a misleading empty array.
+PROFILE_DIR="${PROTO_DIR}/clients/online-boutique/profiles"
 if [[ -n "${CLIENT_PROFILES}" ]]; then
   IFS=',' read -r -a _cp_arr <<< "${CLIENT_PROFILES}"
-  CLIENT_PROFILES_JSON="[$(printf '"%s",' "${_cp_arr[@]}" | sed 's/,$//')]"
-fi
-
-# Trigger descriptor — captures whether the fault window applied an Istio
-# fault manifest or a chaos-mesh CPU stress (mutually exclusive).
-if [[ -n "${CPU_STRESS_TARGET}" ]]; then
-  TRIGGER_JSON=$(cat <<EOF
-  "trigger": {
-    "kind": "cpu_stress",
-    "target": "${CPU_STRESS_TARGET}",
-    "load_pct": ${CPU_STRESS_LOAD},
-    "workers": ${CPU_STRESS_WORKERS},
-    "duration_sec": ${FAULT_SEC}
-  }
-EOF
-)
+  RESOLVED_PROFILES=("${_cp_arr[@]}")
 else
-  TRIGGER_JSON=$(cat <<EOF
-  "trigger": {
-    "kind": "istio_fault",
-    "manifest": "${SCENARIO_FAULT_MANIFEST}",
-    "duration_sec": ${FAULT_SEC}
-  }
-EOF
-)
+  RESOLVED_PROFILES=()
+  for _f in "${PROFILE_DIR}"/*.json; do
+    [[ -f "${_f}" ]] || continue
+    RESOLVED_PROFILES+=("$(basename "${_f}" .json)")
+  done
 fi
 
-cat > "${RUN_DIR}/experiment.json" <<EOF
-{
-  "scenario": "${SCENARIO}",
-  "scenario_title": "${SCENARIO_TITLE}",
-  "scenario_fault_manifest": "${SCENARIO_FAULT_MANIFEST}",
-  "policies": [$(printf '"%s",' "${POLICIES[@]}" | sed 's/,$//')],
-  "client_profiles": ${CLIENT_PROFILES_JSON},
-  "warmup_sec": ${WARMUP_SEC},
-  "prefault_sec": ${PREFAULT_SEC},
-  "fault_sec": ${FAULT_SEC},
-  "recovery_sec": ${RECOVERY_SEC},
-  "cooldown_sec": ${COOLDOWN_SEC},
-${TRIGGER_JSON},
-  "run_ts": "${RUN_TS}",
-  "cluster": {
-    "master": "${MASTER_HOST}",
-    "workers": [$(printf '"%s",' "${WORKER_HOSTS[@]}" | sed 's/,$//')],
-    "client": "${CLIENT_HOST}"
-  }
+# Hand off to Python for the JSON build. Args are passed via env vars to
+# avoid quoting nightmares with shell array → python list translation.
+export _RUN_DIR="${RUN_DIR}"
+export _SCENARIO="${SCENARIO}"
+export _SCENARIO_TITLE="${SCENARIO_TITLE}"
+export _SCENARIO_FAULT_MANIFEST="${SCENARIO_FAULT_MANIFEST}"
+export _PROFILE_DIR="${PROFILE_DIR}"
+export _RUN_TS="${RUN_TS}"
+export _MASTER_HOST="${MASTER_HOST}"
+export _CLIENT_HOST="${CLIENT_HOST}"
+export _WARMUP_SEC="${WARMUP_SEC}"
+export _PREFAULT_SEC="${PREFAULT_SEC}"
+export _FAULT_SEC="${FAULT_SEC}"
+export _RECOVERY_SEC="${RECOVERY_SEC}"
+export _COOLDOWN_SEC="${COOLDOWN_SEC}"
+export _CPU_STRESS_TARGET="${CPU_STRESS_TARGET}"
+export _CPU_STRESS_LOAD="${CPU_STRESS_LOAD}"
+export _CPU_STRESS_WORKERS="${CPU_STRESS_WORKERS}"
+export _POLICIES_CSV
+_POLICIES_CSV="$(IFS=,; echo "${POLICIES[*]}")"
+export _RESOLVED_PROFILES_CSV
+_RESOLVED_PROFILES_CSV="$(IFS=,; echo "${RESOLVED_PROFILES[*]}")"
+export _WORKER_HOSTS_CSV
+_WORKER_HOSTS_CSV="$(IFS=,; echo "${WORKER_HOSTS[*]}")"
+
+python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+policies = [p for p in os.environ["_POLICIES_CSV"].split(",") if p]
+profile_names = [p for p in os.environ["_RESOLVED_PROFILES_CSV"].split(",") if p]
+worker_hosts = [w for w in os.environ["_WORKER_HOSTS_CSV"].split(",") if w]
+
+# Embed each profile's full JSON content under client_profiles[*].spec.
+# If a profile file has gone missing (unlikely but possible), record an
+# error placeholder rather than crashing.
+profile_dir = Path(os.environ["_PROFILE_DIR"])
+client_profiles = []
+for name in profile_names:
+    p = profile_dir / f"{name}.json"
+    entry = {"name": name, "source": str(p)}
+    try:
+        entry["spec"] = json.loads(p.read_text())
+    except FileNotFoundError:
+        entry["error"] = f"profile file not found: {p}"
+    except json.JSONDecodeError as e:
+        entry["error"] = f"profile JSON parse error: {e}"
+    client_profiles.append(entry)
+
+# Trigger descriptor — mutually exclusive: cpu_stress vs istio_fault.
+cpu_target = os.environ["_CPU_STRESS_TARGET"]
+if cpu_target:
+    trigger = {
+        "kind": "cpu_stress",
+        "target": cpu_target,
+        "load_pct": int(os.environ["_CPU_STRESS_LOAD"]),
+        "workers": int(os.environ["_CPU_STRESS_WORKERS"]),
+        "duration_sec": int(os.environ["_FAULT_SEC"]),
+    }
+else:
+    trigger = {
+        "kind": "istio_fault",
+        "manifest": os.environ["_SCENARIO_FAULT_MANIFEST"],
+        "duration_sec": int(os.environ["_FAULT_SEC"]),
+    }
+
+doc = {
+    "scenario": os.environ["_SCENARIO"],
+    "scenario_title": os.environ["_SCENARIO_TITLE"],
+    "policies": policies,
+    "client_profiles": client_profiles,
+    "warmup_sec": int(os.environ["_WARMUP_SEC"]),
+    "prefault_sec": int(os.environ["_PREFAULT_SEC"]),
+    "fault_sec": int(os.environ["_FAULT_SEC"]),
+    "recovery_sec": int(os.environ["_RECOVERY_SEC"]),
+    "cooldown_sec": int(os.environ["_COOLDOWN_SEC"]),
+    "trigger": trigger,
+    "run_ts": os.environ["_RUN_TS"],
+    "cluster": {
+        "master": os.environ["_MASTER_HOST"],
+        "workers": worker_hosts,
+        "client": os.environ["_CLIENT_HOST"],
+    },
 }
-EOF
+
+# Only emit scenario_fault_manifest at the top level when an istio_fault
+# trigger actually applies it. For cpu_stress runs the field is misleading
+# (the manifest is never applied) and would confuse future readers.
+if trigger["kind"] == "istio_fault":
+    doc["scenario_fault_manifest"] = os.environ["_SCENARIO_FAULT_MANIFEST"]
+
+out_path = Path(os.environ["_RUN_DIR"]) / "experiment.json"
+out_path.write_text(json.dumps(doc, indent=2) + "\n")
+PYEOF
 
 log "wrote ${RUN_DIR}/experiment.json"
 
