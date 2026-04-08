@@ -67,7 +67,7 @@ impl Default for Config {
             r: 0.1,
             capacity: 10.0,
             t: 1.0,
-            attempt_header: "x-attempt-number".to_string(),
+            attempt_header: "x-envoy-attempt-count".to_string(),
             reject_status: 429,
         }
     }
