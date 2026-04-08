@@ -2,14 +2,19 @@
 """
 Full RL training pipeline with randomised scenarios.
 
+Each training run creates a timestamped folder under simulator/trained_models/
+containing the model weights, normalisation stats, eval logs, and plots.
+
 Usage:
-    python simulator/bin/train_random.py                  # train 500k steps
-    python simulator/bin/train_random.py --timesteps 100000  # custom length
-    python simulator/bin/train_random.py --skip-training   # plot only (needs saved model)
+    python simulator/bin/train_random.py                        # train 500k steps
+    python simulator/bin/train_random.py --timesteps 1000000    # train 1M steps
+    python simulator/bin/train_random.py --skip-training        # evaluate latest run
+    python simulator/bin/train_random.py --skip-training --run-dir simulator/trained_models/run_2026-03-28_14-30-00_500k
 """
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -18,24 +23,53 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, sync_envs_normalization
 
 from simulator.rl.random_scenario_env import RandomScenarioSimEnv
+
 
 YAML_PATH = str(
     Path(__file__).parent.parent / "experiments" / "yaml" / "rl" / "token_bucket.yaml"
 )
 
-MODEL_PATH = "ppo_random_agent"
-VECNORM_PATH = "vecnormalize_stats.pkl"
-BEST_MODEL_DIR = "./best_model/"
-EVAL_LOG_DIR = "./eval_logs/"
+# All training artifacts live under this folder (git-ignored)
+TRAINED_MODELS_DIR = Path(__file__).parent.parent / "trained_models"
 
 
-# ========================================================================
+def _make_run_dir(total_timesteps: int) -> Path:
+    """Create a unique run directory like trained_models/run_2026-03-28_14-30-00_500k/"""
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    if total_timesteps >= 1_000_000:
+        steps_label = f"{total_timesteps / 1_000_000:.1f}M"
+    else:
+        steps_label = f"{total_timesteps // 1_000}k"
+
+    run_dir = TRAINED_MODELS_DIR / f"run_{ts}_{steps_label}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def _latest_run_dir() -> Path:
+    """Return the most recent run directory (by name sort)."""
+    if not TRAINED_MODELS_DIR.exists():
+        raise FileNotFoundError(f"No training runs found in {TRAINED_MODELS_DIR}")
+    runs = sorted(TRAINED_MODELS_DIR.glob("run_*"))
+    if not runs:
+        raise FileNotFoundError(f"No training runs found in {TRAINED_MODELS_DIR}")
+    return runs[-1]
+
+
 # Helpers
-# ========================================================================
+class NormSyncCallback(BaseCallback):
+    """Sync VecNormalize stats from training env to eval env before each eval."""
+    def __init__(self, eval_env):
+        super().__init__()
+        self.eval_env = eval_env
+    def _on_step(self):
+        sync_envs_normalization(self.training_env, self.eval_env)
+        return True
 
 def make_env(rank: int):
     """Factory: each subprocess gets its own env instance."""
@@ -93,7 +127,7 @@ def plot_episode(history: list, save_path: str = "random_agent_episode.png"):
     plt.show()
 
 
-def plot_eval_results(log_dir: str = EVAL_LOG_DIR, save_path: str = "eval_reward.png"):
+def plot_eval_results(log_dir: str, save_path: str = "eval_reward.png"):
     """Plot evaluation reward over training from EvalCallback logs."""
     eval_file = Path(log_dir) / "evaluations.npz"
     if not eval_file.exists():
@@ -125,13 +159,20 @@ def plot_eval_results(log_dir: str = EVAL_LOG_DIR, save_path: str = "eval_reward
     print(f"Saved eval reward plot to {save_path}")
     plt.show()
 
-
-# ========================================================================
 # Training
-# ========================================================================
+def train(total_timesteps: int) -> Path:
+    """Run full PPO training with parallel envs and normalisation.
 
-def train(total_timesteps: int):
-    """Run full PPO training with parallel envs and normalisation."""
+    Returns the run directory where all artifacts are saved.
+    """
+    run_dir = _make_run_dir(total_timesteps)
+    model_path = str(run_dir / "model")
+    vecnorm_path = str(run_dir / "vecnormalize_stats.pkl")
+    best_model_dir = str(run_dir / "best_model")
+    eval_log_dir = str(run_dir / "eval_logs")
+    tb_log_dir = str(run_dir / "tb_logs")
+
+    print(f"Run directory: {run_dir}")
 
     # 4 parallel training envs
     train_env = SubprocVecEnv([make_env(i) for i in range(4)])
@@ -145,7 +186,7 @@ def train(total_timesteps: int):
         "MlpPolicy",
         train_env,
         verbose=1,
-        tensorboard_log="./tb_logs/",
+        tensorboard_log=tb_log_dir,
         n_steps=512,
         batch_size=128,
         n_epochs=10,
@@ -158,34 +199,41 @@ def train(total_timesteps: int):
         eval_env,
         eval_freq=5000,
         n_eval_episodes=10,
-        best_model_save_path=BEST_MODEL_DIR,
-        log_path=EVAL_LOG_DIR,
+        best_model_save_path=best_model_dir,
+        log_path=eval_log_dir,
+        callback_after_eval=NormSyncCallback(eval_env),
     )
 
     print(f"Training PPO for {total_timesteps:,} timesteps with randomised scenarios …")
     model.learn(total_timesteps=total_timesteps, callback=eval_callback)
 
-    model.save(MODEL_PATH)
-    train_env.save(VECNORM_PATH)
-    print(f"\nModel saved to {MODEL_PATH}.zip")
-    print(f"Normalisation stats saved to {VECNORM_PATH}")
+    model.save(model_path)
+    train_env.save(vecnorm_path)
+    print(f"\nModel saved to {model_path}.zip")
+    print(f"Normalisation stats saved to {vecnorm_path}")
 
     train_env.close()
     eval_env.close()
 
+    return run_dir
 
-# ========================================================================
+
 # Evaluation / Plotting
-# ========================================================================
+def evaluate_and_plot(run_dir: Path):
+    """Load trained model from a run directory, run one episode, and plot results."""
 
-def evaluate_and_plot():
-    """Load trained model, run one episode, and plot results."""
+    model_path = str(run_dir / "model")
+    eval_log_dir = str(run_dir / "eval_logs")
+    plot_dir = run_dir / "plots"
+    plot_dir.mkdir(exist_ok=True)
+
+    print(f"\nLoading model from: {run_dir.name}")
 
     # Single (non-vectorised) env for easy history access
     env = RandomScenarioSimEnv(YAML_PATH, decision_interval_s=2.0)
-    model = PPO.load(MODEL_PATH, env=env)
+    model = PPO.load(model_path, env=env)
 
-    print("\nRunning evaluation episode …")
+    print("Running evaluation episode …")
     obs, _ = env.reset(seed=12345)
     total_reward = 0.0
     steps = 0
@@ -211,21 +259,24 @@ def evaluate_and_plot():
     print(f"  Mean P99 latency  : {df['p99'].mean():.1f} ns")
     print(f"  Total reward      : {total_reward:.2f}")
 
-    plot_episode(env.history)
-    plot_eval_results()
+    plot_episode(env.history, save_path=str(plot_dir / "episode.png"))
+    plot_eval_results(log_dir=eval_log_dir, save_path=str(plot_dir / "eval_reward.png"))
 
-
-# ========================================================================
 # CLI
-# ========================================================================
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train RL agent with randomised scenarios")
     parser.add_argument("--timesteps", type=int, default=500_000, help="Total training timesteps")
-    parser.add_argument("--skip-training", action="store_true", help="Skip training, only plot")
+    parser.add_argument("--skip-training", action="store_true", help="Skip training, only evaluate")
+    parser.add_argument("--run-dir", type=str, default=None,
+                        help="Path to a specific run directory for evaluation (default: latest)")
     args = parser.parse_args()
 
     if not args.skip_training:
-        train(args.timesteps)
+        run_dir = train(args.timesteps)
+    elif args.run_dir:
+        run_dir = Path(args.run_dir)
+    else:
+        run_dir = _latest_run_dir()
+        print(f"Using latest run: {run_dir.name}")
 
-    evaluate_and_plot()
+    evaluate_and_plot(run_dir)
