@@ -219,8 +219,11 @@ calibration/data/
 calibration/reports/
 
 # RL training artifacts
+simulator/trained_models/
 tb_logs/
 *.zip
 fault_events.json
 simulator/vecnormalize_stats.pkl
 simulator/eval_logs/
+best_model/
+eval_logs/
