@@ -282,6 +282,17 @@ for p in "${POLICIES[@]}"; do
   $found || err "unknown policy: ${p}  (valid: ${VALID_POLICIES[*]})"
 done
 
+# experiment.json embeds each policy manifest as a parsed structure, which
+# requires pyyaml. Check upfront so the run aborts early with a fix instead
+# of failing partway through after a long warmup. The check uses the same
+# `python3` the heredoc later picks up, which may differ from interactive
+# shell python — so a passing `python3 -c "import yaml"` in your terminal
+# is not sufficient evidence that the script will see it.
+python3 -c "import yaml" >/dev/null 2>&1 || err "pyyaml is required to snapshot policy manifests into experiment.json.
+       Install it for the python3 this script invokes:
+           python3 -m pip install --user pyyaml
+       (then re-run; no other change needed.)"
+
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/${RUN_TS}"
 
@@ -378,6 +389,7 @@ export _SCENARIO="${SCENARIO}"
 export _SCENARIO_TITLE="${SCENARIO_TITLE}"
 export _SCENARIO_FAULT_MANIFEST="${SCENARIO_FAULT_MANIFEST}"
 export _PROFILE_DIR="${PROFILE_DIR}"
+export _POLICY_DIR="${PROTO_DIR}/manifests/online-boutique/policies"
 export _RUN_TS="${RUN_TS}"
 export _MASTER_HOST="${MASTER_HOST}"
 export _CLIENT_HOST="${CLIENT_HOST}"
@@ -420,6 +432,31 @@ for name in profile_names:
         entry["error"] = f"profile JSON parse error: {e}"
     client_profiles.append(entry)
 
+# Snapshot each policy manifest as a parsed structure (comments stripped,
+# JSON-friendly). For multi-document manifests we keep the list; for the
+# common single-doc case we unwrap. Templated bits like __MASTER_IP__ are
+# recorded literally — the substituted value is whatever deploy-policy.sh
+# resolved at apply time, and the master IP is recorded under cluster.master
+# below so the substitution is reconstructible.
+#
+# pyyaml is required (validated upfront in run-experiment.sh, so this
+# import never fails by the time we get here).
+import yaml  # noqa: E402
+
+policy_dir = Path(os.environ["_POLICY_DIR"])
+policies_spec = []
+for name in policies:
+    p = policy_dir / f"{name}.yaml"
+    entry = {"name": name, "source": str(p)}
+    try:
+        docs = [d for d in yaml.safe_load_all(p.read_text()) if d is not None]
+        entry["manifest"] = docs[0] if len(docs) == 1 else docs
+    except FileNotFoundError:
+        entry["error"] = f"policy manifest not found: {p}"
+    except yaml.YAMLError as e:
+        entry["error"] = f"policy manifest parse error: {e}"
+    policies_spec.append(entry)
+
 # Trigger descriptor — mutually exclusive: cpu_stress vs istio_fault.
 cpu_target = os.environ["_CPU_STRESS_TARGET"]
 if cpu_target:
@@ -440,7 +477,12 @@ else:
 doc = {
     "scenario": os.environ["_SCENARIO"],
     "scenario_title": os.environ["_SCENARIO_TITLE"],
+    # `policies` stays as a flat list of names for backwards compatibility
+    # with analyze.py and any old tooling that iterates it. The structured
+    # snapshot lives in `policies_spec` (mirroring `client_profiles`) and
+    # records the exact manifest text that was on disk at run time.
     "policies": policies,
+    "policies_spec": policies_spec,
     "client_profiles": client_profiles,
     "warmup_sec": int(os.environ["_WARMUP_SEC"]),
     "prefault_sec": int(os.environ["_PREFAULT_SEC"]),
