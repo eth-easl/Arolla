@@ -51,7 +51,9 @@ MANIFEST_DIR="${SCRIPT_DIR}/manifests/online-boutique/policies"
 FAULT_DIR="${SCRIPT_DIR}/manifests/online-boutique/faults"
 FILTER_DIR="${SCRIPT_DIR}/arolla-filter"
 WASM_PATH="${FILTER_DIR}/target/wasm32-wasip1/release/arolla_filter.wasm"
-REMOTE_WASM_DIR="/home/${SSH_USER}/arolla-wasm"
+# Emulab homes live under /users, not /home. Override via env var if your
+# cluster uses a different layout.
+REMOTE_WASM_DIR="${REMOTE_WASM_DIR:-/users/${SSH_USER}/arolla-wasm}"
 REMOTE_WASM_NAME="arolla_filter.wasm"
 WASM_PORT_DEFAULT=8000
 
