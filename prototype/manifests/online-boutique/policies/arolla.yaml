@@ -41,7 +41,7 @@ spec:
   failStrategy: FAIL_CLOSE
   pluginConfig:
     r: 0.1
-    capacity: 10.0
+    capacity: 20.0
     t: 1.0
-    attempt_header: "x-attempt-number"
+    attempt_header: "x-envoy-attempt-count"
     reject_status: 429
