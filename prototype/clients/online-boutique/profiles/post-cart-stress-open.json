@@ -3,8 +3,8 @@
   "description": "Open-loop version of cart-stress: fire 200 POST /cart per second regardless of backend latency. Uses 60 connections; bounds in-flight to 5000 to prevent client OOM under extreme overload.",
 
   "mode": "open-loop",
-  "rate_rps": 125,
-  "pool_size": 200,
+  "rate_rps": 130,
+  "pool_size": 1000,
   "max_inflight": 5000,
   "timeout_s": 3.0,
 
@@ -24,7 +24,7 @@
     }
   ],
 
-  "retries": 0,
+  "retries": 3,
   "backoff": { "mode": "none" },
   "retry_on_status": [0, 500, 502, 503, 504]
 }

@@ -1,66 +1,102 @@
-# Baseline 2: Circuit breaker (Envoy outlier detection, failure-rate mode).
+# Baseline 2: Circuit breaker (connection-pool / load-shedder mode).
 #
-# Paper §6.1: "Envoy's per-service outlier detection with ejection threshold
-# θ = 50% error rate and base ejection time 5 s."
+# Earlier revisions of this manifest used Envoy outlier detection
+# (failure_percentage_threshold via EnvoyFilter). That mechanism gave a
+# poor experimental signal because outlier detection ejects the *whole
+# upstream host* on failure, which (a) cannot distinguish first attempts
+# from retries, (b) returns 503 UH so callers retry the rejection, and
+# (c) actually accelerates the retry storm by collapsing failed-request
+# turnaround time from ~50ms to ~0ms. See the prior commit for the
+# outlier-detection version if you ever need it.
 #
-# Istio's DestinationRule.outlierDetection only exposes consecutive-error
-# fields (consecutive5xxErrors, consecutiveGatewayErrors, interval,
-# baseEjectionTime, maxEjectionPercent, minHealthPercent). It does NOT expose
-# Envoy's `failure_percentage_threshold`, which is the actual "eject when
-# error rate ≥ θ%" mechanism the paper describes.
+# This revision uses the connection-pool form of circuit breaking: cap
+# the number of in-flight requests Envoy will dispatch to the upstream
+# at any moment, and overflow gets a fast 503 UO (upstream overflow).
+# Mechanically this is a load shedder, not an "is-the-host-healthy"
+# detector — it bounds offered load instead of ejecting on failure.
+# That's a much closer (but still wrong-layered) comparison point for
+# arolla, which is also a demand-side gate.
 #
-# To match the paper we patch Envoy directly via EnvoyFilter (same approach
-# envoy-retry-budget.yaml uses). The MERGE patch sets
-# cluster.outlier_detection.* fields on every SIDECAR_OUTBOUND cluster.
+# How this differs from arolla:
+#   * connection-pool gates ALL requests (first attempts and retries
+#     identically). Arolla gates only retries (attempt > 1).
+#   * connection-pool's signal is "in-flight count vs hard cap".
+#     Arolla's signal is "token bucket replenished by successful
+#     responses" — i.e. it has feedback from the upstream's actual
+#     health, not just its concurrency.
+#   * connection-pool returns 503 UO (which most retryOn lists include).
+#     Arolla returns 429 (which most retryOn lists don't), so arolla
+#     also breaks the upstream-side retry decision in a way connection
+#     pool can't.
 #
-# Key fields (see envoy.config.cluster.v3.OutlierDetection):
-#   failure_percentage_threshold          → θ (paper: 50)
-#   enforcing_failure_percentage          → 100 = enforce (Envoy default: 0 = disabled)
-#   failure_percentage_minimum_hosts      → below this host count, ejection is skipped
-#   failure_percentage_request_volume     → minimum per-host requests in the window
-#   interval                              → evaluation window
-#   base_ejection_time                    → paper: 5s
-#   max_ejection_percent                  → cap on simultaneous ejections
+# Sizing for cartservice (the bottleneck under our cpu-stress fault):
+#   * cart is a gRPC service → HTTP/2, so http2MaxRequests is the
+#     binding cap. http1MaxPendingRequests still applies as the queue
+#     limit in front of http2 admission in Istio.
+#   * Healthy steady-state in-flight at 130 rps with measured p99
+#     ~75ms is rps × latency ≈ 130 × 0.075 ≈ 10 concurrent requests.
+#     We allow 30 (3× headroom) so the limiter is invisible in healthy
+#     operation but caps the storm under fault.
+#   * maxConnections=10 is generous for HTTP/2 (which multiplexes), it
+#     just prevents a connection-establishment thundering herd.
+#   * maxRequestsPerConnection=0 means "no limit" — we don't want to
+#     force connection churn.
 #
-# Usage:
-#   kubectl delete -f policies/arolla.yaml             --ignore-not-found
-#   kubectl delete -f policies/envoy-retry-budget.yaml --ignore-not-found
-#   kubectl delete -f policies/no-control.yaml         --ignore-not-found
-#   kubectl apply  -f policies/circuit-breaker.yaml
+# Scope: this DestinationRule targets cartservice specifically, not
+# the whole namespace. The fault in our experiments is on cart, so
+# gating cart is what matters. Applying tight caps to fast services
+# (adservice, currencyservice, …) would needlessly starve them.
+#
+# IMPORTANT: when migrating from the old EnvoyFilter version, do a
+# one-time manual cleanup of the leftover object:
+#
+#   kubectl -n online-boutique delete envoyfilter arolla-baseline-circuit-breaker --ignore-not-found
+#
+# After that the regular policy lifecycle works:
+#
+#   prototype/deploy-policy.sh switch circuit-breaker
+#   prototype/deploy-policy.sh remove circuit-breaker
+#
+# Verification (during a run):
+#   POD=$(kubectl -n online-boutique get pod -l app=cartservice -o name | head -1)
+#   kubectl -n online-boutique exec "$POD" -c istio-proxy -- \
+#     curl -s localhost:15000/stats | grep -E 'cartservice.*upstream_(rq_pending_overflow|cx_overflow)'
+#   → upstream_rq_pending_overflow / upstream_cx_overflow climb when the
+#     cap fires; that's the connection-pool circuit breaker tripping.
 ---
-apiVersion: networking.istio.io/v1alpha3
-kind: EnvoyFilter
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
 metadata:
   name: arolla-baseline-circuit-breaker
   namespace: online-boutique
 spec:
-  configPatches:
-  - applyTo: CLUSTER
-    match:
-      context: SIDECAR_OUTBOUND
-    patch:
-      operation: MERGE
-      value:
-        outlier_detection:
-          # Trip when failure rate ≥ 50% (paper: θ = 50%).
-          failure_percentage_threshold:
-            value: 50
-          # Envoy defaults enforcing_failure_percentage to 0 (disabled).
-          # Set to 100 so the threshold actually ejects hosts.
-          enforcing_failure_percentage:
-            value: 100
-          # A single host can trip the breaker (Online Boutique typically
-          # has 1 replica per service in the default deployment).
-          failure_percentage_minimum_hosts:
-            value: 1
-          # Require at least 10 requests in the evaluation window before
-          # considering ejection — prevents tripping on a single early error.
-          failure_percentage_request_volume:
-            value: 10
-          interval: 1s            # evaluate every 1s
-          base_ejection_time: 5s  # paper: 5s
-          max_ejection_percent: 100
-          # Keep the consecutive-5xx path off so only the failure-percentage
-          # path is in play (matches what the paper describes).
-          enforcing_consecutive_5xx:
-            value: 0
+  host: cartservice.online-boutique.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        # Cap on simultaneous TCP connections to cart. HTTP/2 multiplexes
+        # many requests onto one connection, so this is just a guardrail
+        # against connection-establishment storms, not the binding cap.
+        maxConnections: 10
+      http:
+        # Queue depth in front of http2 admission. With http2MaxRequests
+        # already low, this just controls how much the caller buffers
+        # before it starts shedding with 503 UO.
+        http1MaxPendingRequests: 10
+        # The binding cap. At most 30 in-flight gRPC requests on cart
+        # at any moment. Healthy 130 rps × ~75ms p99 ≈ 10 in-flight, so
+        # 30 gives 3× headroom for steady state. Under fault, retry-
+        # amplified offered load slams into this cap and overflow gets
+        # an immediate 503 UO.
+        http2MaxRequests: 30
+        # 0 = no upper bound. Connection churn is unhelpful for this
+        # experiment; leave the long-lived gRPC connections in place.
+        maxRequestsPerConnection: 0
+    # Pin outlier detection OFF so only the connection-pool path is in
+    # play. Otherwise stale defaults (or leftovers from no-control.yaml)
+    # could mix the two mechanisms.
+    outlierDetection:
+      consecutive5xxErrors: 0
+      interval: 1s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 0
