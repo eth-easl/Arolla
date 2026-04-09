@@ -1,27 +1,3 @@
-# Baseline 1: "No control" — all retries are admitted.
-#
-# Paper §6.1: "No control: all retries are admitted. This represents
-# uncontrolled retry behavior."
-#
-# Online Boutique's services use gRPC with each client library's built-in
-# retry logic, so retries already happen naturally when dependencies fail.
-# To make the baseline crisp we just make sure NO server-side gate is
-# applied: remove the Arolla WasmPlugin, remove Envoy retry-budget patches,
-# and neutralize outlier detection.
-#
-# This manifest is intentionally a no-op "reset" — apply it between policy
-# runs to clean up any lingering state from the other baselines.
-#
-# Usage:
-#   kubectl delete -f policies/arolla.yaml             --ignore-not-found
-#   kubectl delete -f policies/envoy-retry-budget.yaml --ignore-not-found
-#   kubectl delete -f policies/circuit-breaker.yaml    --ignore-not-found
-#   kubectl apply  -f policies/no-control.yaml
-#
-# The DestinationRule below explicitly disables outlier detection on every
-# service in the namespace, ensuring Envoy's default-off behavior is pinned
-# regardless of what a previous experiment applied.
----
 apiVersion: networking.istio.io/v1beta1
 kind: DestinationRule
 metadata:

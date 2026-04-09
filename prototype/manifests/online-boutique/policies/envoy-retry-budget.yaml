@@ -1,26 +1,17 @@
-# Baseline 3: Envoy retry budget.
+# Baseline 3: Envoy retry budget — concurrent retries capped at a
+# fraction of active+pending requests, applied namespace-wide.
 #
-# Paper §6.1: "Envoy retry budget: concurrent retries capped at 20 % of active
-# requests in the upstream cluster."
-#
-# Envoy exposes this via cluster-level circuit breaker thresholds:
-#   cluster.circuit_breakers.thresholds[].retry_budget.budget_percent
-# Istio's DestinationRule does NOT expose `retry_budget` directly, so we
-# apply it via EnvoyFilter with a CLUSTER MERGE patch.
-#
-# This targets every sidecar-outbound cluster in the namespace. Narrow the
-# match if you only want the budget on specific upstreams.
-#
-# Usage:
-#   kubectl delete -f policies/arolla.yaml          --ignore-not-found
-#   kubectl delete -f policies/circuit-breaker.yaml --ignore-not-found
-#   kubectl delete -f policies/no-control.yaml      --ignore-not-found
-#   kubectl apply  -f policies/envoy-retry-budget.yaml
+# Scope: every SIDECAR_OUTBOUND cluster in the online-boutique
+# namespace. This matches arolla's namespace-wide attachment so the
+# comparison is scope-symmetric — both policies see all retry traffic
+# across the call graph, not just retries to cart. To restrict the
+# patch to a specific upstream, add `cluster.service: <FQDN>` under
+# match below.
 ---
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
-  name: arolla-baseline-envoy-retry-budget
+  name: arolla-baseline-retry-budget
   namespace: online-boutique
 spec:
   configPatches:
@@ -35,11 +26,5 @@ spec:
           - priority: DEFAULT
             retry_budget:
               budget_percent:
-                value: 20.0           # paper: b = 20%
+                value: 20.0
               min_retry_concurrency: 3
-            # Keep other thresholds at Envoy defaults so we're only
-            # perturbing the retry budget.
-            max_connections: 4294967295
-            max_pending_requests: 4294967295
-            max_requests: 4294967295
-            max_retries: 4294967295
