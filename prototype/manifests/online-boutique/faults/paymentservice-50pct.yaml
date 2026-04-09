@@ -1,0 +1,43 @@
+# §6.2.3 — Chain amplification with fault on the deepest leaf service.
+#
+# 50% of requests to paymentservice return HTTP 503. Payment is the deepest
+# leaf reachable from a client checkout: client → frontend → checkoutservice
+# → paymentservice. Each layer above payment has its own Istio retry policy
+# (attempts: 3), so a single failed payment call can produce up to
+# 4 (client) × 4 (frontend → checkout) × 4 (checkout → payment) = 64
+# payment-attempts at the bottom. The point of this fault is to measure
+# how each retry-control policy bounds the chain amplification.
+#
+# Why this manifest carries retry config too:
+#   This VirtualService uses the same name as paymentservice-routing in
+#   ../service-retries.yaml, so applying it REPLACES the base entry. We
+#   re-include the retry block here so chain retries stay on during the
+#   fault — without it, applying the fault would disable retries and we'd
+#   only see the raw 50% drop instead of the retry-amplification dynamics.
+#
+# Usage:
+#   Apply:  kubectl apply -f faults/paymentservice-50pct.yaml
+#   Remove: kubectl apply -f service-retries.yaml         ← restore base
+#   (run-experiment.sh handles the apply-to-restore pattern automatically.)
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: paymentservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - paymentservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 50.0
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 18ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: paymentservice

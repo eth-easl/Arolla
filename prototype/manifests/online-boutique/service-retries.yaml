@@ -114,7 +114,7 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 116ms    # measured p99 = 116.3ms (orchestrator, fans out)
+      perTryTimeout: 800ms
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:
@@ -152,7 +152,11 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 3ms      # measured p99 = 3.1ms
+      # Old value 3ms was inherited from a near-idle calibration. Under
+      # checkout-fan-out load, p99 climbs into the tens of ms easily,
+      # so 3ms caused frequent spurious cancellations on the checkout
+      # path. Bumped to 100ms for headroom under load.
+      perTryTimeout: 100ms
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:
@@ -171,7 +175,12 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 18ms     # measured p99 = 17.9ms
+      # Old value 18ms was inherited from a near-idle calibration. Under
+      # checkout-fan-out load, p99 grows into the tens-to-hundreds of ms,
+      # so 18ms caused spurious cancellations even at zero offered load.
+      # Bumped to 100ms for headroom; still tight enough that a deliberate
+      # fault (e.g. paymentservice-50pct.yaml) trips mesh retries cleanly.
+      perTryTimeout: 100ms
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:
@@ -228,7 +237,11 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 5ms      # measured p99 = 1.1ms
+      # Old value 5ms was inherited from a near-idle calibration. Under
+      # checkout-fan-out load, shipping's GetQuote and ShipOrder both
+      # routinely take >5ms each, so 5ms caused spurious cancellations.
+      # Bumped to 100ms for headroom under load.
+      perTryTimeout: 100ms
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:
