@@ -29,7 +29,7 @@
           "content_type": "application/x-www-form-urlencoded" },
         { "name": "checkout-place",
           "method": "POST", "path": "/cart/checkout",
-          "body": "email=someone%40example.com&street_address=1+Main+St&zip_code=94000&city=San+Francisco&state=CA&country=United+States&credit_card_number=4432-8015-6152-0454&credit_card_expiration_month=1&credit_card_expiration_year=2040&credit_card_cvv=672",
+          "body": "email=someone%40example.com&street_address=1+Main+St&zip_code=94000&city=San+Francisco&state=CA&country=United+States&credit_card_number=4432801561520454&credit_card_expiration_month=1&credit_card_expiration_year=2040&credit_card_cvv=672",
           "content_type": "application/x-www-form-urlencoded" }
       ]
     }
