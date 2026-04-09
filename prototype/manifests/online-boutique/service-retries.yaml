@@ -133,7 +133,7 @@ spec:
   http:
   - retries:
       attempts: 3
-      perTryTimeout: 410ms      # measured p99 = 2.1ms
+      perTryTimeout: 410ms
       retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
     route:
     - destination:

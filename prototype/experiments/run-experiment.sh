@@ -62,10 +62,10 @@ FAULT_MANIFEST_OVERRIDE=""  # empty → use scenario's default; else override
 CPU_STRESS_TARGET=""        # empty → no CPU stress; else workload label (e.g. "cartservice")
 CPU_STRESS_LOAD=80          # % CPU per stress worker (paper Fig 5: 80%=metastable, 78%=recovers)
 CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
-# Per-run output goes under outputs/prototype/runs/<timestamp>/ at the repo
-# root. This sits alongside outputs/{basic,client_count,metastable}/ which
-# hold simulator plots, namespaced under outputs/prototype/ to avoid collision.
-OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype/runs"
+# Per-run output goes under outputs/prototype/<profile>/<profile>_<timestamp>/
+# at the repo root. The profile subfolder groups runs by workload type so
+# cart-stress and checkout-stress results don't intermingle.
+OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype"
 DRY_RUN=false
 SKIP_ANALYZE=false
 POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
@@ -167,7 +167,7 @@ Options:
       --cpu-stress-workers <n>    Number of concurrent stress-ng workers.
                                 Default: ${CPU_STRESS_WORKERS}
   -o, --output <dir>            Output root directory.
-                                Default: ${OUTPUT_ROOT}/<timestamp>
+                                Default: ${OUTPUT_ROOT}/<profile>/<profile>_<timestamp>
       --warmup <sec>            Override warmup duration
       --prefault <sec>          Override pre-fault baseline duration
       --fault <sec>             Override fault duration
@@ -316,7 +316,7 @@ python3 -c "import yaml" >/dev/null 2>&1 || err "pyyaml is required to snapshot 
        (then re-run; no other change needed.)"
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="${OUTPUT_ROOT}/${RUN_TS}"
+# RUN_DIR is computed after RESOLVED_PROFILES is known (see below).
 
 # Total duration per policy
 TOTAL_SEC=$((WARMUP_SEC + PREFAULT_SEC + FAULT_SEC + RECOVERY_SEC + COOLDOWN_SEC))
@@ -365,14 +365,8 @@ Grand total (all policies): ~${GRAND_TOTAL_SEC}s
 EOF
 }
 
-print_plan
-
-if "${DRY_RUN}"; then
-  log "dry run — exiting before touching anything"
-  exit 0
-fi
-
-mkdir -p "${RUN_DIR}"
+# print_plan and dry-run check are deferred to after RUN_DIR is computed
+# (it depends on RESOLVED_PROFILES which is resolved below).
 
 # Write the top-level experiment descriptor. analyze.py reads this.
 #
@@ -404,6 +398,24 @@ else
     RESOLVED_PROFILES+=("$(basename "${_f}" .json)")
   done
 fi
+
+# Build the run directory path now that we know which profile(s) will run.
+# Structure: outputs/prototype/<profile_name>/<profile_name>_<timestamp>/
+# When multiple profiles are specified, join their names with '+'.
+_profile_slug="${RESOLVED_PROFILES[0]}"
+if (( ${#RESOLVED_PROFILES[@]} > 1 )); then
+  _profile_slug="$(IFS=+; echo "${RESOLVED_PROFILES[*]}")"
+fi
+RUN_DIR="${OUTPUT_ROOT}/${_profile_slug}/${_profile_slug}_${RUN_TS}"
+
+print_plan
+
+if "${DRY_RUN}"; then
+  log "dry run — exiting before touching anything"
+  exit 0
+fi
+
+mkdir -p "${RUN_DIR}"
 
 # Hand off to Python for the JSON build. Args are passed via env vars to
 # avoid quoting nightmares with shell array → python list translation.
