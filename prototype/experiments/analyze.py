@@ -1615,6 +1615,104 @@ def plot_retries_stacked_by_caller(
     print(f"  wrote {out_path}")
 
 
+def plot_retries_stacked_by_callee(
+    runs: Dict[str, dict],
+    out_path: Path,
+    counter: str = "upstream_rq_retry",
+) -> None:
+    """
+    Complementary view to plot_retries_stacked_by_caller: shows retries
+    *received by* each service (incoming), stacked by the receiving
+    service. For each policy, one vertical bar whose total height is the
+    total retries received across all services. Each colored segment is
+    one upstream service that received retries from any caller.
+
+    This answers "which services bore the retry pressure?" while the
+    caller version answers "which services generated the retry pressure?"
+    Together the two plots trace the full chain: caller → callee.
+    """
+    _apply_paper_style()
+    ordered_policies = [p for p in POLICY_ORDER if p in runs] + \
+                       [p for p in runs if p not in POLICY_ORDER]
+    if not ordered_policies:
+        return
+
+    # Sum retries per (policy, upstream) across all callers that retried
+    # to that upstream. Result: { policy: { upstream: total_retries } }.
+    per_policy: Dict[str, Dict[str, int]] = {}
+    for policy in ordered_policies:
+        deltas = runs[policy].get("run_retry_deltas") or {}
+        per_upstream: Dict[str, int] = {}
+        for (_caller, upstream), counters in deltas.items():
+            v = counters.get(counter, 0)
+            if v <= 0:
+                continue
+            per_upstream[upstream] = per_upstream.get(upstream, 0) + v
+        per_policy[policy] = per_upstream
+
+    # Same chain-order rendering as the caller version.
+    chain_services = list(_CHAIN_SERVICE_ORDER)
+    extras = sorted(u for p in per_policy.values() for u in p
+                    if u not in _CHAIN_SERVICE_ORDER)
+    callees_in_chain_order = chain_services + list(dict.fromkeys(extras))
+
+    if not any(per_policy[p].get(c, 0) > 0
+               for p in ordered_policies
+               for c in callees_in_chain_order):
+        return
+
+    fig, ax = plt.subplots(figsize=(1.4 * len(ordered_policies) + 2.6, 5.0))
+    x = np.arange(len(ordered_policies))
+    bottom = np.zeros(len(ordered_policies))
+
+    for svc in callees_in_chain_order:
+        heights = np.array([per_policy[p].get(svc, 0) for p in ordered_policies],
+                           dtype=float)
+        ax.bar(
+            x, heights,
+            bottom=bottom,
+            color=_CHAIN_SERVICE_COLORS.get(svc, "lightgray"),
+            edgecolor="white",
+            linewidth=0.5,
+            label=svc,
+            width=0.65,
+        )
+        bottom += heights
+
+    totals = bottom
+    if totals.max() > 0:
+        ymax = totals.max()
+        for i, total in enumerate(totals):
+            if total <= 0:
+                continue
+            ax.text(
+                x[i], total + ymax * 0.015,
+                f"{int(total):,}",
+                ha="center", va="bottom",
+                fontsize=10,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in ordered_policies],
+                       rotation=0, fontsize=11)
+    ax.set_ylabel("Retries received (sum across all callers)")
+    ax.set_title("Chain amplification: retries by callee, stacked",
+                 fontsize=12, loc="left", pad=4)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles[::-1], labels[::-1],
+        loc="upper right",
+        frameon=True, fancybox=False,
+        edgecolor="#888888", framealpha=0.95, fontsize=10,
+        title="received by",
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
 def print_retry_summary(runs: Dict[str, dict]) -> None:
     """
     Textual per-phase per-policy retry summary, printed to stdout.
@@ -1923,6 +2021,9 @@ def main():
     # .stats whole-run snapshots, not the per-phase ones.
     plot_retries_stacked_by_caller(
         runs, plots_dir / "retries-stacked-by-caller.pdf",
+    )
+    plot_retries_stacked_by_callee(
+        runs, plots_dir / "retries-stacked-by-callee.pdf",
     )
 
 
