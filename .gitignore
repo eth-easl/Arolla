@@ -221,3 +221,4 @@ paper_figures/
 *.pdf
 simulator/experiments/yaml/aimd_vs_sysname/
 simulator/experiments/yaml/sysname/
+.vscode/
