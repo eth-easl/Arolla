@@ -26,9 +26,10 @@ Metrics computed (all during the fault window):
 from __future__ import annotations
 
 import json
+import re as _re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,7 +42,7 @@ import pandas as pd
 POLICY_LABELS = {
     "no-control":         "No control",
     "circuit-breaker":    "Circuit breaker",
-    "envoy-retry-budget": "Envoy budget",
+    "envoy-retry-budget": "Retry budget",
     "arolla":             "Arolla",
 }
 
@@ -72,6 +73,30 @@ def _apply_paper_style() -> None:
         "lines.linewidth":   2.0,
         "figure.dpi":        110,
     })
+
+
+def _fault_band_x(experiment: dict) -> tuple:
+    """
+    Return (fault_start_x, fault_end_x) for the figure fault-band shading,
+    in seconds since the prefault start (= the figure x-axis origin).
+
+    Always uses the *intended* fault window from `experiment["prefault_sec"]`
+    and `experiment["fault_sec"]`, i.e. the schedule the runner was
+    configured to follow. This matches the figure caption ("fault: 10 s")
+    and the methodology description in the paper.
+
+    Note: the per-policy `t_fault_actual_*` timestamps in timeline.json
+    record when chaos-apply / chaos-delete kubectl calls actually returned,
+    which can drift several seconds from the intended boundary because of
+    snapshot wall time and chaos-mesh dispatch latency. We deliberately
+    do NOT use them here — they're useful for forensics (and the analyzer
+    still consumes them inside process_policy() for the per-bin
+    calculations) but they make the figure band visually inconsistent
+    with where the failures actually start.
+    """
+    prefault_sec = float(experiment.get("prefault_sec", 0))
+    fault_sec    = float(experiment.get("fault_sec", 0))
+    return prefault_sec, prefault_sec + fault_sec
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +158,187 @@ def parse_envoy_stats(stats_file: Path) -> Dict[str, float]:
     return out
 
 
-# Regex used by parse_istio_duration_buckets(). Compiled once.
-import re as _re
+# Phase boundaries are recorded as filename suffixes by run-experiment.sh's
+# dump_sidecar_stats. The order here defines the snapshot sequence and
+# therefore the per-phase deltas computed below.
+#
+#   .pre          → captured before warmup
+#   .warmup_end   → captured at the end of warmup
+#   .fault_start  → captured at the end of prefault (right before fault)
+#   .fault_end    → captured at the end of fault (right after trigger removed)
+#   .recovery_end → captured at the end of recovery
+#   ""            → captured after cooldown (post-run)
+#
+# Older runs only have .pre and "" — the parser tolerates missing snapshots
+# and skips phases that don't have both endpoints.
+PHASE_SNAPSHOTS = [
+    ("warmup",   ".pre",          ".warmup_end"),
+    ("prefault", ".warmup_end",   ".fault_start"),
+    ("fault",    ".fault_start",  ".fault_end"),
+    ("recovery", ".fault_end",    ".recovery_end"),
+    ("cooldown", ".recovery_end", ""),
+]
+
+# Counter families we expose for the per-phase retry plots. Each one is
+# scraped from cluster.outbound|<port>||<fqdn>;.upstream_rq_<name>.
+RETRY_COUNTERS = (
+    "upstream_rq_retry",
+    "upstream_rq_retry_success",
+    "upstream_rq_retry_overflow",
+    "upstream_rq_retry_limit_exceeded",
+)
+
+# Compiled once. Matches a line like:
+#   cluster.outbound|7070||cartservice.online-boutique.svc.cluster.local;.upstream_rq_retry: 12345
+_RETRY_LINE = _re.compile(
+    r'^cluster\.outbound\|(\d+)\|\|([^;]+);\.(upstream_rq_retry(?:_success|_overflow|_limit_exceeded)?):\s+(\d+)\s*$'
+)
+
+
+def _parse_retry_counters(stats_file: Path) -> Dict[Tuple[str, str], int]:
+    """
+    Extract per-upstream retry counters from one Envoy /stats dump.
+    Returns {(upstream_short_name, counter_name): value}, where the
+    upstream short name is the first DNS label of the upstream FQDN
+    (e.g. "cartservice"). Lines that don't match are silently skipped.
+    """
+    out: Dict[Tuple[str, str], int] = {}
+    if not stats_file.exists():
+        return out
+    for line in stats_file.read_text().splitlines():
+        m = _RETRY_LINE.match(line)
+        if not m:
+            continue
+        _port, fqdn, counter, value = m.groups()
+        upstream = fqdn.split('.', 1)[0]   # "cartservice.online..." → "cartservice"
+        out[(upstream, counter)] = int(value)
+    return out
+
+
+def discover_services_from_sidecar_dir(sidecar_dir: Path) -> List[str]:
+    """
+    Infer the set of caller services that have stats files in `sidecar_dir`.
+    Returns a sorted list of service names (one per `<svc>.stats` file,
+    deduped across phase suffixes).
+    """
+    if not sidecar_dir.exists():
+        return []
+    services = set()
+    for path in sidecar_dir.glob("*.stats"):
+        # Strip phase suffix if present. Filenames look like:
+        #   frontend.stats
+        #   frontend.pre.stats
+        #   frontend.fault_start.stats
+        # We want "frontend" in all three cases.
+        stem = path.stem  # drops .stats
+        # If the stem contains a dot, the part before the first dot is the
+        # service name. (Service names themselves contain no dots.)
+        svc = stem.split('.', 1)[0]
+        services.add(svc)
+    return sorted(services)
+
+
+def parse_phase_retry_deltas(
+    sidecar_dir: Path,
+    services: List[str],
+) -> Dict[str, Dict[Tuple[str, str], Dict[str, int]]]:
+    """
+    Walk every <svc>.<phase>.stats file in `sidecar_dir` and compute
+    per-phase deltas for each (caller, upstream) pair across the four
+    retry counters.
+
+    Returns a nested structure:
+        result[phase][(caller, upstream)][counter] = delta_value
+
+    where `phase` is one of warmup/prefault/fault/recovery/cooldown.
+
+    A phase is included in the result only if BOTH of its snapshot
+    endpoints exist on disk for at least one caller. This prevents
+    older runs (which only have .pre and "" snapshots) from producing
+    bogus negative deltas where a missing snapshot is treated as zero.
+    """
+    result: Dict[str, Dict[Tuple[str, str], Dict[str, int]]] = {}
+    if not sidecar_dir.exists():
+        return result
+
+    # Track which (caller, suffix) snapshots actually exist on disk so
+    # we can distinguish "snapshot exists, all counters were zero" from
+    # "snapshot doesn't exist". We need this distinction because phase
+    # deltas are arithmetic on counter values, and treating a missing
+    # snapshot as {} (zero counters) silently gives nonsense for runs
+    # that only captured a subset of the phase boundaries.
+    snapshot_exists: Dict[Tuple[str, str], bool] = {}
+    snapshots: Dict[Tuple[str, str], Dict[Tuple[str, str], int]] = {}
+    for caller in services:
+        for _phase, _start_suffix, _end_suffix in PHASE_SNAPSHOTS:
+            for suffix in (_start_suffix, _end_suffix):
+                key = (caller, suffix)
+                if key in snapshots:
+                    continue
+                stats_file = sidecar_dir / f"{caller}{suffix}.stats"
+                snapshot_exists[key] = stats_file.exists()
+                snapshots[key] = _parse_retry_counters(stats_file)
+
+    # Compute deltas per phase.
+    for phase, start_suffix, end_suffix in PHASE_SNAPSHOTS:
+        phase_data: Dict[Tuple[str, str], Dict[str, int]] = {}
+        for caller in services:
+            # Skip this caller for this phase if either endpoint is missing.
+            if not snapshot_exists.get((caller, start_suffix), False):
+                continue
+            if not snapshot_exists.get((caller, end_suffix), False):
+                continue
+            start = snapshots.get((caller, start_suffix), {})
+            end = snapshots.get((caller, end_suffix), {})
+            # Union of all (upstream, counter) keys seen in either endpoint.
+            keys = set(start) | set(end)
+            for upstream, counter in keys:
+                delta = end.get((upstream, counter), 0) - start.get((upstream, counter), 0)
+                if delta == 0:
+                    continue
+                phase_data.setdefault((caller, upstream), {})[counter] = delta
+        if phase_data:
+            result[phase] = phase_data
+    return result
+
+
+def parse_run_retry_deltas(
+    sidecar_dir: Path,
+    services: List[str],
+) -> Dict[Tuple[str, str], Dict[str, int]]:
+    """
+    Whole-run retry deltas, computed from `<svc>.pre.stats` (taken before
+    warmup) and `<svc>.stats` (taken after cooldown). These two snapshots
+    are written by run-experiment.sh on every run regardless of the
+    `--phase-snapshots` flag, so this works on every run dir.
+
+    Returns {(caller, upstream): {counter: delta}} where each entry is the
+    total retries dispatched by `caller` to `upstream` over the entire
+    run window. Used by the chain-amplification stacked-bar plot.
+    """
+    result: Dict[Tuple[str, str], Dict[str, int]] = {}
+    if not sidecar_dir.exists():
+        return result
+
+    for caller in services:
+        pre_file  = sidecar_dir / f"{caller}.pre.stats"
+        post_file = sidecar_dir / f"{caller}.stats"
+        if not pre_file.exists() or not post_file.exists():
+            # Need both endpoints to compute a delta.
+            continue
+        pre  = _parse_retry_counters(pre_file)
+        post = _parse_retry_counters(post_file)
+        # Union of all (upstream, counter) keys seen in either snapshot.
+        for upstream, counter in set(pre) | set(post):
+            delta = post.get((upstream, counter), 0) - pre.get((upstream, counter), 0)
+            if delta == 0:
+                continue
+            result.setdefault((caller, upstream), {})[counter] = delta
+    return result
+
+
+# Regex used by parse_istio_duration_buckets(). Compiled once. (`_re`
+# is imported once at the top of the module.)
 _BUCKET_LINE = _re.compile(
     r'istio_request_duration_milliseconds_bucket\{([^}]*)\}\s+(\S+)'
 )
@@ -232,7 +436,7 @@ def parse_istio_duration_buckets(
 def client_latency_timeseries(df: pd.DataFrame, t_ref: float, t_end: float,
                               bin_sec: float = 1.0) -> Dict[str, pd.Series]:
     """
-    Per-second client-observed latency percentiles (p50, p95, p99).
+    Per-second client-observed latency percentiles (p50, p90, p95, p99).
 
     Returns {percentile_name -> pd.Series} where each series is indexed by
     bin (seconds since t_ref) and the value is that percentile of latencies
@@ -243,6 +447,7 @@ def client_latency_timeseries(df: pd.DataFrame, t_ref: float, t_end: float,
     healthy-tail latency and failure-induced latency spikes uniformly.
     """
     empty = {"p50": pd.Series(dtype=float),
+             "p90": pd.Series(dtype=float),
              "p95": pd.Series(dtype=float),
              "p99": pd.Series(dtype=float)}
     if df.empty or "latency_s" not in df.columns:
@@ -256,12 +461,14 @@ def client_latency_timeseries(df: pd.DataFrame, t_ref: float, t_end: float,
 
     grouped = window.groupby("bin")["latency_ms"]
     p50 = grouped.quantile(0.50)
+    p90 = grouped.quantile(0.90)
     p95 = grouped.quantile(0.95)
     p99 = grouped.quantile(0.99)
 
     n_bins = int((t_end - t_ref) // bin_sec) + 1
     return {
         "p50": p50.reindex(range(n_bins)),
+        "p90": p90.reindex(range(n_bins)),
         "p95": p95.reindex(range(n_bins)),
         "p99": p99.reindex(range(n_bins)),
     }
@@ -487,10 +694,16 @@ def recovery_time_sec(goodput: pd.Series, fault_end_bin: int,
     """
     Seconds from fault_end until goodput first reaches target_pct of the
     pre-fault mean. Returns None if it never recovers within the series.
+
+    Bin semantics are half-open: `pre_fault_bin_end` and `fault_end_bin`
+    are exclusive (the first bin *not* in the range), to match Python
+    slicing conventions used by the caller.
     """
     if goodput.empty:
         return None
-    pre = goodput.loc[pre_fault_bin_start:pre_fault_bin_end]
+    # pandas .loc[] is inclusive on both sides, so subtract 1 to get the
+    # half-open range the caller intended.
+    pre = goodput.loc[pre_fault_bin_start:pre_fault_bin_end - 1]
     if pre.empty or pre.mean() == 0:
         return None
     target = pre.mean() * (target_pct / 100.0)
@@ -544,14 +757,15 @@ def _plot_timeseries(
     ordered = [p for p in POLICY_ORDER if p in runs] + \
               [p for p in runs if p not in POLICY_ORDER]
 
-    # All coordinates come from experiment.json durations.
+    # X-axis bounds come from experiment.json durations (the *intended*
+    # schedule). The fault-band shading uses _fault_band_x() which prefers
+    # the per-policy actual fault timestamps when they're available.
     prefault_sec = float(experiment.get("prefault_sec", 0))
     fault_sec    = float(experiment.get("fault_sec", 0))
     recovery_sec = float(experiment.get("recovery_sec", 0))
     cooldown_sec = float(experiment.get("cooldown_sec", 0))
     total_measured_duration = prefault_sec + fault_sec + recovery_sec + cooldown_sec
-    fault_start_x = prefault_sec
-    fault_end_x   = prefault_sec + fault_sec
+    fault_start_x, fault_end_x = _fault_band_x(experiment)
 
     for policy in ordered:
         d = runs[policy]
@@ -695,52 +909,73 @@ def print_latency_summary(runs: Dict[str, dict]) -> None:
 
 def plot_latency_timeseries(runs: Dict[str, dict], out_path: Path, experiment: dict):
     """
-    Per-second client-observed latency percentiles (p50/p95/p99) over time,
-    one row per policy, log-scale y-axis. Useful for spotting:
+    Per-second client-observed latency percentiles over time, one figure
+    per (percentile, y-axis scale) pair. Each figure compares all policies
+    on the same axes. Useful for spotting:
 
-      - tail-latency growth as load builds
+      - tail-latency growth as load builds (compare p99 across policies)
       - mesh-retry-induced latency plateaus (p99 climbing toward client timeout)
       - the moment a fault trigger fires (sudden latency spike)
       - whether recovery is monotone or oscillating
+
+    Each percentile is rendered twice — once on log y (good for spanning
+    healthy ms to fault-window seconds in one plot) and once on linear y
+    (good for reading absolute differences between policies in the
+    fault/recovery window). The "log" view is the better default for
+    spotting the metastable plateau; the "linear" view is the better
+    default for measuring how much one policy beats another.
+
+    `out_path` is treated as the base path. Files written:
+        <stem>-p50-log.pdf,    <stem>-p50-linear.pdf
+        <stem>-p90-log.pdf,    <stem>-p90-linear.pdf
+        <stem>-p95-log.pdf,    <stem>-p95-linear.pdf
+        <stem>-p99-log.pdf,    <stem>-p99-linear.pdf
     """
     _apply_paper_style()
     ordered = [p for p in POLICY_ORDER if p in runs] + \
               [p for p in runs if p not in POLICY_ORDER]
-    n = len(ordered)
-    if n == 0:
+    if not ordered:
         return
 
-    # Scenario coordinates (same as the other timeseries plots)
+    # Scenario coordinates (same as the other timeseries plots).
+    # Fault band x-coordinates come from _fault_band_x() which prefers
+    # the per-policy actual fault timestamps over the intended ones.
     prefault_sec = float(experiment.get("prefault_sec", 0))
     fault_sec    = float(experiment.get("fault_sec", 0))
     recovery_sec = float(experiment.get("recovery_sec", 0))
     cooldown_sec = float(experiment.get("cooldown_sec", 0))
     total = prefault_sec + fault_sec + recovery_sec + cooldown_sec
-    fault_start_x = prefault_sec
-    fault_end_x   = prefault_sec + fault_sec
+    fault_start_x, fault_end_x = _fault_band_x(experiment)
 
-    pct_colors = {
-        "p50": "#1f77b4",   # blue
-        "p95": "#ff7f0e",   # orange
-        "p99": "#d62728",   # red
-    }
-    pct_labels = {"p50": "p50", "p95": "p95", "p99": "p99"}
+    percentiles = ("p50", "p90", "p95", "p99")
+    out_path = Path(out_path)
 
-    fig, axes = plt.subplots(n, 1, figsize=(7.2, 3.0 * n), sharex=True, squeeze=False)
+    def _render(pct: str, yscale: str) -> None:
+        """Render one percentile/yscale combo and write the file."""
+        fig, ax = plt.subplots(figsize=(7.2, 3.6))
 
-    for row, policy in enumerate(ordered):
-        ax = axes[row][0]
-        d = runs[policy]
-        lat_ts = d.get("client_latency_ts") or {}
-
-        for pct in ("p50", "p95", "p99"):
+        any_plotted = False
+        for policy in ordered:
+            d = runs[policy]
+            lat_ts = d.get("client_latency_ts") or {}
             ts = lat_ts.get(pct)
             if ts is None or ts.empty:
                 continue
-            ax.plot(ts.index, ts.values,
-                    label=pct_labels[pct], color=pct_colors[pct], linewidth=1.6)
+            ax.plot(
+                ts.index, ts.values,
+                label=POLICY_LABELS.get(policy, policy),
+                color=POLICY_COLORS.get(policy),
+                linewidth=1.8,
+            )
+            any_plotted = True
 
-        # Fault region shading
+        if not any_plotted:
+            plt.close(fig)
+            return
+
+        # Fault region shading. axvspan must be added BEFORE the "fault"
+        # label so we can read the final ylim — but on log scale ylim is
+        # data-driven and stable; on linear scale we set it after plot too.
         if fault_sec > 0:
             ax.axvspan(fault_start_x, fault_end_x, color="lightgray",
                        alpha=0.55, zorder=0)
@@ -752,22 +987,32 @@ def plot_latency_timeseries(runs: Dict[str, dict], out_path: Path, experiment: d
                 fontsize=11, fontstyle="italic", color="#555555",
             )
 
-        ax.set_yscale("log")
-        ax.set_ylabel("Client latency (ms)")
+        ax.set_yscale(yscale)
+        ax.set_ylabel(f"Client latency {pct} (ms)")
+        ax.set_xlabel("Time (s)")
         if total > 0:
             ax.set_xlim(0, total)
-        ax.grid(True, which="both", alpha=0.25, linewidth=0.5)
+        # On log scale we want major+minor gridlines (the "which='both'"
+        # path); on linear scale matplotlib's default major-only grid is
+        # the cleaner look.
+        if yscale == "log":
+            ax.grid(True, which="both", alpha=0.25, linewidth=0.5)
+        else:
+            ax.grid(True, alpha=0.25, linewidth=0.5)
         ax.legend(loc="upper right", frameon=True, fancybox=False,
                   edgecolor="#888888", framealpha=0.95, fontsize=10)
-        if n > 1:
-            ax.set_title(POLICY_LABELS.get(policy, policy),
-                         fontsize=12, loc="left", pad=4)
 
-    axes[-1][0].set_xlabel("Time (s)")
-    fig.tight_layout()
-    fig.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  wrote {out_path}")
+        pct_path = out_path.with_name(
+            f"{out_path.stem}-{pct}-{yscale}{out_path.suffix}"
+        )
+        fig.tight_layout()
+        fig.savefig(pct_path, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  wrote {pct_path}")
+
+    for pct in percentiles:
+        _render(pct, "log")
+        _render(pct, "linear")
 
 
 def plot_latency_cdf(runs: Dict[str, dict], out_path: Path, experiment: dict):
@@ -892,14 +1137,14 @@ def plot_rps(runs: Dict[str, dict], out_path: Path, experiment: dict):
     if n == 0:
         return
 
-    # Scenario coordinates
+    # Scenario coordinates. Fault band x-coordinates come from
+    # _fault_band_x() which prefers per-policy actual fault timestamps.
     prefault_sec = float(experiment.get("prefault_sec", 0))
     fault_sec    = float(experiment.get("fault_sec", 0))
     recovery_sec = float(experiment.get("recovery_sec", 0))
     cooldown_sec = float(experiment.get("cooldown_sec", 0))
     total = prefault_sec + fault_sec + recovery_sec + cooldown_sec
-    fault_start_x = prefault_sec
-    fault_end_x   = prefault_sec + fault_sec
+    fault_start_x, fault_end_x = _fault_band_x(experiment)
 
     # Colors: matplotlib defaults (blue/orange/red map cleanly to
     # root/retry/failed).
@@ -1000,6 +1245,438 @@ def plot_bar(runs: Dict[str, dict], key: str, ylabel: str, title: str,
 
 
 # ---------------------------------------------------------------------------
+# Per-phase per-service retry plots
+# ---------------------------------------------------------------------------
+#
+# These read `phase_retry_deltas` from each policy's runs[] entry, which is
+# populated by parse_phase_retry_deltas() during process_policy(). Older
+# runs that don't have the phase-boundary snapshots will silently produce
+# only the phases they have data for (or be skipped entirely).
+#
+# Two plot styles:
+#   plot_retries_by_upstream    — view (b): per-upstream aggregation,
+#                                  one panel per phase, grouped bars by
+#                                  policy. Best for "how much retry
+#                                  pressure landed on each service".
+#   plot_retries_caller_matrix  — view (a): caller × upstream heatmap,
+#                                  one heatmap per (policy, phase). Best
+#                                  for "which caller is generating the
+#                                  retries to which upstream".
+# A textual summary is also printed via print_retry_summary().
+
+# Phases we draw, in order. We deliberately drop "warmup" and "cooldown"
+# from the headline plots — they're just bookend phases and rarely have
+# meaningful retry activity. They're still printed in the summary.
+_RETRY_PLOT_PHASES = ("prefault", "fault", "recovery")
+
+
+def _aggregate_retries_by_upstream(
+    phase_data: Dict[Tuple[str, str], Dict[str, int]],
+    counter: str = "upstream_rq_retry",
+) -> Dict[str, int]:
+    """Sum a counter across all callers for each upstream in one phase."""
+    out: Dict[str, int] = {}
+    for (caller, upstream), counters in phase_data.items():
+        v = counters.get(counter, 0)
+        if v:
+            out[upstream] = out.get(upstream, 0) + v
+    return out
+
+
+def plot_retries_by_upstream(
+    runs: Dict[str, dict],
+    out_path: Path,
+    experiment: dict,
+    counter: str = "upstream_rq_retry",
+) -> None:
+    """
+    View (b): per-upstream aggregated retry counts during prefault/fault/
+    recovery phases. One subplot per phase, x-axis = upstream service,
+    grouped bars per policy.
+
+    Saves a single PDF with three side-by-side panels.
+    """
+    _apply_paper_style()
+    ordered_policies = [p for p in POLICY_ORDER if p in runs] + \
+                       [p for p in runs if p not in POLICY_ORDER]
+    if not ordered_policies:
+        return
+
+    # Per-phase aggregation: { phase: { policy: { upstream: count } } }
+    per_phase: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for phase in _RETRY_PLOT_PHASES:
+        per_phase[phase] = {}
+        for policy in ordered_policies:
+            phase_deltas = runs[policy].get("phase_retry_deltas") or {}
+            phase_data = phase_deltas.get(phase) or {}
+            per_phase[phase][policy] = _aggregate_retries_by_upstream(phase_data, counter)
+
+    # Union of upstream services across all policies and all phases.
+    # Sorted alphabetically for stable ordering.
+    upstreams = set()
+    for phase in _RETRY_PLOT_PHASES:
+        for policy in ordered_policies:
+            upstreams.update(per_phase[phase][policy].keys())
+    upstreams = sorted(upstreams)
+    if not upstreams:
+        # No phase-snapshot data anywhere — older run, skip silently.
+        return
+
+    n_phases = len(_RETRY_PLOT_PHASES)
+    fig, axes = plt.subplots(
+        1, n_phases, figsize=(5.5 * n_phases, 4.2),
+        sharey=False, squeeze=False,
+    )
+
+    n_policies = len(ordered_policies)
+    bar_width = 0.8 / max(n_policies, 1)
+    x_pos = np.arange(len(upstreams))
+
+    for col, phase in enumerate(_RETRY_PLOT_PHASES):
+        ax = axes[0][col]
+        for i, policy in enumerate(ordered_policies):
+            counts = per_phase[phase][policy]
+            heights = [counts.get(u, 0) for u in upstreams]
+            offset = (i - (n_policies - 1) / 2.0) * bar_width
+            ax.bar(
+                x_pos + offset, heights,
+                width=bar_width,
+                color=POLICY_COLORS.get(policy, "gray"),
+                edgecolor="white", linewidth=0.5,
+                label=POLICY_LABELS.get(policy, policy),
+            )
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(upstreams, rotation=45, ha="right", fontsize=9)
+        ax.set_title(f"{phase}", fontsize=12, loc="left", pad=4)
+        ax.set_ylabel(f"retries dispatched ({phase})")
+        ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+        if col == n_phases - 1:
+            ax.legend(loc="upper right", frameon=True, fancybox=False,
+                      edgecolor="#888888", framealpha=0.95, fontsize=10)
+
+    fig.suptitle(
+        f"Per-upstream retry dispatches by phase ({counter})",
+        fontsize=13, y=1.02,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_retries_caller_matrix(
+    runs: Dict[str, dict],
+    out_dir: Path,
+    experiment: dict,
+    counter: str = "upstream_rq_retry",
+) -> None:
+    """
+    View (a): caller × upstream retry-count heatmaps. Saves one PDF per
+    (policy × phase) pair into `out_dir`, named like:
+        retries-matrix-<policy>-<phase>.pdf
+
+    Phases plotted: prefault / fault / recovery (same as plot_retries_by_
+    upstream — warmup/cooldown are skipped to keep the output set small).
+    """
+    _apply_paper_style()
+    ordered_policies = [p for p in POLICY_ORDER if p in runs] + \
+                       [p for p in runs if p not in POLICY_ORDER]
+    if not ordered_policies:
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for policy in ordered_policies:
+        phase_deltas = runs[policy].get("phase_retry_deltas") or {}
+        for phase in _RETRY_PLOT_PHASES:
+            phase_data = phase_deltas.get(phase) or {}
+            if not phase_data:
+                continue
+
+            callers = sorted({c for (c, _u) in phase_data.keys()})
+            upstreams = sorted({u for (_c, u) in phase_data.keys()})
+            if not callers or not upstreams:
+                continue
+
+            mat = np.zeros((len(callers), len(upstreams)), dtype=float)
+            for (c, u), counters in phase_data.items():
+                v = counters.get(counter, 0)
+                if v <= 0:
+                    continue
+                mat[callers.index(c), upstreams.index(u)] = v
+
+            if mat.max() == 0:
+                continue
+
+            fig, ax = plt.subplots(
+                figsize=(0.6 * len(upstreams) + 3.0,
+                         0.4 * len(callers) + 2.5)
+            )
+            im = ax.imshow(mat, aspect="auto", cmap="YlOrRd")
+            ax.set_xticks(range(len(upstreams)))
+            ax.set_xticklabels(upstreams, rotation=45, ha="right", fontsize=9)
+            ax.set_yticks(range(len(callers)))
+            ax.set_yticklabels(callers, fontsize=9)
+            ax.set_xlabel("upstream service")
+            ax.set_ylabel("caller (sidecar)")
+
+            # Annotate each cell with its count, in white on dark cells
+            # and black on light cells.
+            vmax = mat.max()
+            for i in range(len(callers)):
+                for j in range(len(upstreams)):
+                    v = mat[i, j]
+                    if v == 0:
+                        continue
+                    color = "white" if v > vmax * 0.6 else "black"
+                    ax.text(j, i, f"{int(v)}",
+                            ha="center", va="center",
+                            fontsize=8, color=color)
+
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label("retries", fontsize=9)
+            ax.set_title(
+                f"{POLICY_LABELS.get(policy, policy)} — {phase}",
+                fontsize=12, loc="left", pad=4,
+            )
+            out_path = out_dir / f"retries-matrix-{policy}-{phase}.pdf"
+            fig.tight_layout()
+            fig.savefig(out_path, bbox_inches="tight")
+            plt.close(fig)
+            print(f"  wrote {out_path}")
+
+
+# Service order for the chain-amplification stacked bar. Bottom-to-top
+# follows the call graph from the client edge inward: frontend (closest
+# to the client) at the bottom, then checkoutservice (one hop deeper),
+# then the leaves above. The order is hardcoded so the chain story is
+# visually consistent across runs and across policies; services not in
+# the list are appended to the top in alphabetical order.
+_CHAIN_SERVICE_ORDER = [
+    "frontend",
+    "checkoutservice",
+    "cartservice",
+    "productcatalogservice",
+    "currencyservice",
+    "shippingservice",
+    "paymentservice",
+    "emailservice",
+    "recommendationservice",
+    "adservice",
+]
+
+# Distinct colors for the service segments. Picked to be visually
+# distinguishable on a small bar; the order is paired with
+# _CHAIN_SERVICE_ORDER above.
+_CHAIN_SERVICE_COLORS = {
+    "frontend":              "#1f77b4",  # blue
+    "checkoutservice":       "#ff7f0e",  # orange
+    "cartservice":           "#2ca02c",  # green
+    "productcatalogservice": "#d62728",  # red
+    "currencyservice":       "#9467bd",  # purple
+    "shippingservice":       "#8c564b",  # brown
+    "paymentservice":        "#e377c2",  # pink
+    "emailservice":          "#7f7f7f",  # gray
+    "recommendationservice": "#bcbd22",  # olive
+    "adservice":             "#17becf",  # teal
+}
+
+
+def plot_retries_stacked_by_caller(
+    runs: Dict[str, dict],
+    out_path: Path,
+    counter: str = "upstream_rq_retry",
+) -> None:
+    """
+    Chain-amplification stacked bar plot.
+
+    For each policy, draw one vertical bar whose total height is the total
+    number of retries dispatched across the entire call graph during the
+    run. The bar is segmented by *which caller* dispatched the retries,
+    in chain order (frontend at the bottom, checkoutservice above, then
+    leaves). Reading the bar bottom-to-top traces how the retry storm
+    propagates inward from the client edge.
+
+    Every service in `_CHAIN_SERVICE_ORDER` is drawn as a segment, even
+    when its contribution is zero. Zero-height segments are invisible in
+    the bars but still appear in the legend, so the reader can see the
+    full call-graph shape and which layers contributed (vs. which didn't).
+    Services that appear in the data but aren't in the chain order are
+    appended at the top of the stack in alphabetical order.
+
+    Data source: each policy's `run_retry_deltas` (computed in
+    process_policy from the .pre.stats and .stats whole-run snapshots).
+    The deltas are summed across all upstreams a caller talked to, so
+    "frontend" includes frontend's retries to checkout AND to cart AND
+    to productcatalog, etc.
+
+    Saved as a single PDF. One vertical bar per policy.
+    """
+    _apply_paper_style()
+    ordered_policies = [p for p in POLICY_ORDER if p in runs] + \
+                       [p for p in runs if p not in POLICY_ORDER]
+    if not ordered_policies:
+        return
+
+    # Sum retries per (policy, caller) across all upstreams the caller
+    # touched. Result: { policy: { caller: total_retries } }.
+    per_policy: Dict[str, Dict[str, int]] = {}
+    for policy in ordered_policies:
+        deltas = runs[policy].get("run_retry_deltas") or {}
+        per_caller: Dict[str, int] = {}
+        for (caller, _upstream), counters in deltas.items():
+            v = counters.get(counter, 0)
+            if v <= 0:
+                continue
+            per_caller[caller] = per_caller.get(caller, 0) + v
+        per_policy[policy] = per_caller
+
+    # Union of all callers that contributed retries in any policy.
+    callers_seen = set()
+    for d in per_policy.values():
+        callers_seen.update(d.keys())
+
+    # Build the legend order: every service in the canonical chain order
+    # FIRST (so each bar has the same set of segments and the chain shape
+    # is visible regardless of which services contributed), then any
+    # unknown callers (services in the data but not in the canonical chain)
+    # appended in alphabetical order at the top of the stack.
+    chain_services = list(_CHAIN_SERVICE_ORDER)
+    extras = sorted(c for c in callers_seen if c not in _CHAIN_SERVICE_ORDER)
+    callers_in_chain_order = chain_services + extras
+
+    if not callers_in_chain_order:
+        return  # no chain configured and no data — give up
+
+    # If no policy contributed any retries at all, don't draw an empty
+    # figure with only zero-height segments.
+    if not any(per_policy[p].get(c, 0) > 0
+               for p in ordered_policies
+               for c in callers_in_chain_order):
+        return
+
+    # Build the figure.
+    fig, ax = plt.subplots(figsize=(1.4 * len(ordered_policies) + 2.6, 5.0))
+    x = np.arange(len(ordered_policies))
+    bottom = np.zeros(len(ordered_policies))
+
+    for caller in callers_in_chain_order:
+        heights = np.array([per_policy[p].get(caller, 0) for p in ordered_policies],
+                           dtype=float)
+        # Render every chain service even when its contribution is zero
+        # — the legend keeps the full call graph visible and the bar
+        # widths/colors stay consistent across runs.
+        ax.bar(
+            x, heights,
+            bottom=bottom,
+            color=_CHAIN_SERVICE_COLORS.get(caller, "lightgray"),
+            edgecolor="white",
+            linewidth=0.5,
+            label=caller,
+            width=0.65,
+        )
+        bottom += heights
+
+    # Total label on top of each bar.
+    totals = bottom  # bottom now equals the cumulative top of each bar
+    if totals.max() > 0:
+        ymax = totals.max()
+        for i, total in enumerate(totals):
+            if total <= 0:
+                continue
+            ax.text(
+                x[i], total + ymax * 0.015,
+                f"{int(total):,}",
+                ha="center", va="bottom",
+                fontsize=10,
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in ordered_policies],
+                       rotation=0, fontsize=11)
+    ax.set_ylabel("Retries dispatched (sum across all hops)")
+    ax.set_title("Chain amplification: retries by caller, stacked",
+                 fontsize=12, loc="left", pad=4)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+    # Legend in reverse order so the visual stack (top-to-bottom) matches
+    # the legend (top-to-bottom). Without this, the bottom segment would
+    # appear at the top of the legend, which reads unintuitively.
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(
+        handles[::-1], labels[::-1],
+        loc="upper right",
+        frameon=True, fancybox=False,
+        edgecolor="#888888", framealpha=0.95, fontsize=10,
+        title="dispatched by",
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def print_retry_summary(runs: Dict[str, dict]) -> None:
+    """
+    Textual per-phase per-policy retry summary, printed to stdout.
+    Mirrors the data plotted by plot_retries_by_upstream so a quick
+    glance at the analyzer's output tells you the same story without
+    opening a PDF.
+    """
+    ordered_policies = [p for p in POLICY_ORDER if p in runs] + \
+                       [p for p in runs if p not in POLICY_ORDER]
+    if not ordered_policies:
+        return
+
+    # Bail early if no policy has retry-delta data.
+    if not any(runs[p].get("phase_retry_deltas") for p in ordered_policies):
+        return
+
+    print()
+    print("=== Per-phase retries by upstream (sum across all callers) ===")
+    print(
+        f"{'phase':<10s} {'policy':<20s} "
+        f"{'upstream':<28s} {'retries':>10s} {'overflow':>10s} "
+        f"{'rsuccess':>10s} {'limit_hit':>10s}"
+    )
+    print("-" * 100)
+
+    for phase in PHASE_SNAPSHOTS:
+        phase_name = phase[0]
+        any_row = False
+        for policy in ordered_policies:
+            phase_deltas = runs[policy].get("phase_retry_deltas") or {}
+            phase_data = phase_deltas.get(phase_name) or {}
+            if not phase_data:
+                continue
+
+            # Aggregate by upstream
+            agg: Dict[str, Dict[str, int]] = {}
+            for (_caller, upstream), counters in phase_data.items():
+                d = agg.setdefault(upstream, {c: 0 for c in RETRY_COUNTERS})
+                for c in RETRY_COUNTERS:
+                    d[c] += counters.get(c, 0)
+
+            # Sort by retry count desc and only show non-zero rows.
+            for upstream, c in sorted(
+                agg.items(), key=lambda kv: -kv[1]["upstream_rq_retry"]
+            ):
+                if c["upstream_rq_retry"] == 0 and c["upstream_rq_retry_overflow"] == 0:
+                    continue
+                print(
+                    f"{phase_name:<10s} "
+                    f"{POLICY_LABELS.get(policy, policy):<20s} "
+                    f"{upstream:<28s} "
+                    f"{c['upstream_rq_retry']:>10d} "
+                    f"{c['upstream_rq_retry_overflow']:>10d} "
+                    f"{c['upstream_rq_retry_success']:>10d} "
+                    f"{c['upstream_rq_retry_limit_exceeded']:>10d}"
+                )
+                any_row = True
+        if any_row:
+            print()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1015,11 +1692,24 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         return None
 
     t_start = float(timeline["t_start"])
-    t_fault_start = float(timeline["t_fault_start"])
-    t_fault_end = float(timeline["t_fault_end"])
     t_prefault_end = float(timeline["t_prefault_end"])
     t_warmup_end = float(timeline["t_warmup_end"])
     t_cooldown_end = float(timeline["t_cooldown_end"])
+
+    # Prefer the *actual* fault boundaries (stamped right after the chaos
+    # apply/delete kubectl calls return) over the *intended* boundaries
+    # (the runner's scheduling targets). They differ by ~1-7s in practice
+    # because of the chaos-mesh reconcile + daemon-dispatch + stress-ng
+    # startup latency, plus snapshot wall time at the phase boundary.
+    # Older runs only have `t_fault_start` / `t_fault_end`; the actual
+    # fields are written as 0 when the actual stamps weren't recorded
+    # (e.g. FAULT_SEC=0 baseline runs).
+    t_fault_intended_start = float(timeline["t_fault_start"])
+    t_fault_intended_end   = float(timeline["t_fault_end"])
+    t_fault_actual_start = float(timeline.get("t_fault_actual_start", 0) or 0)
+    t_fault_actual_end   = float(timeline.get("t_fault_actual_end",   0) or 0)
+    t_fault_start = t_fault_actual_start if t_fault_actual_start > 0 else t_fault_intended_start
+    t_fault_end   = t_fault_actual_end   if t_fault_actual_end   > 0 else t_fault_intended_end
 
     # Time-series x-axis is relative to warmup_end: t=0 is where the
     # pre-fault baseline starts. Warmup data is dropped from the plot.
@@ -1036,17 +1726,26 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
     amp = amplification(df, t_fault_start, t_fault_end)
     reff = retry_efficiency_pct(df, t_fault_start, t_fault_end)
 
-    # All bin coordinates are relative to t_ref (warmup_end).
-    # Pre-fault baseline runs from bin 0 to prefault_end.
-    pre_start_bin = 0
-    pre_end_bin = int(t_prefault_end - t_ref)
-    fault_start_bin = int(t_fault_start - t_ref)
-    fault_end_bin = int(t_fault_end - t_ref)
+    # All bin coordinates are relative to t_ref (warmup_end). Each bin
+    # `b` represents the time interval [b, b+1) seconds from t_ref. So a
+    # phase that runs from t_ref+30 to t_ref+40 covers bins [30, 39] —
+    # 10 bins, not 11.
+    #
+    # We use Python-style half-open ranges throughout: `start_bin` is
+    # inclusive, `end_bin` is exclusive. pandas .loc[] is unfortunately
+    # *inclusive* on both ends, so we slice with `.loc[start:end-1]` to
+    # get the half-open semantics. Using round() instead of int() so that
+    # `t_fault_actual_*` values with sub-second precision land on the
+    # correct bin.
+    pre_start_bin   = 0
+    pre_end_bin     = round(t_prefault_end - t_ref)   # exclusive
+    fault_start_bin = round(t_fault_start  - t_ref)   # inclusive
+    fault_end_bin   = round(t_fault_end    - t_ref)   # exclusive
 
     recovery = recovery_time_sec(goodput, fault_end_bin, pre_start_bin, pre_end_bin)
-    avg_goodput_fault = float(goodput.loc[fault_start_bin:fault_end_bin].mean()) \
+    avg_goodput_fault = float(goodput.loc[fault_start_bin:fault_end_bin - 1].mean()) \
         if not goodput.empty else 0.0
-    avg_goodput_pre = float(goodput.loc[pre_start_bin:pre_end_bin].mean()) \
+    avg_goodput_pre = float(goodput.loc[pre_start_bin:pre_end_bin - 1].mean()) \
         if not goodput.empty else 0.0
 
     # Client-side latency split by scenario phase (for the CDF plot).
@@ -1096,6 +1795,19 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
                 elif "arolla_retries_rejected_total" in name:
                     arolla_rejected += val
 
+    # Per-phase retry deltas, sourced from the .pre / .warmup_end /
+    # .fault_start / .fault_end / .recovery_end / "" snapshots written by
+    # run-experiment.sh's dump_sidecar_stats. Older runs only have .pre and
+    # "" snapshots; the parser tolerates this and just returns whichever
+    # phases it can compute.
+    services_in_run = discover_services_from_sidecar_dir(sidecar_dir)
+    phase_retry_deltas = parse_phase_retry_deltas(sidecar_dir, services_in_run)
+
+    # Whole-run retry deltas (.pre.stats vs .stats), used by the chain-
+    # amplification stacked-bar plot. Always available because both
+    # endpoints are taken regardless of --phase-snapshots.
+    run_retry_deltas = parse_run_retry_deltas(sidecar_dir, services_in_run)
+
     return {
         "goodput": goodput,
         "success_rate": success_rate,
@@ -1113,6 +1825,8 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         "recovery_sec": recovery if recovery is not None else float("nan"),
         "arolla_admitted": arolla_admitted,
         "arolla_rejected": arolla_rejected,
+        "phase_retry_deltas": phase_retry_deltas,
+        "run_retry_deltas": run_retry_deltas,
     }
 
 
@@ -1170,6 +1884,9 @@ def main():
     # ---- latency p50/p99 tables (client-side + per-service) ----
     print_latency_summary(runs)
 
+    # ---- per-phase per-service retry summary (silently no-op on old runs) ----
+    print_retry_summary(runs)
+
     # ---- plots ----
     plots_dir = run_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
@@ -1194,6 +1911,19 @@ def main():
              title="Time to reach 95% of pre-fault goodput",
              out_path=plots_dir / "recovery-time.pdf",
              value_fmt="{:.1f}")
+    # Per-phase per-service retry plots (view (b) aggregated + view (a)
+    # caller×upstream matrices). Both silently do nothing on runs that
+    # only have .pre and "" snapshots.
+    plot_retries_by_upstream(
+        runs, plots_dir / "retries-by-upstream.pdf", experiment,
+    )
+    plot_retries_caller_matrix(runs, plots_dir, experiment)
+    # Chain-amplification stacked bar (one bar per policy, segments by
+    # caller in chain order). Always available — uses .pre.stats and
+    # .stats whole-run snapshots, not the per-phase ones.
+    plot_retries_stacked_by_caller(
+        runs, plots_dir / "retries-stacked-by-caller.pdf",
+    )
 
 
 if __name__ == "__main__":
