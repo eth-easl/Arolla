@@ -68,7 +68,17 @@ CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype/runs"
 DRY_RUN=false
 SKIP_ANALYZE=false
-POST_POLICY_SETTLE_SEC=5    # give xDS a moment after switching policies
+POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
+
+# Per-phase sidecar snapshots are OFF by default. They enable the per-phase
+# retry plots in analyze.py but each snapshot is a parallel storm of
+# `kubectl exec` calls into every istio-proxy in the namespace, which adds
+# 5-7s of wall time at every phase boundary AND can perturb cart enough to
+# trigger the metastable trap before the deliberate fault is applied.
+# Enable explicitly with --phase-snapshots when you need that data; the
+# `.pre` and post snapshots (which the latency-CDF/baseline-diff path
+# depends on) are taken regardless.
+PHASE_SNAPSHOTS=false
 
 # Phase durations (seconds). The scenario config can override these; CLI
 # flags override both.
@@ -164,6 +174,17 @@ Options:
       --recovery <sec>          Override recovery duration
       --cooldown <sec>          Override cooldown duration
       --settle <sec>            Post-policy-switch settle (default: ${POST_POLICY_SETTLE_SEC})
+      --phase-snapshots         Take sidecar /stats snapshots at every
+                                phase boundary (.warmup_end, .fault_start,
+                                .fault_end, .recovery_end) so analyze.py
+                                can produce per-phase retry plots. Off by
+                                default because each snapshot adds ~5-7s
+                                of wall time at the boundary AND can
+                                inadvertently perturb cart's CPU enough to
+                                trigger the metastable trap before the
+                                deliberate fault is applied. Enable only
+                                when you need the per-phase retry data.
+                                .pre and post snapshots are always taken.
   -n, --dry-run                 Print the timeline, don't touch the cluster
       --skip-analyze            Don't invoke analyze.py at the end
   -h, --help                    Show this message
@@ -194,6 +215,7 @@ while (( $# > 0 )); do
     --recovery)      RECOVERY_SEC="$2"; shift 2 ;;
     --cooldown)      COOLDOWN_SEC="$2"; shift 2 ;;
     --settle)        POST_POLICY_SETTLE_SEC="$2"; shift 2 ;;
+    --phase-snapshots) PHASE_SNAPSHOTS=true; shift ;;
     -n|--dry-run)    DRY_RUN=true; shift ;;
     --skip-analyze)  SKIP_ANALYZE=true; shift ;;
     -h|--help)       usage 0 ;;
@@ -320,6 +342,7 @@ Trigger         : $(if [[ -n "${CPU_STRESS_TARGET}" ]]; then
   fi)
 Policies (${TOTAL_POLICIES})   : ${POLICIES[*]}
 Client profiles : ${CLIENT_PROFILES:-(all profiles from profiles/)}
+Phase snapshots : $(if "${PHASE_SNAPSHOTS}"; then echo "ON (per-phase retry plots enabled, +5-7s per boundary)"; else echo "OFF (.pre and post only — pass --phase-snapshots to enable)"; fi)
 Output dir      : ${RUN_DIR}
 
 Per-policy timeline  (total ${TOTAL_SEC}s):
@@ -574,22 +597,38 @@ dump_sidecar_stats() {
   local out_dir="$1"
   local suffix="${2:-}"
   mkdir -p "${out_dir}"
+
+  # Parallelize across services so a snapshot completes in ~1s instead of
+  # ~10s. This matters now that snapshots are taken at every phase
+  # boundary — serial fetches would smear each boundary by several seconds.
+  # We background each service's pod-lookup + two curl-fetches and then
+  # wait for all of them. Errors are still logged via warn() inline.
+  local pids=()
   for svc in "${ONLINE_BOUTIQUE_SERVICES[@]}"; do
-    local pod
-    pod="$(kubectl -n "${NAMESPACE}" get pod -l app="${svc}" \
-      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-    if [[ -z "${pod}" ]]; then
-      warn "no pod for ${svc}, skipping"
-      continue
-    fi
-    kubectl -n "${NAMESPACE}" exec "${pod}" -c istio-proxy -- \
-      curl -s 'localhost:15000/stats' \
-      > "${out_dir}/${svc}${suffix}.stats" 2>/dev/null || \
-      warn "could not dump counters for ${svc}${suffix}"
-    kubectl -n "${NAMESPACE}" exec "${pod}" -c istio-proxy -- \
-      curl -s 'localhost:15000/stats?format=prometheus' \
-      > "${out_dir}/${svc}${suffix}.prom" 2>/dev/null || \
-      warn "could not dump prometheus stats for ${svc}${suffix}"
+    (
+      local pod
+      pod="$(kubectl -n "${NAMESPACE}" get pod -l app="${svc}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+      if [[ -z "${pod}" ]]; then
+        warn "no pod for ${svc}, skipping"
+        exit 0
+      fi
+      kubectl -n "${NAMESPACE}" exec "${pod}" -c istio-proxy -- \
+        curl -s 'localhost:15000/stats' \
+        > "${out_dir}/${svc}${suffix}.stats" 2>/dev/null || \
+        warn "could not dump counters for ${svc}${suffix}"
+      kubectl -n "${NAMESPACE}" exec "${pod}" -c istio-proxy -- \
+        curl -s 'localhost:15000/stats?format=prometheus' \
+        > "${out_dir}/${svc}${suffix}.prom" 2>/dev/null || \
+        warn "could not dump prometheus stats for ${svc}${suffix}"
+    ) &
+    pids+=("$!")
+  done
+  # Wait for every backgrounded subshell. We don't propagate individual
+  # exit codes — the inline warn() calls already surface failures, and
+  # one missing service shouldn't abort the whole snapshot.
+  for pid in "${pids[@]}"; do
+    wait "${pid}" 2>/dev/null || true
   done
 }
 
@@ -631,7 +670,14 @@ run_single() {
   dump_sidecar_stats "${sidecar_stats_dir}" ".pre"
 
   # ---- Define absolute phase boundaries (drift-free scheduling) ----
+  # These are the *intended* phase boundaries the runner schedules against.
+  # The *physical* fault boundaries (when the chaos object is actually
+  # applied / removed and when stress-ng is actually running on cart) drift
+  # from these by the kubectl-apply round-trip time + chaos-mesh reconcile
+  # latency. We record both — the intended boundaries here, and the actual
+  # boundaries below as `t_fault_actual_start` / `t_fault_actual_end`.
   local t0 t_warmup_end t_prefault_end t_fault_start t_fault_end t_recovery_end t_cooldown_end
+  local t_fault_actual_start=0 t_fault_actual_end=0
   t0="$(now)"
   t_warmup_end=$((t0 + WARMUP_SEC))
   t_prefault_end=$((t_warmup_end + PREFAULT_SEC))
@@ -654,9 +700,29 @@ run_single() {
   log "[${policy}] warmup → t+${WARMUP_SEC}s"
   wait_until "${t_warmup_end}"
 
+  # ---- Phase-boundary snapshot: end of warmup / start of prefault ----
+  # Per-phase snapshots are opt-in via --phase-snapshots. They enable
+  # analyze.py's per-phase retry plots (deltas of upstream_rq_retry_*
+  # between consecutive snapshots), but each snapshot is a parallel
+  # `kubectl exec` storm into every istio-proxy in the namespace and
+  # adds 5-7s of wall time at the boundary. With cart at its CPU limit
+  # the brief contention from the exec storm is enough to push it into
+  # the metastable trap, so the default is OFF.
+  if "${PHASE_SNAPSHOTS}"; then
+    dump_sidecar_stats "${sidecar_stats_dir}" ".warmup_end"
+  fi
+
   # ---- Pre-fault baseline ----
   log "[${policy}] pre-fault baseline → t+$((WARMUP_SEC + PREFAULT_SEC))s"
   wait_until "${t_prefault_end}"
+
+  # ---- Phase-boundary snapshot: end of prefault / right before fault ----
+  # Opt-in (see --phase-snapshots). This is the most dangerous of the four
+  # phase snapshots: if it perturbs cart enough to trigger the trap here,
+  # the deliberate fault becomes redundant and the experiment is unsalvageable.
+  if "${PHASE_SNAPSHOTS}"; then
+    dump_sidecar_stats "${sidecar_stats_dir}" ".fault_start"
+  fi
 
   # ---- Fault window (skipped entirely when FAULT_SEC=0) ----
   # When --fault 0 is passed we're running a clean baseline with no fault
@@ -678,14 +744,22 @@ run_single() {
           -e "s|__DURATION__|${FAULT_SEC}|g" \
           "${CHAOS_CPU_STRESS_TEMPLATE}" \
         | kubectl apply -f -
+      # Stamp the actual fault start *after* the apply call returns. This
+      # is closer to (but not equal to) the moment cart's CPU is actually
+      # restricted; chaos-mesh's controller still needs to reconcile the
+      # CRD and dispatch to the daemon on cart's worker node, which adds
+      # ~3-5s on our setup. The analyzer can read this field if present.
+      t_fault_actual_start="$(now)"
       wait_until "${t_fault_end}"
 
       phase "[${policy}] removing CPU stress (chaos-mesh auto-cleanup is a backstop)"
       kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null
+      t_fault_actual_end="$(now)"
     else
       # ---- Trigger B: Istio fault manifest ----
       phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
       kubectl apply -f "${FAULT_MANIFEST_PATH}" >/dev/null
+      t_fault_actual_start="$(now)"
       wait_until "${t_fault_end}"
 
       # ---- Remove fault ----
@@ -700,14 +774,28 @@ run_single() {
       else
         kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
       fi
+      t_fault_actual_end="$(now)"
     fi
   else
     log "[${policy}] fault window = 0s, skipping trigger (clean baseline run)"
   fi
 
+  # ---- Phase-boundary snapshot: end of fault / start of recovery ----
+  # Opt-in (see --phase-snapshots). Diffing this against `.fault_start`
+  # gives the per-service retry counts attributable to the fault window.
+  if "${PHASE_SNAPSHOTS}"; then
+    dump_sidecar_stats "${sidecar_stats_dir}" ".fault_end"
+  fi
+
   # ---- Recovery ----
   log "[${policy}] recovery → t+$((WARMUP_SEC + PREFAULT_SEC + FAULT_SEC + RECOVERY_SEC))s"
   wait_until "${t_recovery_end}"
+
+  # ---- Phase-boundary snapshot: end of recovery / start of cooldown ----
+  # Opt-in (see --phase-snapshots).
+  if "${PHASE_SNAPSHOTS}"; then
+    dump_sidecar_stats "${sidecar_stats_dir}" ".recovery_end"
+  fi
 
   # ---- Stop load ----
   phase "[${policy}] stop load"
@@ -718,6 +806,13 @@ run_single() {
   wait_until "${t_cooldown_end}"
 
   # ---- Write timeline ----
+  # `t_fault_*` are the *intended* boundaries the runner scheduled against;
+  # `t_fault_actual_*` are stamped at the moment the chaos object's apply
+  # / delete kubectl call returned (which is closer to — but not equal to —
+  # when stress-ng was actually running on cart). The analyzer prefers
+  # `t_fault_actual_*` when available and falls back to `t_fault_*`
+  # otherwise. For runs with FAULT_SEC=0 the actual fields are 0 and the
+  # analyzer falls back.
   cat > "${out_dir}/timeline.json" <<EOF
 {
   "policy": "${policy}",
@@ -726,6 +821,8 @@ run_single() {
   "t_prefault_end": ${t_prefault_end},
   "t_fault_start": ${t_fault_start},
   "t_fault_end": ${t_fault_end},
+  "t_fault_actual_start": ${t_fault_actual_start},
+  "t_fault_actual_end": ${t_fault_actual_end},
   "t_recovery_end": ${t_recovery_end},
   "t_cooldown_end": ${t_cooldown_end}
 }
