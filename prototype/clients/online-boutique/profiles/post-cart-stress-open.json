@@ -4,8 +4,8 @@
 
   "mode": "open-loop",
   "rate_rps": 120,
-  "pool_size": 1000,
-  "max_inflight": 5000,
+  "pool_size": 5000,
+  "max_inflight": 20000,
   "timeout_s": 3.0,
 
   "sku_pool": [

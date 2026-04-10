@@ -180,8 +180,8 @@ for s in sweeps:
         s['parameter']['location'],
         s['parameter']['field'],
         values,
-        base.get('client_profile', ''),
-        base.get('cpu_stress_target', ''),
+        base.get('client_profile', '') or '_NONE_',
+        base.get('cpu_stress_target', '') or '_NONE_',
         str(base.get('cpu_stress_load', 95)),
         str(base.get('cpu_stress_workers', 4)),
         str(base.get('warmup', 30)),
@@ -194,6 +194,12 @@ for s in sweeps:
     SWEEP_NAME SWEEP_DESC POLICIES PARAM_NAME PARAM_LOC PARAM_FIELD \
     VALUES_CSV PROFILE CPU_TARGET CPU_LOAD CPU_WORKERS \
     WARMUP PREFAULT FAULT RECOVERY COOLDOWN; do
+
+  # Replace _NONE_ sentinels with actual empty strings. These are used
+  # because bash's `read` collapses consecutive tab delimiters, so truly
+  # empty fields cause all subsequent fields to shift left.
+  [[ "$PROFILE" == "_NONE_" ]] && PROFILE=""
+  [[ "$CPU_TARGET" == "_NONE_" ]] && CPU_TARGET=""
 
   # Skip sweeps not in the selection (if any were specified).
   if (( ${#SELECTED_SWEEPS[@]} > 0 )); then
