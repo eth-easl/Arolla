@@ -394,14 +394,25 @@ async def execute_step(
             headers["Content-Length"] = str(len(body_bytes))
 
         t0 = time.time()
-        ok, status, err = await asyncio.to_thread(
-            send_once,
-            session=session,
-            method=method,
-            path=path,
-            headers=headers,
-            body=body_bytes,
-        )
+        timeout_s = float(profile.get("timeout_s", 0))
+        try:
+            coro = asyncio.to_thread(
+                send_once,
+                session=session,
+                method=method,
+                path=path,
+                headers=headers,
+                body=body_bytes,
+            )
+            if timeout_s > 0:
+                ok, status, err = await asyncio.wait_for(coro, timeout=timeout_s)
+            else:
+                ok, status, err = await coro
+        except asyncio.TimeoutError:
+            ok, status, err = False, 0, "client_timeout"
+            # The underlying thread is still blocked in the socket call;
+            # close the connection so it gets a BrokenPipeError and exits.
+            session._close()
         latency = time.time() - t0
         final_ok = ok
 
