@@ -1,0 +1,71 @@
+# Cluster profile: 1 replica per service (current default).
+# Matches the existing service YAMLs as-is. This profile exists so that
+# deploy-cluster-profile.sh can restore the original settings after
+# running a multi-replica experiment.
+#
+# Usage:
+#   prototype/deploy-cluster-profile.sh 1-replica
+
+# Resources are per application container (NOT the istio-proxy sidecar).
+# The sidecar keeps its existing limits (cpu: 2, memory: 1Gi) regardless
+# of the profile.
+
+defaults: &defaults
+  replicas: 1
+  cpu_request: 200m
+  cpu_limit: 300m
+  mem_request: 64Mi
+  mem_limit: 128Mi
+  anti_affinity: none        # none | preferred | required
+
+services:
+  frontend:
+    <<: *defaults
+    cpu_request: 500m
+    cpu_limit: 1
+    mem_request: 64Mi
+    mem_limit: 128Mi
+
+  cartservice:
+    <<: *defaults
+
+  checkoutservice:
+    <<: *defaults
+    cpu_limit: 200m
+
+  productcatalogservice:
+    <<: *defaults
+
+  currencyservice:
+    <<: *defaults
+    cpu_limit: 200m
+
+  emailservice:
+    <<: *defaults
+    cpu_limit: 200m
+
+  paymentservice:
+    <<: *defaults
+    cpu_limit: 200m
+
+  shippingservice:
+    <<: *defaults
+    cpu_limit: 200m
+
+  adservice:
+    <<: *defaults
+    mem_request: 180Mi
+    mem_limit: 300Mi
+
+  recommendationservice:
+    <<: *defaults
+    mem_request: 220Mi
+    mem_limit: 450Mi
+
+  redis-cart:
+    <<: *defaults
+    container: redis           # container name differs from the default "server"
+    cpu_request: 70m
+    cpu_limit: 125m
+    mem_request: 200Mi
+    mem_limit: 256Mi
