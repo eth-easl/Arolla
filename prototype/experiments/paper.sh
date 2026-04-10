@@ -14,3 +14,7 @@ prototype/experiments/run-experiment.sh \
   
   --warmup 30 --prefault 40 --fault 20 --recovery 40 --cooldown 10
 
+
+prototype/experiments/run_sensitivity.sh prototype/experiments/sweeps/sensitivity.yaml --help
+
+python3 prototype/experiments/plot_sensitivity.py outputs/prototype/sensitivity/20260410_120000/ --help
