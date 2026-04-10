@@ -27,4 +27,4 @@ spec:
             retry_budget:
               budget_percent:
                 value: 20.0
-              min_retry_concurrency: 3
+              min_retry_concurrency: 1
