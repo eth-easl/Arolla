@@ -43,7 +43,10 @@ FAULT_DIR_REL="manifests/online-boutique"
 REMOTE_BASE="${REMOTE_BASE:-/tmp/online-boutique-clients}"
 REMOTE_METRICS_DIR="${REMOTE_BASE}/metrics"
 REMOTE_PID_FILE="${REMOTE_BASE}/traffic_gen.pid"
-REMOTE_LOG_FILE="${REMOTE_BASE}/traffic_gen.log"
+# Per-shard log files: traffic_gen.shard0.log, traffic_gen.shard1.log, ...
+# Single-shard runs (NUM_LOADERS=1) still use traffic_gen.shard0.log under
+# the new launcher. The legacy traffic_gen.log path is no longer produced.
+REMOTE_LOG_GLOB="${REMOTE_BASE}/traffic_gen*.log"
 
 # --------------------------------------------------------------------------- #
 # Defaults (overridable via CLI and scenario config)
@@ -560,7 +563,8 @@ cleanup() {
   # Best-effort: clean up any lingering chaos-mesh CPU-stress resource.
   # No-op if chaos-mesh isn't installed or the resource doesn't exist.
   kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null 2>&1 || true
-  ssh_client "if [[ -f ${REMOTE_PID_FILE} ]]; then kill \$(cat ${REMOTE_PID_FILE}) 2>/dev/null || true; rm -f ${REMOTE_PID_FILE}; fi" >/dev/null 2>&1 || true
+  # Kill every loader shard listed in the pid file (one PID per line).
+  ssh_client "if [[ -f ${REMOTE_PID_FILE} ]]; then while read -r p; do [[ -n \"\$p\" ]] && kill \"\$p\" 2>/dev/null || true; done < ${REMOTE_PID_FILE}; rm -f ${REMOTE_PID_FILE}; fi" >/dev/null 2>&1 || true
   exit "${code}"
 }
 trap cleanup INT TERM
@@ -667,7 +671,7 @@ run_single() {
   fi
   # Best-effort: drop any lingering chaos-mesh CPU-stress from a prior run.
   kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null 2>&1 || true
-  ssh_client "rm -rf ${REMOTE_METRICS_DIR} ${REMOTE_PID_FILE} ${REMOTE_LOG_FILE}; mkdir -p ${REMOTE_METRICS_DIR}"
+  ssh_client "rm -rf ${REMOTE_METRICS_DIR} ${REMOTE_PID_FILE} ${REMOTE_LOG_GLOB}; mkdir -p ${REMOTE_METRICS_DIR}"
 
   # ---- Switch policy ----
   log "switching policy → ${policy}"
@@ -841,10 +845,36 @@ run_single() {
 EOF
 
   # ---- Fetch client metrics ----
-  log "[${policy}] fetching client metrics"
-  scp_from_client "${REMOTE_METRICS_DIR}/." "${client_metrics_dir}/" || \
-    warn "failed to fetch client metrics (dir may be empty)"
-  scp_from_client "${REMOTE_LOG_FILE}" "${out_dir}/traffic_gen.log" >/dev/null 2>&1 || true
+  # Compress on the remote side before transfer. At high RPS each shard's
+  # CSV can be 10-30 MB; gzip shrinks it to ~1-2 MB, cutting SCP time from
+  # minutes to seconds on a typical research network.
+  #
+  # The glob picks up both legacy single-file runs (client_attempts.csv)
+  # and sharded runs (client_attempts.shard0.csv, client_attempts.shard1.csv, ...).
+  # analyze.py's load_client_csv concatenates whatever it finds.
+  log "[${policy}] fetching client metrics (compressed)"
+  ssh_client "gzip -f ${REMOTE_METRICS_DIR}/client_attempts*.csv 2>/dev/null || true"
+  remote_gz_list="$(ssh_client "ls ${REMOTE_METRICS_DIR}/client_attempts*.csv.gz 2>/dev/null || true")"
+  if [[ -n "${remote_gz_list}" ]]; then
+    for gz in ${remote_gz_list}; do
+      base="$(basename "${gz}")"
+      if scp_from_client "${gz}" "${client_metrics_dir}/" 2>/dev/null; then
+        gunzip -f "${client_metrics_dir}/${base}" || warn "could not gunzip ${base}"
+      else
+        warn "failed to fetch ${base}"
+      fi
+    done
+  else
+    warn "no client CSVs found in ${REMOTE_METRICS_DIR} (loader may have crashed)"
+  fi
+  # Also fetch any other metrics files (non-CSV) via the old path.
+  for f in $(ssh_client "ls ${REMOTE_METRICS_DIR}/ 2>/dev/null" | grep -v client_attempts); do
+    scp_from_client "${REMOTE_METRICS_DIR}/${f}" "${client_metrics_dir}/" 2>/dev/null || true
+  done
+  # Fetch every shard's traffic_gen log (one per loader process).
+  for log_path in $(ssh_client "ls ${REMOTE_LOG_GLOB} 2>/dev/null" || true); do
+    scp_from_client "${log_path}" "${out_dir}/$(basename "${log_path}")" >/dev/null 2>&1 || true
+  done
 
   # ---- Dump sidecar stats post-run ----
   # Two formats (see dump_sidecar_stats at file scope):

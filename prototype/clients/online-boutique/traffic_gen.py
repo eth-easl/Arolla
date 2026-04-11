@@ -62,6 +62,34 @@ DEFAULT_HTTP_THREAD_POOL_SIZE = 1024
 
 
 # ---------------------------------------------------------------------------
+# Per-process module state
+# ---------------------------------------------------------------------------
+#
+# These hold the long-lived CSV file handle and the verbosity flag for the
+# current process. They're set once at startup in main_async() and read by
+# the hot path (write_csv_row, execute_step). Module globals are fine because
+# each shard runs as its own OS process, so there's no cross-shard sharing.
+#
+# Why module-level instead of plumbing through every signature: every
+# coroutine and helper would otherwise need a `csv_file` parameter, and the
+# only thing it would do with it is call `.write()`. The plumbing cost
+# (and the thread of csv_lock that came with it) was the original bottleneck
+# we're removing — keeping the new write path equally noisy in every
+# function signature defeats the purpose.
+
+_CSV_FILE: "Optional[Any]" = None
+_LOG_ATTEMPTS: bool = False
+
+
+def write_csv_row(line: str) -> None:
+    """Append one row to the run's CSV. Single-threaded by construction:
+    every caller is a coroutine on the same asyncio event loop, and `write`
+    holds the GIL until it returns, so two writes can never interleave."""
+    if _CSV_FILE is not None:
+        _CSV_FILE.write(line)
+
+
+# ---------------------------------------------------------------------------
 # Persistent HTTP connection (one per worker in closed-loop, pooled in open-loop)
 # ---------------------------------------------------------------------------
 #
@@ -330,18 +358,12 @@ def send_once(
 
 
 # ---------------------------------------------------------------------------
-# CSV writer
-# ---------------------------------------------------------------------------
-
-async def append_csv(line: str, out_csv: Path, lock: asyncio.Lock) -> None:
-    async with lock:
-        out_csv.parent.mkdir(parents=True, exist_ok=True)
-        with out_csv.open("a") as f:
-            f.write(line)
-
-
-# ---------------------------------------------------------------------------
 # Core execution: one HTTP step with retries → CSV rows
+#
+# CSV writes go through the module-level `write_csv_row` (no per-write
+# open/close, no asyncio.Lock). The legacy async `append_csv` helper —
+# which did `out_csv.open("a")` per row inside a lock — was the dominant
+# loader-side bottleneck and has been removed.
 # ---------------------------------------------------------------------------
 
 async def execute_step(
@@ -354,8 +376,6 @@ async def execute_step(
     headers_base: dict[str, str],
     session_id: str,
     sku: str,
-    out_csv: Path,
-    csv_lock: asyncio.Lock,
     stop_event: asyncio.Event,
 ) -> bool:
     """
@@ -416,31 +436,34 @@ async def execute_step(
         latency = time.time() - t0
         final_ok = ok
 
-        # One CSV row per attempt.
-        csv_line = (
+        # One CSV row per attempt. Synchronous write to a long-held file
+        # handle — see write_csv_row for why this is safe.
+        write_csv_row(
             f"{time.time():.6f},{name},{worker_idx},{req_id},{step_name},"
             f"{method},{path},{attempt_number},{int(is_retry)},{status},"
             f"{int(ok)},{latency:.6f}\n"
         )
-        await append_csv(csv_line, out_csv, csv_lock)
 
-        # Structured log line (consumed by tail -f or jq during debugging).
-        print(json.dumps({
-            "event": "attempt",
-            "ts": time.time(),
-            "profile": name,
-            "worker": worker_idx,
-            "request_id": req_id,
-            "request_type": step_name,
-            "method": method,
-            "path": path,
-            "attempt": attempt_number,
-            "is_retry": is_retry,
-            "status": status,
-            "ok": ok,
-            "latency_ms": round(latency * 1000, 2),
-            "error": err or None,
-        }), flush=True)
+        # Per-attempt structured log line. Off by default — at high RPS the
+        # json.dumps + flushed print is one of the dominant per-fire costs.
+        # Re-enable with --log-attempts for debugging.
+        if _LOG_ATTEMPTS:
+            print(json.dumps({
+                "event": "attempt",
+                "ts": time.time(),
+                "profile": name,
+                "worker": worker_idx,
+                "request_id": req_id,
+                "request_type": step_name,
+                "method": method,
+                "path": path,
+                "attempt": attempt_number,
+                "is_retry": is_retry,
+                "status": status,
+                "ok": ok,
+                "latency_ms": round(latency * 1000, 2),
+                "error": err or None,
+            }), flush=True)
 
         if ok or not should_retry(profile, status) or retry_index >= max_retries:
             break
@@ -474,8 +497,6 @@ async def execute_logical_request(
     requests_mix: list,
     weights: list,
     sku_pool: list,
-    out_csv: Path,
-    csv_lock: asyncio.Lock,
     stop_event: asyncio.Event,
 ) -> None:
     # Weighted pick from the request mix.
@@ -500,8 +521,6 @@ async def execute_logical_request(
                 headers_base=headers_base,
                 session_id=session_id,
                 sku=sku,
-                out_csv=out_csv,
-                csv_lock=csv_lock,
                 stop_event=stop_event,
             )
             if not step_ok or stop_event.is_set():
@@ -516,8 +535,6 @@ async def execute_logical_request(
             headers_base=headers_base,
             session_id=session_id,
             sku=sku,
-            out_csv=out_csv,
-            csv_lock=csv_lock,
             stop_event=stop_event,
         )
 
@@ -532,8 +549,6 @@ async def client_worker(
     target_host: str,
     target_port: int,
     host_header: str,
-    out_csv: Path,
-    csv_lock: asyncio.Lock,
     stop_event: asyncio.Event,
 ) -> None:
     name = str(profile.get("name", "client"))
@@ -570,8 +585,6 @@ async def client_worker(
                 requests_mix=requests_mix,
                 weights=weights,
                 sku_pool=sku_pool,
-                out_csv=out_csv,
-                csv_lock=csv_lock,
                 stop_event=stop_event,
             )
 
@@ -600,8 +613,6 @@ async def _open_loop_one(
     requests_mix: list,
     weights: list,
     sku_pool: list,
-    out_csv: Path,
-    csv_lock: asyncio.Lock,
     stop_event: asyncio.Event,
     inflight_sem: Optional[asyncio.Semaphore],
 ) -> None:
@@ -613,10 +624,9 @@ async def _open_loop_one(
     if inflight_sem is not None:
         if inflight_sem.locked():
             # Client itself is overloaded — drop this request and log it.
-            await append_csv(
+            write_csv_row(
                 f"{time.time():.6f},{profile.get('name','client')},{fire_idx},"
-                f"client-overload,client-overload,DROP,/,1,0,-1,0,0.000000\n",
-                out_csv, csv_lock,
+                f"client-overload,client-overload,DROP,/,1,0,-1,0,0.000000\n"
             )
             return
         await inflight_sem.acquire()
@@ -632,8 +642,6 @@ async def _open_loop_one(
                 requests_mix=requests_mix,
                 weights=weights,
                 sku_pool=sku_pool,
-                out_csv=out_csv,
-                csv_lock=csv_lock,
                 stop_event=stop_event,
             )
         finally:
@@ -648,8 +656,6 @@ async def open_loop_firer(
     target_host: str,
     target_port: int,
     host_header: str,
-    out_csv: Path,
-    csv_lock: asyncio.Lock,
     stop_event: asyncio.Event,
 ) -> None:
     """
@@ -718,8 +724,6 @@ async def open_loop_firer(
                 requests_mix=requests_mix,
                 weights=weights,
                 sku_pool=sku_pool,
-                out_csv=out_csv,
-                csv_lock=csv_lock,
                 stop_event=stop_event,
                 inflight_sem=inflight_sem,
             ))
@@ -755,6 +759,8 @@ CSV_HEADER = (
 
 
 async def main_async(args) -> int:
+    global _CSV_FILE, _LOG_ATTEMPTS
+
     profile_dir = Path(args.profile_dir)
     profiles = load_profiles(profile_dir)
     if args.profiles:
@@ -764,10 +770,45 @@ async def main_async(args) -> int:
         print("No profiles selected.", file=sys.stderr)
         return 1
 
-    out_csv = Path(args.output_dir) / "client_attempts.csv"
+    # ---- Apply per-shard division ----
+    # Each loader process owns 1/num_shards of the offered load. Dividing
+    # rate / count / pool / inflight per-process keeps the *aggregate*
+    # behavior identical regardless of how many shards are launched: a
+    # single profile with rate_rps=4000 produces ~4000 rps total whether
+    # run as 1 shard, 4 shards × 1000 rps, or 8 shards × 500 rps.
+    num_shards = max(1, int(args.num_shards))
+    shard_id = max(0, int(args.shard_id))
+    if num_shards > 1:
+        for p in profiles:
+            for field in ("rate_rps", "max_inflight", "pool_size", "count"):
+                v = p.get(field, 0) or 0
+                if v > 0:
+                    # Floor at 1 so divisions like rate_rps=3 / num_shards=4
+                    # still produce a runnable shard. Aggregate over-shoots
+                    # the configured rate by at most num_shards-1 fires/sec
+                    # in pathological cases.
+                    p[field] = max(1, v / num_shards) if isinstance(v, float) \
+                        else max(1, v // num_shards)
+
+    # ---- Output CSV: one file per shard, distinguishable by suffix ----
+    # Sharded runs write client_attempts.shard{N}.csv; single-shard runs
+    # keep the legacy filename so existing analysis pipelines (and any
+    # archived run directories) keep working unchanged.
+    if num_shards > 1:
+        out_csv = Path(args.output_dir) / f"client_attempts.shard{shard_id}.csv"
+    else:
+        out_csv = Path(args.output_dir) / "client_attempts.csv"
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     if not out_csv.exists():
         out_csv.write_text(CSV_HEADER)
+
+    # Open the CSV once for the lifetime of the process. `buffering=1` is
+    # line buffering — Python flushes after every '\n', so each `f.write`
+    # of one row results in one write() syscall, no large in-memory buffer
+    # to lose on shutdown. The old code did open()+write()+close() per row;
+    # this halves the syscalls and removes the asyncio.Lock entirely.
+    _CSV_FILE = open(out_csv, "a", buffering=1)
+    _LOG_ATTEMPTS = bool(args.log_attempts)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -803,7 +844,6 @@ async def main_async(args) -> int:
         print(f"ERROR: could not parse host from {args.target_base_url}", file=sys.stderr)
         return 2
 
-    csv_lock = asyncio.Lock()
     tasks = []
     for p in profiles:
         mode = str(p.get("mode", "closed-loop")).lower()
@@ -813,8 +853,6 @@ async def main_async(args) -> int:
                 target_host=target_host,
                 target_port=target_port,
                 host_header=args.host_header or "",
-                out_csv=out_csv,
-                csv_lock=csv_lock,
                 stop_event=stop_event,
             )))
         elif mode == "closed-loop":
@@ -826,8 +864,6 @@ async def main_async(args) -> int:
                     target_host=target_host,
                     target_port=target_port,
                     host_header=args.host_header or "",
-                    out_csv=out_csv,
-                    csv_lock=csv_lock,
                     stop_event=stop_event,
                 )))
         else:
@@ -840,6 +876,9 @@ async def main_async(args) -> int:
         "ts": time.time(),
         "target_base_url": args.target_base_url,
         "host_header": args.host_header,
+        "shard_id": shard_id,
+        "num_shards": num_shards,
+        "log_attempts": _LOG_ATTEMPTS,
         "profiles": [
             {k: v for k, v in p.items() if not k.startswith("_")}
             for p in profiles
@@ -847,7 +886,17 @@ async def main_async(args) -> int:
         "output_csv": str(out_csv),
     }), flush=True)
 
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        # Flush + close the CSV so no rows are lost on shutdown.
+        if _CSV_FILE is not None:
+            try:
+                _CSV_FILE.flush()
+                _CSV_FILE.close()
+            except Exception:
+                pass
+            _CSV_FILE = None
     return 0
 
 
@@ -858,6 +907,19 @@ def parse_args():
     p.add_argument("--profile-dir", default=str(Path(__file__).parent / "profiles"))
     p.add_argument("--profiles", default="", help="Comma-separated profile names to run (default: all)")
     p.add_argument("--output-dir", default="client-metrics")
+    # Sharding: launch N processes externally, each with the same num-shards
+    # but a unique shard-id. Each process owns rate_rps / N of the offered
+    # load and writes to client_attempts.shard{N}.csv. Defaults preserve
+    # the legacy single-process behavior.
+    p.add_argument("--shard-id", type=int, default=0,
+                   help="This process's shard index (0-based)")
+    p.add_argument("--num-shards", type=int, default=1,
+                   help="Total number of loader processes (default 1 = no sharding)")
+    # The per-attempt JSON log line is the dominant CPU cost on the firer
+    # at high RPS (single asyncio loop is GIL-pinned to one core). Off by
+    # default; turn on for debugging.
+    p.add_argument("--log-attempts", action="store_true",
+                   help="Log a JSON line per HTTP attempt to stdout (slow)")
     return p.parse_args()
 
 
