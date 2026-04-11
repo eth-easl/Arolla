@@ -45,6 +45,11 @@ services:
 
   cartservice:
     <<: *tier1
+    # replicas: 1                # stateful — shared by both cart replicas
+    # cpu_request: 1
+    # cpu_limit: 2
+    # mem_request: 256Mi
+    # mem_limit: 1Gi
     anti_affinity: required    # fault target — replicas MUST be on different nodes
 
   checkoutservice:
