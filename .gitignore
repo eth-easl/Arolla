@@ -222,3 +222,4 @@ paper_figures/
 simulator/experiments/yaml/aimd_vs_sysname/
 simulator/experiments/yaml/sysname/
 .vscode/
+*.sweep-backup
