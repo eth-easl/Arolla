@@ -703,7 +703,7 @@ run_single() {
   fi
   # Best-effort: drop any lingering chaos-mesh CPU-stress from a prior run.
   kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null 2>&1 || true
-  ssh_client "rm -rf ${REMOTE_METRICS_DIR} ${REMOTE_PID_FILE} ${REMOTE_LOG_GLOB}; mkdir -p ${REMOTE_METRICS_DIR}"
+  ssh_client "bash -c 'rm -rf ${REMOTE_METRICS_DIR} ${REMOTE_PID_FILE} ${REMOTE_LOG_GLOB} 2>/dev/null; mkdir -p ${REMOTE_METRICS_DIR}'"
 
   # ---- Restart all pods for a clean slate ----
   # Each policy run inherits residual state from the previous run: drained
