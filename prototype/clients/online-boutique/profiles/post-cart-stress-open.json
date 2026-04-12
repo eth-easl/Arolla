@@ -26,5 +26,5 @@
 
   "retries": 3,
   "backoff": { "mode": "none" },
-  "retry_on_status": [0, 500, 502, 503, 504]
+  "retry_on_status": [0, 500, 502, 503, 504, 429]
 }

@@ -87,3 +87,13 @@ services:
     mem_request: 256Mi
     mem_limit: 1Gi
     anti_affinity: none
+
+  boutique-gateway-istio:
+    replicas: 2                # 2 replicas so the gateway can handle 4× retry
+                               # amplification (6000 TCP conn/s) without saturating
+    container: istio-proxy     # gateway pod container name
+    cpu_request: 500m
+    cpu_limit: 2
+    mem_request: 256Mi
+    mem_limit: 1Gi
+    anti_affinity: preferred
