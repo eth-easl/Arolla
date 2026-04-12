@@ -640,6 +640,27 @@ dump_sidecar_stats() {
     ) &
     pids+=("$!")
   done
+
+  # Also dump the ingress gateway's Envoy stats (arolla-gateway runs here).
+  # The gateway uses a different label selector than the app services.
+  (
+    local pod
+    pod="$(kubectl -n "${NAMESPACE}" get pod \
+      -l gateway.networking.k8s.io/gateway-name=boutique-gateway \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [[ -n "${pod}" ]]; then
+      kubectl -n "${NAMESPACE}" exec "${pod}" -- \
+        curl -s 'localhost:15000/stats' \
+        > "${out_dir}/gateway${suffix}.stats" 2>/dev/null || \
+        warn "could not dump counters for gateway${suffix}"
+      kubectl -n "${NAMESPACE}" exec "${pod}" -- \
+        curl -s 'localhost:15000/stats?format=prometheus' \
+        > "${out_dir}/gateway${suffix}.prom" 2>/dev/null || \
+        warn "could not dump prometheus stats for gateway${suffix}"
+    fi
+  ) &
+  pids+=("$!")
+
   # Wait for every backgrounded subshell. We don't propagate individual
   # exit codes — the inline warn() calls already surface failures, and
   # one missing service shouldn't abort the whole snapshot.
