@@ -371,7 +371,8 @@ async def execute_step(
     step: dict[str, Any],
     profile: dict[str, Any],
     worker_idx: int,
-    session: KeepAliveSession,
+    session: "Optional[KeepAliveSession]" = None,
+    pool: "Optional[ConnectionPool]" = None,
     host_header: str,
     headers_base: dict[str, str],
     session_id: str,
@@ -382,8 +383,14 @@ async def execute_step(
     Run a single request step with the profile's retry policy.
     Returns True if the final attempt was ok (so a workflow can advance).
 
-    The session is provided by the caller — closed-loop workers pass their
-    long-lived session, open-loop firer passes a session leased from the pool.
+    Session management has two modes:
+      - closed-loop: caller passes a long-lived `session`, no `pool`. The
+        session is reused across all retries (same TCP connection).
+      - open-loop:   caller passes `pool` (no `session`). Each attempt
+        acquires a fresh session from the pool and releases it immediately
+        after the attempt completes. This keeps the per-attempt hold time
+        to `timeout_s` instead of `retries × timeout_s`, preventing the
+        connection pool from saturating during fault-window backlog drain.
     """
     name = str(profile.get("name", "client"))
     max_retries = int(profile.get("retries", 0))
@@ -402,6 +409,17 @@ async def execute_step(
     for retry_index in range(0, max_retries + 1):
         attempt_number = retry_index + 1
         is_retry = retry_index > 0
+
+        # ---- Per-attempt session management (open-loop only) ----
+        # In open-loop mode (pool provided), acquire a fresh connection for
+        # each attempt and release it immediately after. Hold time per slot
+        # = timeout_s (one attempt), NOT retries × timeout_s (all attempts).
+        # In closed-loop mode (session provided), reuse the caller's
+        # persistent connection — no pool interaction.
+        if pool is not None:
+            attempt_session = await pool.acquire()
+        else:
+            attempt_session = session
 
         headers = dict(headers_base)
         headers["X-Request-ID"] = req_id
@@ -425,7 +443,7 @@ async def execute_step(
         try:
             coro = asyncio.to_thread(
                 send_once,
-                session=session,
+                session=attempt_session,
                 method=method,
                 path=path,
                 headers=headers,
@@ -439,7 +457,14 @@ async def execute_step(
             ok, status, err = False, 0, "client_timeout"
             # The underlying thread is still blocked in the socket call;
             # close the connection so it gets a BrokenPipeError and exits.
-            session._close()
+            attempt_session._close()
+        finally:
+            # Release the pool slot immediately so other fires can use it.
+            # Closed sessions go back to the pool and reconnect lazily on
+            # next acquire — no need to special-case the timeout path.
+            if pool is not None:
+                pool.release(attempt_session)
+
         latency = time.time() - t0
         final_ok = ok
 
@@ -498,7 +523,8 @@ async def execute_logical_request(
     *,
     profile: dict[str, Any],
     worker_idx: int,
-    session: KeepAliveSession,
+    session: "Optional[KeepAliveSession]" = None,
+    pool: "Optional[ConnectionPool]" = None,
     host_header: str,
     headers_base: dict[str, str],
     requests_mix: list,
@@ -524,6 +550,7 @@ async def execute_logical_request(
                 profile=profile,
                 worker_idx=worker_idx,
                 session=session,
+                pool=pool,
                 host_header=host_header,
                 headers_base=headers_base,
                 session_id=session_id,
@@ -538,6 +565,7 @@ async def execute_logical_request(
             profile=profile,
             worker_idx=worker_idx,
             session=session,
+            pool=pool,
             host_header=host_header,
             headers_base=headers_base,
             session_id=session_id,
@@ -638,21 +666,21 @@ async def _open_loop_one(
             return
         await inflight_sem.acquire()
     try:
-        session = await pool.acquire()
-        try:
-            await execute_logical_request(
-                profile=profile,
-                worker_idx=fire_idx,
-                session=session,
-                host_header=host_header,
-                headers_base=headers_base,
-                requests_mix=requests_mix,
-                weights=weights,
-                sku_pool=sku_pool,
-                stop_event=stop_event,
-            )
-        finally:
-            pool.release(session)
+        # Pass the pool through — execute_step acquires/releases a session
+        # per attempt, so each attempt holds a pool slot for only timeout_s
+        # instead of retries × timeout_s. This prevents the pool from
+        # saturating during fault-window backlog drain.
+        await execute_logical_request(
+            profile=profile,
+            worker_idx=fire_idx,
+            pool=pool,
+            host_header=host_header,
+            headers_base=headers_base,
+            requests_mix=requests_mix,
+            weights=weights,
+            sku_pool=sku_pool,
+            stop_event=stop_event,
+        )
     finally:
         if inflight_sem is not None:
             inflight_sem.release()
