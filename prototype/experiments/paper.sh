@@ -17,6 +17,6 @@ prototype/experiments/run-experiment.sh \
 # command for updating replica configs via cluster profiles:
 ./prototype/deploy-cluster-profile.sh 2-replica
 
-prototype/experiments/run_sensitivity.sh prototype/experiments/sweeps/sensitivity.yaml --help
+NUM_LOADERS=4 prototype/experiments/run_sweep.sh prototype/experiments/sweeps/rps_sweep.yaml
 
 python3 prototype/experiments/plot_sensitivity.py outputs/prototype/sensitivity/20260410_120000/ --help
