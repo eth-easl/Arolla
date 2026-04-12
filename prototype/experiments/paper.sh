@@ -14,6 +14,8 @@ prototype/experiments/run-experiment.sh \
   
   --warmup 30 --prefault 40 --fault 20 --recovery 40 --cooldown 10
 
+# command for updating replica configs via cluster profiles:
+./prototype/deploy-cluster-profile.sh 2-replica
 
 prototype/experiments/run_sensitivity.sh prototype/experiments/sweeps/sensitivity.yaml --help
 
