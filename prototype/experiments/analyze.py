@@ -1880,18 +1880,30 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
                 # existing series — sidecars that received traffic for `svc`
                 # all report the same diffed bucket counts.
 
-    # Try to enrich with Arolla sidecar counters (if policy is arolla).
+    # Enrich with Arolla sidecar counters (diffed: post minus pre).
+    # We diff to scope to this run only and to avoid double-counting stale
+    # counters from prior experiments that persist in .pre.stats snapshots.
     sidecar_dir = policy_dir / "sidecar-stats"
     arolla_admitted = 0.0
     arolla_rejected = 0.0
     if sidecar_dir.exists():
-        for stats_file in sidecar_dir.glob("*.stats"):
-            parsed = parse_envoy_stats(stats_file)
-            for name, val in parsed.items():
+        for stats_file in sorted(sidecar_dir.glob("*.stats")):
+            # Only post-run stats files (<svc>.stats), skip phase snapshots
+            # like <svc>.pre.stats, <svc>.warmup_end.stats, etc.
+            if "." in stats_file.stem:
+                continue
+            svc_name = stats_file.stem
+            pre_file = sidecar_dir / f"{svc_name}.pre.stats"
+            post_parsed = parse_envoy_stats(stats_file)
+            pre_parsed = parse_envoy_stats(pre_file) if pre_file.exists() else {}
+            for name, val in post_parsed.items():
+                delta = val - pre_parsed.get(name, 0.0)
+                if delta <= 0:
+                    continue
                 if "arolla_retries_admitted_total" in name:
-                    arolla_admitted += val
+                    arolla_admitted += delta
                 elif "arolla_retries_rejected_total" in name:
-                    arolla_rejected += val
+                    arolla_rejected += delta
 
     # Per-phase retry deltas, sourced from the .pre / .warmup_end /
     # .fault_start / .fault_end / .recovery_end / "" snapshots written by
