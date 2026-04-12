@@ -53,9 +53,15 @@ struct Config {
     capacity: f64,
     /// Time refill rate: tokens added per second independent of traffic. Paper: t.
     t: f64,
-    /// Header carrying the per-request attempt counter.
+    /// Primary header carrying the per-request attempt counter.
     /// attempt == 1 → first attempt (always admitted); > 1 → retry (gated).
     attempt_header: String,
+    /// Secondary attempt header. Checked when the primary is absent or 1.
+    /// This supports dual-source retry identification: mesh retries set
+    /// `x-envoy-attempt-count` (sidecar outbound), while client retries
+    /// set a custom header like `X-Attempt-Number` (survives the gateway,
+    /// which strips `x-envoy-*` from external requests).
+    attempt_header_secondary: String,
     /// HTTP status returned when a retry is rejected.
     reject_status: u32,
 }
@@ -68,6 +74,7 @@ impl Default for Config {
             capacity: 10.0,
             t: 1.0,
             attempt_header: "x-envoy-attempt-count".to_string(),
+            attempt_header_secondary: "X-Attempt-Number".to_string(),
             reject_status: 429,
         }
     }
@@ -225,11 +232,21 @@ impl Context for ArollaHttp {}
 
 impl HttpContext for ArollaHttp {
     fn on_http_request_headers(&mut self, _n: usize, _eos: bool) -> Action {
-        // attempt == 1 if header absent or unparseable (safe default: treat as first attempt).
-        let attempt: u32 = self
+        // Read attempt counter from both headers and take the max. This handles
+        // two distinct retry sources:
+        //   - Mesh retries (sidecar outbound): Envoy sets x-envoy-attempt-count
+        //   - Client retries (through gateway): client sets X-Attempt-Number
+        //     (x-envoy-* headers are stripped by the gateway)
+        // attempt == 1 if both headers are absent or unparseable.
+        let a1: u32 = self
             .get_http_request_header(&self.config.attempt_header)
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        let a2: u32 = self
+            .get_http_request_header(&self.config.attempt_header_secondary)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        let attempt = a1.max(a2);
 
         if attempt <= 1 {
             // Paper §5: first attempts are always admitted — we never gate them.

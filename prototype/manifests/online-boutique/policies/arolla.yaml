@@ -18,4 +18,5 @@ spec:
     capacity: 20.0
     t: 1.0
     attempt_header: "x-envoy-attempt-count"
+    attempt_header_secondary: "X-Attempt-Number"
     reject_status: 429

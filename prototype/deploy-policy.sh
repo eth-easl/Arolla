@@ -165,6 +165,14 @@ render_arolla() {
   sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla.yaml"
 }
 
+render_arolla_gateway() {
+  # stdout: arolla-gateway.yaml with __MASTER_IP__ substituted
+  local ip
+  ip="$(resolve_master_ip)"
+  [[ -z "${ip}" ]] && err "empty MASTER_IP"
+  sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla-gateway.yaml"
+}
+
 cmd_apply() {
   local name="${1:-}"
   [[ -z "${name}" ]] && err "usage: $0 apply <policy>"
@@ -174,6 +182,7 @@ cmd_apply() {
   log "applying policy: ${name} (${file})"
   if [[ "${name}" == "arolla" ]]; then
     render_arolla | kubectl apply -f -
+    render_arolla_gateway | kubectl apply -f -
   else
     kubectl apply -f "${file}"
   fi
@@ -188,6 +197,7 @@ cmd_remove() {
   log "removing policy: ${name}"
   if [[ "${name}" == "arolla" ]]; then
     render_arolla | kubectl delete --ignore-not-found -f -
+    render_arolla_gateway | kubectl delete --ignore-not-found -f -
   else
     kubectl delete --ignore-not-found -f "${file}"
   fi
