@@ -458,11 +458,15 @@ async def execute_step(
             # The underlying thread is still blocked in the socket call;
             # close the connection so it gets a BrokenPipeError and exits.
             attempt_session._close()
-        finally:
-            # Release the pool slot immediately so other fires can use it.
-            # Closed sessions go back to the pool and reconnect lazily on
-            # next acquire — no need to special-case the timeout path.
+            # The session is now poisoned — the worker thread may still
+            # hold a reference to the old self._conn. Don't return it to
+            # the pool; release a None placeholder instead so the pool
+            # slot is freed and the next acquire creates a fresh session.
             if pool is not None:
+                pool.release(None)
+                attempt_session = None  # prevent the finally from double-releasing
+        finally:
+            if pool is not None and attempt_session is not None:
                 pool.release(attempt_session)
 
         latency = time.time() - t0
