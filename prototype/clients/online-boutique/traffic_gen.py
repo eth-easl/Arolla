@@ -424,13 +424,6 @@ async def execute_step(
         headers = dict(headers_base)
         headers["X-Request-ID"] = req_id
         headers["X-Attempt-Number"] = str(attempt_number)
-        # Arolla reads x-envoy-attempt-count to distinguish first attempts
-        # from retries. Envoy sets this header on mesh-level retries (sidecar
-        # outbound), but client-level retries arrive as fresh connections
-        # without it. Setting it here lets arolla at the frontend gate client
-        # retries through its token bucket — otherwise they'd all look like
-        # first attempts and bypass admission control.
-        headers["x-envoy-attempt-count"] = str(attempt_number)
         headers["Cookie"] = f"shop_session-id={session_id}"
         if host_header:
             headers["Host"] = host_header
