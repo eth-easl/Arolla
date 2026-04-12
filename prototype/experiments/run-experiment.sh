@@ -673,6 +673,18 @@ run_single() {
   kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null 2>&1 || true
   ssh_client "rm -rf ${REMOTE_METRICS_DIR} ${REMOTE_PID_FILE} ${REMOTE_LOG_GLOB}; mkdir -p ${REMOTE_METRICS_DIR}"
 
+  # ---- Restart all pods for a clean slate ----
+  # Each policy run inherits residual state from the previous run: drained
+  # Envoy connection pools, pending retry queues, stale WASM VM state, Go
+  # goroutine stacks, and TCP TIME_WAIT sockets. At high offered load
+  # (>75% of cluster capacity), this contamination pushes the next policy
+  # into overload before the fault is even injected. Rolling restart gives
+  # every pod a fresh Envoy process, fresh application, and fresh TCP state.
+  log "[${policy}] restarting all pods for clean slate"
+  kubectl rollout restart deployment -n "${NAMESPACE}" >/dev/null 2>&1 || true
+  kubectl rollout status deployment -n "${NAMESPACE}" --timeout=120s 2>/dev/null || \
+    warn "rollout timed out — some pods may not be ready"
+
   # ---- Switch policy ----
   log "switching policy → ${policy}"
   "${PROTO_DIR}/deploy-policy.sh" switch "${policy}"
