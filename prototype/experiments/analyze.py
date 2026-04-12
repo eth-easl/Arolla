@@ -47,10 +47,18 @@ POLICY_LABELS = {
 }
 
 POLICY_COLORS = {
-    "no-control":         "#d62728",  # red
-    "circuit-breaker":    "#ff7f0e",  # orange
-    "envoy-retry-budget": "#2ca02c",  # green
-    "arolla":             "#1f77b4",  # blue
+    "no-control":         "#C83232",  # retryred
+    "circuit-breaker":    "#E68C14",  # warnorg
+    "envoy-retry-budget": "#3264B4",  # calmblue
+    "arolla":             "#218B21",  # goodputgreen
+}
+
+# !55 variants (55% color + 45% white) for bar fills.
+POLICY_COLORS_FILL = {
+    "no-control":         "#E18E8E",  # retryred!55
+    "circuit-breaker":    "#F1C07E",  # warnorg!55
+    "envoy-retry-budget": "#8EAAD6",  # calmblue!55
+    "arolla":             "#85BF85",  # goodputgreen!55
 }
 
 POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla"]
@@ -603,6 +611,53 @@ def request_rate_timeseries(df: pd.DataFrame, t_ref: float, t_end: float,
         "retry":  _rate(window["attempt"] > 1),
         "failed": _rate(~window["ok"].astype(bool)),
     }
+
+
+def retry_by_status_timeseries(
+    df: pd.DataFrame, t_ref: float, t_end: float,
+    bin_sec: float = 1.0,
+) -> Dict[str, pd.Series]:
+    """
+    Per-second retry counts broken down by the HTTP status of each retry
+    attempt. Only counts retries (attempt > 1). Returns a dict mapping
+    status label ('429', '500', '502', '503', '504', '0', 'other') to a
+    time series of counts.
+    """
+    empty: Dict[str, pd.Series] = {}
+    if df.empty or "attempt" not in df.columns or "status" not in df.columns:
+        return empty
+
+    retries = df[
+        (df["attempt"] > 1) &
+        (df["timestamp"] >= t_ref) &
+        (df["timestamp"] <= t_end)
+    ].copy()
+    if retries.empty:
+        return empty
+
+    retries["bin"] = ((retries["timestamp"] - t_ref) // bin_sec).astype(int)
+    n_bins = int((t_end - t_ref) // bin_sec) + 1
+    observed_min = int(retries["bin"].min())
+    observed_max = int(retries["bin"].max())
+    observed_range = range(max(0, observed_min), observed_max + 1)
+
+    # Map status to string label; group uncommon ones as "other".
+    known = {"429", "500", "502", "503", "504", "0", "-1", "302", "200"}
+    retries["status_label"] = retries["status"].astype(str).apply(
+        lambda s: s if s in known else "other"
+    )
+    # Treat -1 (client drop) as "0" (connection failure) for display.
+    # Treat 302 and 200 as "success" (retries that succeeded).
+    retries["status_label"] = retries["status_label"].replace(
+        {"-1": "0", "302": "success", "200": "success"}
+    )
+
+    result: Dict[str, pd.Series] = {}
+    for label, grp in retries.groupby("status_label"):
+        counts = grp.groupby("bin").size().astype(float)
+        counts = counts.reindex(observed_range, fill_value=0.0)
+        result[str(label)] = counts.reindex(range(n_bins))
+    return result
 
 
 def success_rate_timeseries(df: pd.DataFrame, t_ref: float, t_end: float,
@@ -1224,10 +1279,11 @@ def plot_bar(runs: Dict[str, dict], key: str, ylabel: str, title: str,
               [p for p in runs if p not in POLICY_ORDER]
     labels = [POLICY_LABELS.get(p, p) for p in ordered]
     values = [runs[p][key] for p in ordered]
-    colors = [POLICY_COLORS.get(p, "gray") for p in ordered]
+    fills = [POLICY_COLORS_FILL.get(p, "gray") for p in ordered]
+    edges = [POLICY_COLORS.get(p, "gray") for p in ordered]
 
     fig, ax = plt.subplots(figsize=(6.4, 4.0))
-    bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=0.8)
+    bars = ax.bar(labels, values, color=fills, edgecolor="none")
     if values:
         ymax = max(values) if any(values) else 1.0
         for bar, v in zip(bars, values):
@@ -1341,8 +1397,8 @@ def plot_retries_by_upstream(
             ax.bar(
                 x_pos + offset, heights,
                 width=bar_width,
-                color=POLICY_COLORS.get(policy, "gray"),
-                edgecolor="white", linewidth=0.5,
+                color=POLICY_COLORS_FILL.get(policy, "gray"),
+                edgecolor="none",
                 label=POLICY_LABELS.get(policy, policy),
             )
         ax.set_xticks(x_pos)
@@ -1453,6 +1509,7 @@ def plot_retries_caller_matrix(
 # visually consistent across runs and across policies; services not in
 # the list are appended to the top in alphabetical order.
 _CHAIN_SERVICE_ORDER = [
+    "gateway",
     "frontend",
     "checkoutservice",
     "cartservice",
@@ -1469,6 +1526,7 @@ _CHAIN_SERVICE_ORDER = [
 # distinguishable on a small bar; the order is paired with
 # _CHAIN_SERVICE_ORDER above.
 _CHAIN_SERVICE_COLORS = {
+    "gateway":               "#555555",  # dark gray
     "frontend":              "#1f77b4",  # blue
     "checkoutservice":       "#ff7f0e",  # orange
     "cartservice":           "#2ca02c",  # green
@@ -1699,14 +1757,410 @@ def plot_retries_stacked_by_callee(
     ax.set_title("Chain amplification: retries by callee, stacked",
                  fontsize=12, loc="left", pad=4)
     ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+    # Only show services that received retries under at least one policy.
     handles, labels = ax.get_legend_handles_labels()
+    filtered = [(h, l) for h, l in zip(handles, labels)
+                if any(per_policy[p].get(l, 0) > 0 for p in ordered_policies)]
+    if filtered:
+        fh, fl = zip(*filtered)
+        ax.legend(
+            list(fh)[::-1], list(fl)[::-1],
+            loc="upper right",
+            frameon=True, fancybox=False,
+            edgecolor="#888888", framealpha=0.95, fontsize=10,
+            title="received by",
+        )
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_chain_retry(
+    runs: Dict[str, dict],
+    out_path: Path,
+    counter: str = "upstream_rq_retry",
+) -> None:
+    """
+    Chain retry plot: x-axis is services in call-chain order, grouped bars
+    show the number of retries *received by* each service for each policy.
+
+    This makes it easy to see where in the chain retries concentrate and
+    how each policy affects retry distribution across services.
+    """
+    _apply_paper_style()
+    ordered_policies = [p for p in POLICY_ORDER if p in runs] + \
+                       [p for p in runs if p not in POLICY_ORDER]
+    if not ordered_policies:
+        return
+
+    # Build {policy: {callee: total_retries_received}}
+    per_policy: Dict[str, Dict[str, int]] = {}
+    for policy in ordered_policies:
+        deltas = runs[policy].get("run_retry_deltas") or {}
+        per_callee: Dict[str, int] = {}
+        for (_caller, upstream), counters in deltas.items():
+            v = counters.get(counter, 0)
+            if v <= 0:
+                continue
+            per_callee[upstream] = per_callee.get(upstream, 0) + v
+        per_policy[policy] = per_callee
+
+    # Determine which services received retries under any policy, in chain order.
+    all_callees = set()
+    for p in per_policy.values():
+        all_callees.update(k for k, v in p.items() if v > 0)
+    if not all_callees:
+        return
+
+    chain_order = [s for s in _CHAIN_SERVICE_ORDER if s in all_callees]
+    extras = sorted(s for s in all_callees if s not in _CHAIN_SERVICE_ORDER)
+    services = chain_order + extras
+
+    n_svc = len(services)
+    n_pol = len(ordered_policies)
+    bar_width = 0.8 / n_pol
+    x = np.arange(n_svc)
+
+    fig, ax = plt.subplots(figsize=(max(6, 1.5 * n_svc + 2), 5.0))
+
+    for i, policy in enumerate(ordered_policies):
+        heights = [per_policy[policy].get(svc, 0) for svc in services]
+        ax.bar(
+            x + i * bar_width - 0.4 + bar_width / 2,
+            heights,
+            width=bar_width,
+            color=POLICY_COLORS_FILL.get(policy, "lightgray"),
+            edgecolor="none",
+            label=POLICY_LABELS.get(policy, policy),
+        )
+
+    # Add value labels on top of each bar (compact K/M suffixes to avoid overlap).
+    def _fmt(v: float) -> str:
+        if v >= 1_000_000:
+            return f"{v/1e6:.1f}M"
+        if v >= 1_000:
+            return f"{v/1e3:.0f}K"
+        return f"{v:.0f}"
+
+    for i, policy in enumerate(ordered_policies):
+        heights = [per_policy[policy].get(svc, 0) for svc in services]
+        for j, h in enumerate(heights):
+            if h > 0:
+                ax.text(
+                    x[j] + i * bar_width - 0.4 + bar_width / 2,
+                    h, _fmt(h),
+                    ha="center", va="bottom", fontsize=7,
+                )
+
+    ax.set_xticks(x)
+    svc_short = {
+        "gateway": "Gateway",
+        "frontend": "Frontend",
+        "cartservice": "Cart",
+        "productcatalogservice": "ProductCatalog",
+        "checkoutservice": "Checkout",
+        "paymentservice": "Payment",
+        "currencyservice": "Currency",
+        "shippingservice": "Shipping",
+        "emailservice": "Email",
+        "recommendationservice": "Recommend.",
+        "adservice": "Ad",
+    }
+    svc_labels = [svc_short.get(s, s) for s in services]
+    ax.set_xticklabels(svc_labels, rotation=0, fontsize=11)
+    ax.set_ylabel("Retries received")
+    ax.set_title("Retries by service along the call chain",
+                 fontsize=12, loc="left", pad=4)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
     ax.legend(
-        handles[::-1], labels[::-1],
-        loc="upper right",
+        loc="upper left",
         frameon=True, fancybox=False,
         edgecolor="#888888", framealpha=0.95, fontsize=10,
-        title="received by",
     )
+    # Leave headroom for the value labels above the tallest bar.
+    ymax = max(per_policy[p].get(s, 0) for p in ordered_policies for s in services)
+    if ymax > 0:
+        ax.set_ylim(top=ymax * 1.15)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+    # --- Log-scale version ---
+    log_path = out_path.with_name(out_path.stem + "-log" + out_path.suffix)
+    fig2, ax2 = plt.subplots(figsize=(max(6, 1.5 * n_svc + 2), 5.0))
+    for i, policy in enumerate(ordered_policies):
+        heights = [max(per_policy[policy].get(svc, 0), 0.1) for svc in services]
+        ax2.bar(
+            x + i * bar_width - 0.4 + bar_width / 2,
+            heights,
+            width=bar_width,
+            color=POLICY_COLORS_FILL.get(policy, "lightgray"),
+            edgecolor="none",
+            label=POLICY_LABELS.get(policy, policy),
+        )
+        for j, h in enumerate(heights):
+            real_h = per_policy[policy].get(services[j], 0)
+            if real_h > 0:
+                ax2.text(
+                    x[j] + i * bar_width - 0.4 + bar_width / 2,
+                    real_h, _fmt(real_h),
+                    ha="center", va="bottom", fontsize=7,
+                )
+    ax2.set_yscale("log")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([svc_short.get(s, s) for s in services], rotation=0, fontsize=11)
+    ax2.set_ylabel("Retries received (log scale)")
+    ax2.set_title("Retries by service along the call chain",
+                  fontsize=12, loc="left", pad=4)
+    ax2.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+    ax2.legend(
+        loc="upper left",
+        frameon=True, fancybox=False,
+        edgecolor="#888888", framealpha=0.95, fontsize=10,
+    )
+    fig2.tight_layout()
+    fig2.savefig(log_path, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"  wrote {log_path}")
+
+
+_RETRY_STATUS_COLORS = {
+    "500":     "#d62728",   # red — application error
+    "429":     "#9467bd",   # purple — arolla rejection
+    "503":     "#ff7f0e",   # orange — service unavailable
+    "504":     "#e377c2",   # pink — gateway timeout
+    "502":     "#8c564b",   # brown — bad gateway
+    "0":       "#7f7f7f",   # gray — connection failure / client timeout
+    "success": "#2ca02c",   # green — retry that succeeded
+    "other":   "#17becf",   # teal
+}
+
+_RETRY_STATUS_ORDER = ["500", "429", "503", "504", "502", "0", "success", "other"]
+
+
+def plot_retry_status_ts(
+    runs: Dict[str, dict],
+    out_path: Path,
+    experiment: dict,
+) -> None:
+    """
+    Per-policy subplot: retry attempts per second, stacked by HTTP status.
+    Shows how retry traffic decomposes (429 rejections vs 500 errors vs
+    connection failures) over the experiment timeline.
+    """
+    _apply_paper_style()
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+    if not ordered:
+        return
+
+    n = len(ordered)
+    fig, axes = plt.subplots(n, 1, figsize=(10, 3.0 * n), sharex=True, sharey=True)
+    if n == 1:
+        axes = [axes]
+
+    for ax, policy in zip(axes, ordered):
+        rbs = runs[policy].get("retry_by_status_ts") or {}
+        if not rbs:
+            ax.set_title(POLICY_LABELS.get(policy, policy), fontsize=11, loc="left")
+            ax.set_ylabel("retries/s")
+            continue
+
+        # Stack in a fixed order so colors are consistent across policies.
+        labels_present = [s for s in _RETRY_STATUS_ORDER if s in rbs]
+        bottom = None
+        for status_label in labels_present:
+            series = rbs[status_label].fillna(0)
+            color = _RETRY_STATUS_COLORS.get(status_label, "lightgray")
+            display_label = {
+                "success": "Retry succeeded",
+                "0": "Conn. failure",
+            }.get(status_label, f"HTTP {status_label}")
+            if bottom is None:
+                ax.fill_between(series.index, 0, series,
+                                color=color, alpha=0.7, label=display_label,
+                                linewidth=0.5)
+                bottom = series.copy()
+            else:
+                ax.fill_between(series.index, bottom, bottom + series,
+                                color=color, alpha=0.7, label=display_label,
+                                linewidth=0.5)
+                bottom = bottom + series
+
+        # Fault band.
+        fault_start = runs[policy].get("fault_start_bin")
+        fault_end = runs[policy].get("fault_end_bin")
+        if fault_start is not None and fault_end is not None:
+            ax.axvspan(fault_start, fault_end, color="red", alpha=0.08)
+            ax.axvline(fault_start, color="red", linewidth=0.6, linestyle="--", alpha=0.5)
+            ax.axvline(fault_end, color="red", linewidth=0.6, linestyle="--", alpha=0.5)
+
+        ax.set_title(POLICY_LABELS.get(policy, policy), fontsize=11, loc="left")
+        ax.set_ylabel("retries/s")
+        ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+
+    axes[-1].set_xlabel("Time (s from warmup end)")
+
+    # Shared legend from the last subplot that had data.
+    handles, labels = [], []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        if h:
+            handles, labels = h, l
+    if handles:
+        fig.legend(handles, labels, loc="upper right",
+                   frameon=True, fancybox=False,
+                   edgecolor="#888888", framealpha=0.95, fontsize=9,
+                   bbox_to_anchor=(0.98, 0.98))
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_chain_retry_by_phase(
+    runs: Dict[str, dict],
+    out_path: Path,
+    counter: str = "upstream_rq_retry",
+) -> None:
+    """
+    Per-policy subplot showing retries received by each callee service,
+    broken down by phase (prefault / fault / recovery) if phase snapshots
+    are available. Falls back to whole-run totals when phase data is missing.
+
+    Layout: one subplot per policy, each with grouped bars (one group per
+    callee service, one bar per phase).
+    """
+    _apply_paper_style()
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+    if not ordered:
+        return
+
+    phases = ["prefault", "fault", "recovery"]
+    phase_colors = {
+        "prefault": "#2ca02c",   # green
+        "fault":    "#d62728",   # red
+        "recovery": "#1f77b4",   # blue
+        "whole_run": "#555555",  # gray (fallback)
+    }
+
+    # Collect data: {policy: {phase: {callee: retries}}}
+    policy_phase_data: Dict[str, Dict[str, Dict[str, int]]] = {}
+    has_phase_data = False
+    for policy in ordered:
+        phase_deltas = runs[policy].get("phase_retry_deltas") or {}
+        run_deltas = runs[policy].get("run_retry_deltas") or {}
+
+        if any(phase_deltas.get(ph) for ph in phases):
+            has_phase_data = True
+            per_phase: Dict[str, Dict[str, int]] = {}
+            for ph in phases:
+                pd_data = phase_deltas.get(ph) or {}
+                per_callee: Dict[str, int] = {}
+                for (_caller, upstream), counters in pd_data.items():
+                    v = counters.get(counter, 0)
+                    if v > 0:
+                        per_callee[upstream] = per_callee.get(upstream, 0) + v
+                per_phase[ph] = per_callee
+            policy_phase_data[policy] = per_phase
+        else:
+            # Fallback: whole-run totals as a single "whole_run" phase.
+            per_callee: Dict[str, int] = {}
+            for (_caller, upstream), counters in run_deltas.items():
+                v = counters.get(counter, 0)
+                if v > 0:
+                    per_callee[upstream] = per_callee.get(upstream, 0) + v
+            policy_phase_data[policy] = {"whole_run": per_callee}
+
+    # Determine callee services (in chain order) that appear in any policy.
+    all_callees = set()
+    for ppd in policy_phase_data.values():
+        for phase_data in ppd.values():
+            all_callees.update(k for k, v in phase_data.items() if v > 0)
+    if not all_callees:
+        return
+
+    svc_order = [s for s in _CHAIN_SERVICE_ORDER if s in all_callees]
+    extras = sorted(s for s in all_callees if s not in _CHAIN_SERVICE_ORDER)
+    services = svc_order + extras
+
+    svc_short = {
+        "gateway": "Gateway", "frontend": "Frontend",
+        "cartservice": "Cart", "productcatalogservice": "ProductCatalog",
+        "checkoutservice": "Checkout", "paymentservice": "Payment",
+        "currencyservice": "Currency", "shippingservice": "Shipping",
+        "emailservice": "Email", "recommendationservice": "Recommend.",
+        "adservice": "Ad",
+    }
+
+    active_phases = phases if has_phase_data else ["whole_run"]
+    n_phases = len(active_phases)
+    n_pol = len(ordered)
+
+    fig, axes = plt.subplots(n_pol, 1,
+                             figsize=(max(6, 1.8 * len(services) + 2), 3.5 * n_pol),
+                             sharex=True, sharey=True)
+    if n_pol == 1:
+        axes = [axes]
+
+    x = np.arange(len(services))
+    bar_width = 0.8 / n_phases
+
+    for ax, policy in zip(axes, ordered):
+        ppd = policy_phase_data.get(policy, {})
+        for i, phase in enumerate(active_phases):
+            phase_data = ppd.get(phase, {})
+            heights = [phase_data.get(svc, 0) for svc in services]
+            ax.bar(
+                x + i * bar_width - 0.4 + bar_width / 2,
+                heights,
+                width=bar_width,
+                color=phase_colors.get(phase, "#999999"),
+                edgecolor="white",
+                linewidth=0.5,
+                label=phase if policy == ordered[0] else None,
+            )
+            # Value labels.
+            for j, h in enumerate(heights):
+                if h > 0:
+                    label_str = f"{h/1e3:.0f}K" if h >= 1000 else f"{h:.0f}"
+                    ax.text(
+                        x[j] + i * bar_width - 0.4 + bar_width / 2,
+                        h, label_str,
+                        ha="center", va="bottom", fontsize=6,
+                    )
+
+        ax.set_title(POLICY_LABELS.get(policy, policy), fontsize=11, loc="left")
+        ax.set_ylabel("retries received")
+        ax.grid(True, axis="y", alpha=0.25, linewidth=0.5)
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels([svc_short.get(s, s) for s in services],
+                             rotation=0, fontsize=11)
+
+    # Shared legend from first subplot.
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, labels, loc="upper right",
+                   frameon=True, fancybox=False,
+                   edgecolor="#888888", framealpha=0.95, fontsize=9,
+                   bbox_to_anchor=(0.98, 0.98))
+
+    # Headroom for value labels.
+    ymax = max(
+        ppd_phase.get(svc, 0)
+        for ppd in policy_phase_data.values()
+        for ppd_phase in ppd.values()
+        for svc in services
+    )
+    if ymax > 0:
+        for ax in axes:
+            ax.set_ylim(top=ymax * 1.15)
+
     fig.tight_layout()
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -1818,6 +2272,7 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         df, t_ref, t_cooldown_end, bin_sec=1.0, smooth_win=5,
     )
     rates = request_rate_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
+    retry_by_status_ts = retry_by_status_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
     client_latency_ts = client_latency_timeseries(
         df, t_ref, t_cooldown_end, bin_sec=1.0,
     )
@@ -1922,6 +2377,7 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         "goodput": goodput,
         "success_rate": success_rate,
         "rates": rates,
+        "retry_by_status_ts": retry_by_status_ts,
         "client_latency_ts": client_latency_ts,
         "client_latency_by_phase": client_latency_phase,
         "service_buckets": service_buckets,
@@ -2036,6 +2492,15 @@ def main():
     )
     plot_retries_stacked_by_callee(
         runs, plots_dir / "retries-stacked-by-callee.pdf",
+    )
+    plot_chain_retry(
+        runs, plots_dir / "chain-retry.pdf",
+    )
+    plot_retry_status_ts(
+        runs, plots_dir / "retry-status-ts.pdf", experiment,
+    )
+    plot_chain_retry_by_phase(
+        runs, plots_dir / "chain-retry-by-phase.pdf",
     )
 
 
