@@ -68,7 +68,10 @@ CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 # Per-run output goes under outputs/prototype/<profile>/<profile>_<timestamp>/
 # at the repo root. The profile subfolder groups runs by workload type so
 # cart-stress and checkout-stress results don't intermingle.
+# When -o is passed (e.g. from run_sweep.sh), that path is used directly
+# as the run directory — no profile/timestamp subdirectory is appended.
 OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype"
+OUTPUT_EXPLICIT=false
 DRY_RUN=false
 SKIP_ANALYZE=false
 POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
@@ -211,7 +214,7 @@ while (( $# > 0 )); do
     --cpu-stress-target)  CPU_STRESS_TARGET="$2"; shift 2 ;;
     --cpu-stress-load)    CPU_STRESS_LOAD="$2"; shift 2 ;;
     --cpu-stress-workers) CPU_STRESS_WORKERS="$2"; shift 2 ;;
-    -o|--output)          OUTPUT_ROOT="$2"; shift 2 ;;
+    -o|--output)          OUTPUT_ROOT="$2"; OUTPUT_EXPLICIT=true; shift 2 ;;
     --warmup)        WARMUP_SEC="$2"; shift 2 ;;
     --prefault)      PREFAULT_SEC="$2"; shift 2 ;;
     --fault)         FAULT_SEC="$2"; shift 2 ;;
@@ -409,7 +412,12 @@ _profile_slug="${RESOLVED_PROFILES[0]}"
 if (( ${#RESOLVED_PROFILES[@]} > 1 )); then
   _profile_slug="$(IFS=+; echo "${RESOLVED_PROFILES[*]}")"
 fi
-RUN_DIR="${OUTPUT_ROOT}/${_profile_slug}/${_profile_slug}_${RUN_TS}"
+if "${OUTPUT_EXPLICIT}"; then
+  # -o was passed (e.g. from run_sweep.sh) — use it directly.
+  RUN_DIR="${OUTPUT_ROOT}"
+else
+  RUN_DIR="${OUTPUT_ROOT}/${_profile_slug}/${_profile_slug}_${RUN_TS}"
+fi
 
 print_plan
 
