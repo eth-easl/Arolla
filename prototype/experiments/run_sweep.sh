@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# run_sensitivity.sh — run parameter sweeps defined in a YAML config
+# run_sweep.sh — run parameter sweeps defined in a YAML config
 # ==========================================================================
 #
 # Reads a sweep config (e.g. sweeps/sensitivity.yaml) and for each sweep
@@ -8,15 +8,16 @@
 # place, runs run-experiment.sh, and restores the original file.
 #
 # Usage:
-#   ./run_sensitivity.sh sweeps/sensitivity.yaml                # all sweeps
-#   ./run_sensitivity.sh sweeps/sensitivity.yaml fault-duration  # one sweep
-#   ./run_sensitivity.sh sweeps/sensitivity.yaml arolla-time-refill arolla-event-refill
+#   ./run_sweep.sh sweeps/sensitivity.yaml                # all sweeps
+#   ./run_sweep.sh sweeps/sensitivity.yaml fault-duration  # one sweep
+#   ./run_sweep.sh sweeps/sensitivity.yaml arolla-r arolla-c
 #
 # The second+ arguments are sweep names to run. If omitted, ALL sweeps
 # in the config are run sequentially.
 #
-# Output goes to:
-#   outputs/prototype/sensitivity/<timestamp>/<sweep-name>/<param-value>/
+# Output directory is derived from the sweep config filename:
+#   sweeps/sensitivity.yaml → outputs/prototype/sensitivity/<timestamp>/<profile>/<value>/
+#   sweeps/rps_sweep.yaml   → outputs/prototype/rps_sweep/<timestamp>/<profile>/<value>/
 #
 # Requirements:
 #   - Python 3 with pyyaml (`pip install pyyaml`)
@@ -35,12 +36,16 @@ CONFIG="${1:?usage: $0 <sweep-config.yaml> [sweep-name ...]}"
 shift
 SELECTED_SWEEPS=("$@")  # empty = run all
 
+# Derive the output directory name from the sweep config filename.
+# sweeps/sensitivity.yaml → "sensitivity"
+# sweeps/rps_sweep.yaml   → "rps_sweep"
+SWEEP_STEM="$(basename "${CONFIG}" .yaml)"
 BATCH_TS="$(date +%Y%m%d_%H%M%S)"
-OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype/sensitivity/${BATCH_TS}"
+OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype/${SWEEP_STEM}/${BATCH_TS}"
 
-log()  { printf '\033[1;34m[sensitivity]\033[0m %s\n' "$*" >&2; }
-warn() { printf '\033[1;33m[sensitivity]\033[0m %s\n' "$*" >&2; }
-err()  { printf '\033[1;31m[sensitivity]\033[0m %s\n' "$*" >&2; exit 1; }
+log()  { printf '\033[1;34m[sweep]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[1;33m[sweep]\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[1;31m[sweep]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --------------------------------------------------------------------------
 # Parse the YAML config into a set of shell-friendly variables via Python.
@@ -151,6 +156,11 @@ resolve_file() {
     policy_yaml)
       echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml"
       ;;
+    fault_yaml)
+      # Edit the fault manifest directly. The fault_manifest field in the
+      # sweep base config names the manifest (e.g. "cartservice-100pct").
+      echo "${PROTO_DIR}/manifests/online-boutique/faults/${FAULT_MANIFEST}.yaml"
+      ;;
     cli)
       echo ""  # no file to edit — value goes on the command line
       ;;
@@ -189,17 +199,19 @@ for s in sweeps:
         str(base.get('fault', 10)),
         str(base.get('recovery', 60)),
         str(base.get('cooldown', 10)),
+        base.get('fault_manifest', '') or '_NONE_',
     ]))
 " | while IFS=$'\t' read -r \
     SWEEP_NAME SWEEP_DESC POLICIES PARAM_NAME PARAM_LOC PARAM_FIELD \
     VALUES_CSV PROFILE CPU_TARGET CPU_LOAD CPU_WORKERS \
-    WARMUP PREFAULT FAULT RECOVERY COOLDOWN; do
+    WARMUP PREFAULT FAULT RECOVERY COOLDOWN FAULT_MANIFEST; do
 
   # Replace _NONE_ sentinels with actual empty strings. These are used
   # because bash's `read` collapses consecutive tab delimiters, so truly
   # empty fields cause all subsequent fields to shift left.
   [[ "$PROFILE" == "_NONE_" ]] && PROFILE=""
   [[ "$CPU_TARGET" == "_NONE_" ]] && CPU_TARGET=""
+  [[ "$FAULT_MANIFEST" == "_NONE_" ]] && FAULT_MANIFEST=""
 
   # Skip sweeps not in the selection (if any were specified).
   if (( ${#SELECTED_SWEEPS[@]} > 0 )); then
@@ -218,7 +230,10 @@ for s in sweeps:
   log "  location: ${PARAM_LOC} → ${PARAM_FIELD}"
   log "========================================"
 
-  SWEEP_DIR="${OUTPUT_ROOT}/${SWEEP_NAME}"
+  # Output: <output_root>/<profile>/<sweep_name>/<value>/
+  # The profile directory groups all sweeps that share a client profile,
+  # so the directory tree reads naturally: rps_sweep/20260412/post-cart-stress-open/1000/
+  SWEEP_DIR="${OUTPUT_ROOT}/${PROFILE}/${SWEEP_NAME}"
   mkdir -p "${SWEEP_DIR}"
 
   # Split policies and values into arrays.
@@ -267,23 +282,25 @@ for s in sweeps:
     CMD+=(--warmup "$WARMUP" --prefault "$PREFAULT" --recovery "$RECOVERY" --cooldown "$COOLDOWN")
     CMD+=(-o "$VALUE_DIR")
 
-    # Fault config: either CPU stress or Istio fault manifest.
+    # Fault config: CPU stress, Istio fault manifest (-F), or bare fault duration.
+    local_fault="$FAULT"
+    if [[ "$PARAM_LOC" == "cli" && "$PARAM_FIELD" == "fault" ]]; then
+      local_fault="$VALUE"
+    fi
     if [[ -n "$CPU_TARGET" ]]; then
-      local_fault="$FAULT"
       local_load="$CPU_LOAD"
-      # Override from CLI-location sweep values.
-      if [[ "$PARAM_LOC" == "cli" ]]; then
-        case "$PARAM_FIELD" in
-          fault)           local_fault="$VALUE" ;;
-          cpu_stress_load) local_load="$VALUE"  ;;
-        esac
+      if [[ "$PARAM_LOC" == "cli" && "$PARAM_FIELD" == "cpu_stress_load" ]]; then
+        local_load="$VALUE"
       fi
       CMD+=(--cpu-stress-target "$CPU_TARGET")
       CMD+=(--cpu-stress-load "$local_load")
       CMD+=(--cpu-stress-workers "$CPU_WORKERS")
       CMD+=(--fault "$local_fault")
+    elif [[ -n "$FAULT_MANIFEST" ]]; then
+      CMD+=(-F "$FAULT_MANIFEST")
+      CMD+=(--fault "$local_fault")
     else
-      CMD+=(--fault "$FAULT")
+      CMD+=(--fault "$local_fault")
     fi
 
     log "  running: ${CMD[*]}"
