@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-paper_plotting.py — Generate paper-ready figures from a single experiment run.
+paper_plotting.py — Generate paper-ready figures.
 
 Usage:
+  # Single experiment run:
   python3 paper_plotting.py <run_dir> [output_dir]
 
-Example:
-  python3 paper_plotting.py outputs/nsdi/post-cart-stress-open_20260412_165901_star
-  python3 paper_plotting.py outputs/nsdi/post-cart-stress-open_20260412_165901_star outputs/nsdi/paper_figs
+  # Sweep plots (recovery vs parameter):
+  python3 paper_plotting.py --sweep-rps <sweep_root> [output_dir]
+  python3 paper_plotting.py --sweep-failure-rate <sweep_root> [output_dir]
+  python3 paper_plotting.py --sweep-fault-duration <sweep_root> [output_dir]
 
-Produces:
-  success-rate.pdf      — End-user success rate vs time
-  chain-retry-log.pdf   — Retries by service (log scale, grouped bar)
-  latency-ts-p50.pdf    — p50 latency vs time
-  latency-ts-p99.pdf    — p99 latency vs time
+Examples:
+  python3 paper_plotting.py outputs/nsdi/post-cart-stress-open_20260412_165901_star
+  python3 paper_plotting.py --sweep-rps outputs/nsdi/rps_sweep/combined
+  python3 paper_plotting.py --sweep-failure-rate outputs/nsdi/failure_rate_sweep/combined
 """
 from __future__ import annotations
 
@@ -241,6 +242,140 @@ def plot_latency_ts(runs, experiment, out_path, percentile="p50", log_y=True):
 
 
 # ---------------------------------------------------------------------------
+# Recovery time vs swept parameter (for sweep-level plots)
+# ---------------------------------------------------------------------------
+
+import csv
+import pandas as pd
+
+def plot_recovery_vs_sweep_paper(
+    sweep_root: Path,
+    out_path: Path,
+    x_label: str = "Load (req/s)",
+    format_x: str = "auto",
+    x_max: float = None,
+):
+    """
+    Paper-style recovery-time-vs-parameter line plot.
+    Same data as analyze.plot_recovery_vs_sweep, but with paper figure sizing.
+    """
+    _paper_style()
+
+    NEVER_Y = 70
+    PLOT_MAX = 78
+    arrow_offsets = {
+        "no-control":         -2.0,
+        "circuit-breaker":    -0.7,
+        "envoy-retry-budget":  0.7,
+        "arolla":              2.0,
+    }
+
+    data: Dict[str, Dict[float, float]] = {}
+    for val_dir in sorted(sweep_root.iterdir()):
+        if not val_dir.is_dir():
+            continue
+        summary = val_dir / "summary.csv"
+        if not summary.exists():
+            continue
+        try:
+            x_val = float(val_dir.name)
+        except ValueError:
+            continue
+        with open(summary) as f:
+            for row in pd.read_csv(f).to_dict("records"):
+                pol = row["policy"]
+                rec = row.get("recovery_sec")
+                try:
+                    rec_val = float(rec)
+                    if np.isnan(rec_val):
+                        rec_val = None
+                except (ValueError, TypeError):
+                    rec_val = None
+                data.setdefault(pol, {})[x_val] = rec_val
+
+    x_values = sorted(set(x for pol_data in data.values() for x in pol_data))
+    if x_max is not None:
+        x_values = [x for x in x_values if x <= x_max]
+        for pol in data:
+            data[pol] = {x: v for x, v in data[pol].items() if x <= x_max}
+    if not x_values:
+        return
+
+    ordered = [p for p in POLICY_ORDER if p in data] + \
+              [p for p in data if p not in POLICY_ORDER]
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.8))
+
+    # "No recovery" band
+    ax.axhspan(NEVER_Y - 4, PLOT_MAX, color="#f5f5f5", zorder=0)
+    ax.axhline(y=NEVER_Y - 4, color="#cccccc", linestyle="--", linewidth=0.8)
+
+    for pol in ordered:
+        pol_data = data[pol]
+        xs = sorted(pol_data.keys())
+
+        rec_xs, rec_ys = [], []
+        never_xs = []
+        for x in xs:
+            v = pol_data[x]
+            if v is None:
+                never_xs.append(x)
+            else:
+                rec_xs.append(x)
+                rec_ys.append(v)
+
+        marker = POLICY_MARKERS.get(pol, "o")
+        color = POLICY_COLORS.get(pol, "gray")
+        label = POLICY_LABELS.get(pol, pol)
+
+        if rec_xs:
+            ax.plot(rec_xs, rec_ys, color=color, label=label,
+                    marker=marker, markersize=5, linewidth=1.5, zorder=4)
+        else:
+            ax.plot([], [], color=color, label=label,
+                    marker=marker, markersize=5, linewidth=1.5)
+
+        if never_xs:
+            offset = arrow_offsets.get(pol, 0)
+            never_y = [NEVER_Y + offset] * len(never_xs)
+            ax.scatter(never_xs, never_y,
+                       marker=marker, s=40, color=color, zorder=5)
+            # Dashed line from last recovered point to the first
+            # never-recovered point AFTER it (not the global min,
+            # since earlier x values may also be "never").
+            if rec_xs:
+                last_rec_x = rec_xs[-1]
+                later_nevers = [nx for nx in never_xs if nx > last_rec_x]
+                if later_nevers:
+                    first_after = min(later_nevers)
+                    ax.plot([last_rec_x, first_after],
+                            [rec_ys[-1], NEVER_Y + offset],
+                            color=color, linestyle="--", linewidth=1.2,
+                            alpha=0.5, zorder=3)
+
+    ax.text(x_values[0], NEVER_Y, "no recovery", va="center", fontsize=8,
+            color="#999999", fontstyle="italic")
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Recovery Time (s)")
+    ax.set_xticks(x_values)
+    if format_x == "auto":
+        ax.set_xticklabels(
+            [f"{v/1000:.1f}k" if v >= 1000 else str(int(v)) for v in x_values]
+        )
+    ax.set_ylim(-1, PLOT_MAX)
+    ax.grid(True, alpha=0.2, linewidth=0.5)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 0.95),
+              ncol=2, frameon=False,
+              handlelength=1.5, columnspacing=1.0)
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -249,6 +384,29 @@ def main():
         print(__doc__)
         sys.exit(1)
 
+    # --- Sweep mode ---
+    sweep_modes = {
+        "--sweep-rps":            ("Load (req/s)", "auto", "recovery-vs-load.pdf"),
+        "--sweep-failure-rate":   ("Failure rate (%)", "raw", "recovery-vs-failure-rate.pdf"),
+        "--sweep-fault-duration": ("Fault duration (s)", "raw", "recovery-vs-fault-duration.pdf"),
+    }
+    if sys.argv[1] in sweep_modes:
+        x_label, fmt, default_name = sweep_modes[sys.argv[1]]
+        remaining = sys.argv[2:]
+        # Parse optional --x-max N
+        xmax = None
+        if "--x-max" in remaining:
+            idx = remaining.index("--x-max")
+            xmax = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        sweep_root = Path(remaining[0])
+        out_path = Path(remaining[1]) if len(remaining) > 1 else sweep_root / default_name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"sweep figure → {out_path}")
+        plot_recovery_vs_sweep_paper(sweep_root, out_path, x_label=x_label, format_x=fmt, x_max=xmax)
+        return
+
+    # --- Single run mode ---
     run_dir = Path(sys.argv[1])
     out_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else run_dir / "paper_figs"
     out_dir.mkdir(parents=True, exist_ok=True)
