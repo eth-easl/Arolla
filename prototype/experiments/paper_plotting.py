@@ -376,6 +376,298 @@ def plot_recovery_vs_sweep_paper(
 
 
 # ---------------------------------------------------------------------------
+# Overhead: latency vs throughput for all policies (prefault steady state)
+# ---------------------------------------------------------------------------
+
+def plot_overhead_latency(
+    sweep_root: Path,
+    out_path: Path,
+    percentile: str = "p99",
+    x_max: float = None,
+    log_y: bool = False,
+    y_max: float = None,
+    y_min: float = None,
+):
+    """
+    Plot prefault steady-state latency vs offered load for all policies.
+    Uses the RPS sweep data — each RPS directory contains a full 4-policy
+    experiment. Extracts latency from successful first-attempt requests
+    during the prefault phase (no fault, no retries).
+    """
+    _paper_style()
+    import glob as globmod
+
+    data: Dict[str, Dict[float, float]] = {}  # {policy: {rps: latency_ms}}
+    for val_dir in sorted(sweep_root.iterdir()):
+        if not val_dir.is_dir():
+            continue
+        try:
+            rps = float(val_dir.name)
+        except ValueError:
+            continue
+        if x_max is not None and rps > x_max:
+            continue
+
+        for pol in POLICY_ORDER:
+            pol_dir = val_dir / pol
+            tl_file = pol_dir / "timeline.json"
+            if not tl_file.exists():
+                continue
+            tl = json.loads(tl_file.read_text())
+            t_warmup_end = tl["t_warmup_end"]
+            t_fault_start = tl["t_fault_start"]
+
+            lats = []
+            for f in sorted(globmod.glob(str(pol_dir / "client-metrics/client_attempts.shard*.csv"))):
+                with open(f) as fh:
+                    reader = csv.reader(fh)
+                    next(reader, None)
+                    for row in reader:
+                        try:
+                            ts = float(row[0])
+                            ok = row[10]
+                            lat = float(row[11])
+                            attempt = int(row[7])
+                        except (ValueError, IndexError):
+                            continue
+                        if ok == "1" and ts >= t_warmup_end and ts < t_fault_start and attempt == 1:
+                            lats.append(lat * 1000)
+            if len(lats) < 100:
+                continue  # skip anomalous runs
+            lats.sort()
+            n = len(lats)
+            pct_map = {
+                "p50": n // 2,
+                "p90": int(n * 0.90),
+                "p95": int(n * 0.95),
+                "p99": int(n * 0.99),
+            }
+            idx = pct_map.get(percentile, int(n * 0.99))
+            data.setdefault(pol, {})[rps] = lats[idx]
+
+    x_values = sorted(set(x for pol_data in data.values() for x in pol_data))
+    if not x_values:
+        return
+
+    ordered = [p for p in POLICY_ORDER if p in data]
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.8))
+
+    for pol in ordered:
+        pol_data = data[pol]
+        xs = sorted(pol_data.keys())
+        ys = [pol_data[x] for x in xs]
+        ax.plot(xs, ys,
+                color=POLICY_COLORS[pol],
+                label=POLICY_LABELS[pol],
+                marker=POLICY_MARKERS[pol],
+                markersize=5, linewidth=1.5)
+
+    ax.set_xlabel("Load (req/s)")
+    ax.set_ylabel(f"Latency {percentile} (ms)")
+    if log_y:
+        ax.set_yscale("log")
+    if y_min is not None or y_max is not None:
+        ax.set_ylim(bottom=y_min, top=y_max)
+    ax.set_xticks(x_values)
+    ax.set_xticklabels(
+        [f"{v/1000:.1f}k" if v >= 1000 else str(int(v)) for v in x_values]
+    )
+    ax.grid(True, axis="y", alpha=0.2, linewidth=0.5)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 0.95),
+              ncol=2, frameon=False,
+              handlelength=1.5, columnspacing=1.0)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Overhead bar chart: p50 + p99 side by side at a single RPS
+# ---------------------------------------------------------------------------
+
+def plot_overhead_boxplot(
+    sweep_root: Path,
+    out_path: Path,
+    x_max: float = None,
+    y_max: float = None,
+    y_min: float = None,
+):
+    """
+    Boxplot of steady-state latency across all RPS values for each policy.
+    Only includes successful first-attempt requests during the prefault
+    phase (no fault, no retries). Excludes RPS values where a policy
+    has fewer than 100 successful prefault requests (indicates prefault
+    failure / contamination).
+    """
+    _paper_style()
+    import glob as globmod
+
+    # Collect all prefault latencies per policy across all RPS values.
+    pol_lats: Dict[str, list] = {}
+    for val_dir in sorted(sweep_root.iterdir()):
+        if not val_dir.is_dir():
+            continue
+        try:
+            rps = float(val_dir.name)
+        except ValueError:
+            continue
+        if x_max is not None and rps > x_max:
+            continue
+
+        for pol in POLICY_ORDER:
+            pol_dir = val_dir / pol
+            tl_file = pol_dir / "timeline.json"
+            if not tl_file.exists():
+                continue
+            tl = json.loads(tl_file.read_text())
+            t_warmup_end = tl["t_warmup_end"]
+            t_fault_start = tl["t_fault_start"]
+
+            lats = []
+            for f in sorted(globmod.glob(str(pol_dir / "client-metrics/client_attempts.shard*.csv"))):
+                with open(f) as fh:
+                    reader = csv.reader(fh)
+                    next(reader, None)
+                    for row in reader:
+                        try:
+                            ts = float(row[0]); ok = row[10]
+                            lat = float(row[11]); attempt = int(row[7])
+                        except (ValueError, IndexError):
+                            continue
+                        if ok == "1" and ts >= t_warmup_end and ts < t_fault_start and attempt == 1:
+                            lats.append(lat * 1000)
+            if len(lats) < 100:
+                continue  # skip contaminated runs
+            pol_lats.setdefault(pol, []).extend(lats)
+
+    ordered = [p for p in POLICY_ORDER if p in pol_lats]
+    if not ordered:
+        return
+
+    fig, ax = plt.subplots(figsize=(3.6, 2.8))
+
+    box_data = [pol_lats[p] for p in ordered]
+    colors = [POLICY_COLORS_FILL.get(p, "lightgray") for p in ordered]
+    edge_colors = [POLICY_COLORS.get(p, "gray") for p in ordered]
+
+    bp = ax.boxplot(
+        box_data,
+        labels=[POLICY_LABELS.get(p, p).replace(' ', '\n') for p in ordered],
+        patch_artist=True,
+        widths=0.5,
+        showfliers=False,
+        medianprops=dict(color="black", linewidth=1.5),
+        whiskerprops=dict(linewidth=1.2),
+        capprops=dict(linewidth=1.2),
+    )
+    for patch, fc, ec in zip(bp["boxes"], colors, edge_colors):
+        patch.set_facecolor(fc)
+        patch.set_edgecolor(ec)
+        patch.set_linewidth(1.2)
+
+    ax.set_ylabel("Latency (ms)", fontsize=14)
+    ax.set_ylim(bottom=y_min if y_min is not None else 0,
+                top=y_max)
+    ax.grid(True, axis="y", alpha=0.2, linewidth=0.5)
+    ax.tick_params(axis="x", labelsize=13, rotation=15)
+    ax.tick_params(axis="y", labelsize=13)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_overhead_bar(
+    sweep_root: Path,
+    out_path: Path,
+    target_rps: float = 1000,
+):
+    """
+    Grouped bar chart showing p50 and p99 latency for each policy at a
+    single RPS point. Cleaner than a line plot for overhead comparison
+    since it avoids contaminated data points at other RPS values.
+    """
+    _paper_style()
+    import glob as globmod
+
+    rps_dir = sweep_root / str(int(target_rps))
+    if not rps_dir.exists():
+        print(f"[skip] {rps_dir} not found")
+        return
+
+    pol_lats: Dict[str, Dict[str, float]] = {}  # {policy: {"p50": ms, "p99": ms}}
+    for pol in POLICY_ORDER:
+        pol_dir = rps_dir / pol
+        tl_file = pol_dir / "timeline.json"
+        if not tl_file.exists():
+            continue
+        tl = json.loads(tl_file.read_text())
+        t_warmup_end = tl["t_warmup_end"]
+        t_fault_start = tl["t_fault_start"]
+
+        lats = []
+        for f in sorted(globmod.glob(str(pol_dir / "client-metrics/client_attempts.shard*.csv"))):
+            with open(f) as fh:
+                reader = csv.reader(fh)
+                next(reader, None)
+                for row in reader:
+                    try:
+                        ts = float(row[0]); ok = row[10]
+                        lat = float(row[11]); attempt = int(row[7])
+                    except (ValueError, IndexError):
+                        continue
+                    if ok == "1" and ts >= t_warmup_end and ts < t_fault_start and attempt == 1:
+                        lats.append(lat * 1000)
+        if len(lats) < 100:
+            continue
+        lats.sort()
+        n = len(lats)
+        pol_lats[pol] = {
+            "p50": lats[n // 2],
+            "p99": lats[int(n * 0.99)],
+        }
+
+    ordered = [p for p in POLICY_ORDER if p in pol_lats]
+    if not ordered:
+        return
+
+    percentiles = ["p50", "p99"]
+    n_pol = len(ordered)
+    bar_width = 0.35
+    x = np.arange(n_pol)
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.8))
+
+    pct_colors = {"p50": "#888888", "p99": "#cccccc"}
+    for i, pct in enumerate(percentiles):
+        vals = [pol_lats[p][pct] for p in ordered]
+        ax.bar(x + i * bar_width - bar_width / 2, vals,
+                      width=bar_width,
+                      color=pct_colors[pct],
+                      edgecolor="none",
+                      label=pct)
+        for j, v in enumerate(vals):
+            ax.text(x[j] + i * bar_width - bar_width / 2, v + 0.5,
+                    f"{v:.1f}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in ordered],
+                       fontsize=12)
+    ax.set_ylabel("Latency (ms)", fontsize=12)
+    ax.set_ylim(bottom=0)
+    ax.grid(True, axis="y", alpha=0.2, linewidth=0.5)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 0.95),
+              ncol=2, frameon=False,
+              handlelength=1.5, columnspacing=1.0)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -404,6 +696,78 @@ def main():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"sweep figure → {out_path}")
         plot_recovery_vs_sweep_paper(sweep_root, out_path, x_label=x_label, format_x=fmt, x_max=xmax)
+        return
+
+    # --- Overhead mode ---
+    if sys.argv[1] == "--overhead":
+        remaining = sys.argv[2:]
+        xmax = None
+        pct = "p99"
+        if "--x-max" in remaining:
+            idx = remaining.index("--x-max")
+            xmax = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        if "--percentile" in remaining:
+            idx = remaining.index("--percentile")
+            pct = remaining[idx + 1]
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        ymin = None
+        ymax = None
+        if "--y-min" in remaining:
+            idx = remaining.index("--y-min")
+            ymin = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        if "--y-max" in remaining:
+            idx = remaining.index("--y-max")
+            ymax = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        sweep_root = Path(remaining[0])
+        out_dir = Path(remaining[1]) if len(remaining) > 1 else sweep_root
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for log_y, suffix in [(False, "linear"), (True, "log")]:
+            out_path = out_dir / f"overhead-{pct}-{suffix}.pdf"
+            print(f"overhead figure → {out_path}")
+            plot_overhead_latency(sweep_root, out_path, percentile=pct, x_max=xmax, log_y=log_y, y_max=ymax, y_min=ymin)
+        return
+
+    # --- Overhead bar mode ---
+    if sys.argv[1] == "--overhead-bar":
+        remaining = sys.argv[2:]
+        target_rps = 1000.0
+        if "--rps" in remaining:
+            idx = remaining.index("--rps")
+            target_rps = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        sweep_root = Path(remaining[0])
+        out_path = Path(remaining[1]) if len(remaining) > 1 else sweep_root / f"overhead-bar-{int(target_rps)}.pdf"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"overhead bar → {out_path}")
+        plot_overhead_bar(sweep_root, out_path, target_rps=target_rps)
+        return
+
+    # --- Overhead boxplot mode ---
+    if sys.argv[1] == "--overhead-boxplot":
+        remaining = sys.argv[2:]
+        xmax = None
+        ymin = None
+        ymax = None
+        if "--x-max" in remaining:
+            idx = remaining.index("--x-max")
+            xmax = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        if "--y-min" in remaining:
+            idx = remaining.index("--y-min")
+            ymin = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        if "--y-max" in remaining:
+            idx = remaining.index("--y-max")
+            ymax = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        sweep_root = Path(remaining[0])
+        out_path = Path(remaining[1]) if len(remaining) > 1 else sweep_root / "overhead-boxplot.pdf"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"overhead boxplot → {out_path}")
+        plot_overhead_boxplot(sweep_root, out_path, x_max=xmax, y_max=ymax, y_min=ymin)
         return
 
     # --- Single run mode ---
