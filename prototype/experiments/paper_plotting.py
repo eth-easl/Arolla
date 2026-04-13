@@ -261,8 +261,8 @@ def plot_recovery_vs_sweep_paper(
     """
     _paper_style()
 
-    NEVER_Y = 70
-    PLOT_MAX = 78
+    NEVER_Y = 120
+    PLOT_MAX = 130
     arrow_offsets = {
         "no-control":         -2.0,
         "circuit-breaker":    -0.7,
