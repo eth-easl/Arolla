@@ -1,0 +1,28 @@
+# Failure characteristic sweep: vary fault severity and fault duration.
+#
+# All policies at default parameters. Shows that arolla recovers across
+# a wide range of failure scenarios without retuning, while baselines
+# have narrow operating regimes.
+
+defaults: &defaults
+  client_profile: post-cart-stress-open
+  fault_manifest: cartservice-100pct
+  warmup: 30
+  prefault: 60
+  recovery: 200
+  cooldown: 10
+
+sweeps:
+  # Panel (b): Vary fault duration (100% abort, fixed 1500 rps)
+  # Longer faults build larger retry backlogs. Tests whether each policy
+  # can drain the backlog and recover after increasingly severe events.
+  - name: fault-duration
+    description: "All policies at defaults, vary fault duration"
+    policies: [no-control, circuit-breaker, envoy-retry-budget, arolla]
+    parameter:
+      name: fault_duration
+      location: cli
+      field: fault
+      values: [10, 15, 20, 25, 30, 60]
+    base:
+      <<: *defaults

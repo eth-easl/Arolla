@@ -454,8 +454,8 @@ full_deploy() {
     mkdir -p "$HOME/.kube"
     local scp_opts="${SSH_OPTS}"
     [[ -n "${SSH_KEY}" ]] && scp_opts+=" -i ${SSH_KEY}"
-    scp ${scp_opts} "${SSH_USER}@${MASTER_HOST}:~/.kube/config" "$HOME/.kube/config"
-    ok "Kubeconfig saved to ~/.kube/config"
+    scp ${scp_opts} "${SSH_USER}@${MASTER_HOST}:~/.kube/config" "${KUBECONFIG_PATH}"
+    ok "Kubeconfig saved to ${KUBECONFIG_PATH}"
     info "Verifying local access:"
     kubectl get nodes
 

@@ -1,22 +1,18 @@
 {
   "name": "post-cart-stress-open",
   "description": "Open-loop version of cart-stress: fire 200 POST /cart per second regardless of backend latency. Uses 60 connections; bounds in-flight to 5000 to prevent client OOM under extreme overload.",
+
   "mode": "open-loop",
-  "rate_rps": 600,
+  "rate_rps": 1200,
   "pool_size": 5000,
   "max_inflight": 0,
   "timeout_s": 3.0,
+
   "sku_pool": [
-    "OLJCESPC7Z",
-    "66VCHSJNUP",
-    "1YMWWN1N4O",
-    "L9ECAV7KIM",
-    "2ZYFJ3GM2N",
-    "0PUK6V6EV0",
-    "LS4PSXUNUM",
-    "9SIQT8TOJO",
-    "6E92ZMYYFZ"
+    "OLJCESPC7Z", "66VCHSJNUP", "1YMWWN1N4O", "L9ECAV7KIM", "2ZYFJ3GM2N",
+    "0PUK6V6EV0", "LS4PSXUNUM", "9SIQT8TOJO", "6E92ZMYYFZ"
   ],
+
   "requests": [
     {
       "name": "add-to-cart",
@@ -27,16 +23,8 @@
       "content_type": "application/x-www-form-urlencoded"
     }
   ],
+
   "retries": 3,
-  "backoff": {
-    "mode": "none"
-  },
-  "retry_on_status": [
-    0,
-    500,
-    502,
-    503,
-    504,
-    429
-  ]
+  "backoff": { "mode": "none" },
+  "retry_on_status": [0, 500, 502, 503, 504, 429]
 }
