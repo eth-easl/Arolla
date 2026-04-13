@@ -21,6 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/k8s-config.sh"
 PROFILE_DIR="${SCRIPT_DIR}/manifests/online-boutique/cluster-profiles"
 NAMESPACE="online-boutique"
 

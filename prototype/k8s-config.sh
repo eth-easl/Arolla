@@ -9,7 +9,7 @@
 # ---------- SSH settings ----------
 SSH_USER="yazhuoz"
 SSH_KEY=""                          # e.g. "~/.ssh/id_rsa" (leave empty to use default)
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 
 # ---------- Node definitions ----------
 # Current CloudLab/Emulab allocation (UBUNTU24-64-STD, d430 hardware).
@@ -56,6 +56,10 @@ GATEWAY_API_VERSION="v1.3.0"       # Kubernetes Gateway API CRD version
 ISTIO_PROFILE="default"            # "default" = istiod + ingress gateway; "minimal" = istiod only
 ISTIO_NAMESPACE="istio-system"     # Namespace for Istio control plane
 ISTIO_TEST_NS="istio-test"         # Namespace for demo app + Gateway (with sidecar injection)
+
+# ---------- Kubeconfig ----------
+KUBECONFIG_PATH="$HOME/.kube/config-primary"   # Cluster-specific kubeconfig file
+export KUBECONFIG="$KUBECONFIG_PATH"
 
 # ---------- Misc ----------
 LOG_DIR="./k8s-deploy-logs"         # Local directory for per-node log files

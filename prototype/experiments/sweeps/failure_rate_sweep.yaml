@@ -9,7 +9,7 @@ defaults: &defaults
   fault_manifest: cartservice-100pct
   warmup: 30
   prefault: 60
-  recovery: 60
+  recovery: 200
   cooldown: 10
 
 sweeps:
@@ -25,21 +25,7 @@ sweeps:
       name: abort_pct
       location: fault_yaml
       field: fault.abort.percentage.value
-      values: [10, 30, 50, 70, 100]
+      values: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     base:
       <<: *defaults
       fault: 10
-
-  # Panel (b): Vary fault duration (100% abort, fixed 1500 rps)
-  # Longer faults build larger retry backlogs. Tests whether each policy
-  # can drain the backlog and recover after increasingly severe events.
-  - name: fault-duration
-    description: "All policies at defaults, vary fault duration"
-    policies: [no-control, circuit-breaker, envoy-retry-budget, arolla]
-    parameter:
-      name: fault_duration
-      location: cli
-      field: fault
-      values: [5, 10, 20, 30, 60]
-    base:
-      <<: *defaults

@@ -89,7 +89,7 @@ services:
     anti_affinity: none
 
   boutique-gateway-istio:
-    replicas: 2                # 2 replicas so the gateway can handle 4× retry
+    replicas: 2                # 2 replicas for the ingress gateway
                                # amplification (6000 TCP conn/s) without saturating
     container: istio-proxy     # gateway pod container name
     cpu_request: 500m
