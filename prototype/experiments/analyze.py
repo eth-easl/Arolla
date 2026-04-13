@@ -61,6 +61,13 @@ POLICY_COLORS_FILL = {
     "arolla":             "#85BF85",  # goodputgreen!55
 }
 
+POLICY_MARKERS = {
+    "no-control":         "s",   # square
+    "circuit-breaker":    "^",   # triangle
+    "envoy-retry-budget": "D",   # diamond
+    "arolla":             "o",   # circle
+}
+
 POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla"]
 
 
@@ -743,27 +750,20 @@ def retry_efficiency_pct(df: pd.DataFrame, t_start: float, t_end: float) -> floa
     return float(ok_retries) / float(len(retries)) * 100.0
 
 
-def recovery_time_sec(goodput: pd.Series, fault_end_bin: int,
-                      pre_fault_bin_start: int, pre_fault_bin_end: int,
+def recovery_time_sec(success_rate: pd.Series, fault_end_bin: int,
                       target_pct: float = 95.0) -> Optional[float]:
     """
-    Seconds from fault_end until goodput first reaches target_pct of the
-    pre-fault mean. Returns None if it never recovers within the series.
+    Seconds from fault_end until success rate first reaches target_pct%.
+    Returns None if it never recovers within the series.
 
-    Bin semantics are half-open: `pre_fault_bin_end` and `fault_end_bin`
-    are exclusive (the first bin *not* in the range), to match Python
-    slicing conventions used by the caller.
+    Uses an absolute success-rate threshold (default 95%) rather than a
+    relative fraction of pre-fault goodput. This is simpler, more
+    intuitive, and independent of the offered load level.
     """
-    if goodput.empty:
+    if success_rate.empty:
         return None
-    # pandas .loc[] is inclusive on both sides, so subtract 1 to get the
-    # half-open range the caller intended.
-    pre = goodput.loc[pre_fault_bin_start:pre_fault_bin_end - 1]
-    if pre.empty or pre.mean() == 0:
-        return None
-    target = pre.mean() * (target_pct / 100.0)
-    post = goodput.loc[fault_end_bin:]
-    hit = post[post >= target]
+    post = success_rate.loc[fault_end_bin:]
+    hit = post[post >= target_pct]
     if hit.empty:
         return None
     return float(hit.index[0] - fault_end_bin)
@@ -2295,7 +2295,7 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
     fault_start_bin = round(t_fault_start  - t_ref)   # inclusive
     fault_end_bin   = round(t_fault_end    - t_ref)   # exclusive
 
-    recovery = recovery_time_sec(goodput, fault_end_bin, pre_start_bin, pre_end_bin)
+    recovery = recovery_time_sec(success_rate, fault_end_bin)
     avg_goodput_fault = float(goodput.loc[fault_start_bin:fault_end_bin - 1].mean()) \
         if not goodput.empty else 0.0
     avg_goodput_pre = float(goodput.loc[pre_start_bin:pre_end_bin - 1].mean()) \
@@ -2474,7 +2474,7 @@ def main():
              value_fmt="{:.1f}")
     plot_bar(runs, "recovery_sec",
              ylabel="Recovery time (s)",
-             title="Time to reach 95% of pre-fault goodput",
+             title="Time to reach 95% success rate",
              out_path=plots_dir / "recovery-time.pdf",
              value_fmt="{:.1f}")
     # Per-phase per-service retry plots (view (b) aggregated + view (a)
@@ -2502,6 +2502,128 @@ def main():
     plot_chain_retry_by_phase(
         runs, plots_dir / "chain-retry-by-phase.pdf",
     )
+
+
+# ---------------------------------------------------------------------------
+# Sweep-level plots (across multiple run directories)
+# ---------------------------------------------------------------------------
+
+def plot_recovery_vs_sweep(
+    sweep_root: Path,
+    out_path: Path,
+    x_label: str = "Load (req/s)",
+    format_x: str = "auto",
+) -> None:
+    """
+    Plot recovery time vs swept parameter for each policy.
+
+    sweep_root: directory containing one subdirectory per parameter value,
+                each with a summary.csv (e.g. combined/600/, combined/800/, ...).
+    format_x:   "auto" formats >=1000 as "1.0k", "raw" uses the value as-is.
+    """
+    _apply_paper_style()
+
+    NEVER_Y = 70
+    PLOT_MAX = 78
+    # Small vertical offsets so overlapping "never" markers are distinguishable.
+    arrow_offsets = {
+        "no-control":         -2.0,
+        "circuit-breaker":    -0.7,
+        "envoy-retry-budget":  0.7,
+        "arolla":              2.0,
+    }
+
+    data: Dict[str, Dict[float, Optional[float]]] = {}
+    for val_dir in sorted(sweep_root.iterdir()):
+        if not val_dir.is_dir():
+            continue
+        summary = val_dir / "summary.csv"
+        if not summary.exists():
+            continue
+        try:
+            x_val = float(val_dir.name)
+        except ValueError:
+            continue
+        with open(summary) as f:
+            for row in pd.read_csv(f).to_dict("records"):
+                pol = row["policy"]
+                rec = row.get("recovery_sec")
+                try:
+                    rec_val = float(rec)
+                    if np.isnan(rec_val):
+                        rec_val = None
+                except (ValueError, TypeError):
+                    rec_val = None
+                data.setdefault(pol, {})[x_val] = rec_val
+
+    x_values = sorted(set(x for pol_data in data.values() for x in pol_data))
+    if not x_values:
+        return
+
+    ordered = [p for p in POLICY_ORDER if p in data] + \
+              [p for p in data if p not in POLICY_ORDER]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    # Shaded "no recovery" band.
+    ax.axhspan(NEVER_Y - 4, PLOT_MAX, color="#f5f5f5", zorder=0)
+    ax.axhline(y=NEVER_Y - 4, color="#cccccc", linestyle="--", linewidth=0.8)
+
+    for pol in ordered:
+        pol_data = data[pol]
+        xs = sorted(pol_data.keys())
+
+        rec_xs, rec_ys = [], []
+        never_xs = []
+        for x in xs:
+            v = pol_data[x]
+            if v is None:
+                never_xs.append(x)
+            else:
+                rec_xs.append(x)
+                rec_ys.append(v)
+
+        marker = POLICY_MARKERS.get(pol, "o")
+        color = POLICY_COLORS.get(pol, "gray")
+        label = POLICY_LABELS.get(pol, pol)
+
+        if rec_xs:
+            ax.plot(rec_xs, rec_ys, color=color, label=label,
+                    marker=marker, markersize=7, linewidth=2, zorder=4)
+        else:
+            ax.plot([], [], color=color, label=label,
+                    marker=marker, markersize=7, linewidth=2)
+
+        if never_xs:
+            offset = arrow_offsets.get(pol, 0)
+            ax.scatter(never_xs, [NEVER_Y + offset] * len(never_xs),
+                       marker=marker, s=80, color=color, zorder=5)
+            if rec_xs:
+                ax.plot([rec_xs[-1], min(never_xs)],
+                        [rec_ys[-1], NEVER_Y + offset],
+                        color=color, linestyle="--", linewidth=1.5,
+                        alpha=0.5, zorder=3)
+
+    ax.text(x_values[0], NEVER_Y, "no recovery", va="center", fontsize=11,
+            color="#999999", fontstyle="italic")
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Recovery Time (s)")
+    ax.set_xticks(x_values)
+    if format_x == "auto":
+        ax.set_xticklabels(
+            [f"{v/1000:.1f}k" if v >= 1000 else str(int(v)) for v in x_values]
+        )
+    ax.set_ylim(-1, PLOT_MAX)
+    ax.grid(True, alpha=0.2, linewidth=0.5)
+    ax.legend(loc="center left", frameon=True, fancybox=False,
+              edgecolor="#cccccc", framealpha=0.95,
+              bbox_to_anchor=(0.0, 0.55))
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
 
 
 if __name__ == "__main__":
