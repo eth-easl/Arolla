@@ -20,3 +20,7 @@ prototype/experiments/run-experiment.sh \
 NUM_LOADERS=4 prototype/experiments/run_sweep.sh prototype/experiments/sweeps/rps_sweep.yaml
 
 python3 prototype/experiments/plot_sensitivity.py outputs/prototype/sensitivity/20260410_120000/ --help
+
+
+python3 prototype/experiments/paper_plotting.py --sweep-fault-duration --x-max 30 \
+  outputs/nsdi/failure_duration_sweep/fault-duration
