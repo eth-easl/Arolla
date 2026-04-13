@@ -11,7 +11,6 @@ prototype/experiments/run-experiment.sh \
   --policies no-control,arolla,circuit-breaker,envoy-retry-budget \
   --client-profiles checkout-stress-open \
   --cpu-stress-target paymentservice --cpu-stress-load 50 --cpu-stress-workers 4 \
-  
   --warmup 30 --prefault 40 --fault 20 --recovery 40 --cooldown 10
 
 # command for updating replica configs via cluster profiles:
@@ -24,3 +23,6 @@ python3 prototype/experiments/plot_sensitivity.py outputs/prototype/sensitivity/
 
 python3 prototype/experiments/paper_plotting.py --sweep-fault-duration --x-max 30 \
   outputs/nsdi/failure_duration_sweep/fault-duration
+
+python3 prototype/experiments/paper_plotting.py --overhead-boxplot --y-min 5 --x-max 1200 outputs/nsdi/rps_sweep/combined
+
