@@ -304,12 +304,16 @@ for s in sweeps:
     fi
 
     log "  running: ${CMD[*]}"
-    "${CMD[@]}" || warn "run failed for ${SWEEP_NAME}/${VALUE_LABEL}"
+    # Redirect stdin from /dev/null so child processes don't consume the
+    # piped sweep data that the while-read loop is iterating over.
+    "${CMD[@]}" </dev/null || warn "run failed for ${SWEEP_NAME}/${VALUE_LABEL}"
 
     # ---- Restore edited files to their original state ----
-    for f in "${FILES_TO_RESTORE[@]}"; do
-      restore "$f"
-    done
+    if (( ${#FILES_TO_RESTORE[@]} > 0 )); then
+      for f in "${FILES_TO_RESTORE[@]}"; do
+        restore "$f"
+      done
+    fi
     FILES_TO_RESTORE=()
 
     log "  done: ${VALUE_DIR}"
