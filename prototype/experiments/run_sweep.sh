@@ -137,11 +137,10 @@ else:
     )
     matches = list(pattern.finditer(text))
     if not matches:
-        print(f"WARNING: field '{leaf}' not found in {fpath}", file=sys.stderr)
-    else:
-        m = matches[-1]  # last (most deeply nested) match
-        new_text = text[:m.start(2)] + raw_value + text[m.end(2):]
-        path.write_text(new_text)
+        sys.exit(f"ERROR: field '{leaf}' not found in {fpath} — aborting so we don't run with stale config")
+    m = matches[-1]  # last (most deeply nested) match
+    new_text = text[:m.start(2)] + raw_value + text[m.end(2):]
+    path.write_text(new_text)
 PYEOF
 }
 
