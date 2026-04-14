@@ -1,0 +1,122 @@
+# ==========================================================================
+# Circuit-breaker parameter sensitivity analysis (4-panel figure)
+# ==========================================================================
+#
+# Envoy outlier detection. Four OPAT sweeps selected to expose the
+# parameters that actually matter under metastable retry-storm dynamics:
+#
+#   Panel (a): failure_percentage_threshold (theta)
+#              Rate-based detection threshold. Too low → trips on healthy
+#              steady-state variance (e.g. theta=10 → CB trips during warmup,
+#              blocking ~85% of pre-fault traffic). Too high → never trips.
+#
+#   Panel (b): base_ejection_time
+#              Initial ejection duration. Under exponential backoff
+#              (each re-trip multiplies by ejection count), this becomes
+#              the floor of the backoff sequence.
+#
+#   Panel (c): max_ejection_time   [NEW]
+#              Cap on the exponential ejection backoff. This is likely the
+#              most important parameter for our scenario: if the host is
+#              re-tripped 3-5 times in quick succession, the effective
+#              ejection window grows (5s → 10s → 20s → ...) until it hits
+#              this cap. Default upstream is 300s, which exceeds our 60s
+#              recovery window, producing the "never recovers" result.
+#              Lowering this cap should allow recovery in some range.
+#
+#   Panel (d): consecutive_5xx   [NEW — uses circuit-breaker-consecutive]
+#              Count-based detection (orthogonal to rate-based). Trips after
+#              N consecutive 5xx responses. Uses a separate policy manifest
+#              that disables the percentage path (enforcing_failure_percentage=0).
+#              Low N → trips on any burst, high N → needs sustained run of
+#              failures. This panel tests whether the detection philosophy
+#              (rate vs count) changes recovery behavior.
+#
+# Parameters DROPPED from prior sweep (found to be low-signal):
+#   - interval: flat recovery signal; only affects detection latency.
+#   - failure_percentage_request_volume: once host is ejected, no requests
+#     flow, so the pre-trip volume gate is irrelevant to re-trip dynamics.
+#
+# Fixed failure scenario: 100% abort on cartservice for 10s.
+#
+# Running:
+#   cd prototype/experiments
+#   ./run_sweep.sh sweeps/cb-sensitivity.yaml                     # all 4 sweeps
+#   ./run_sweep.sh sweeps/cb-sensitivity.yaml cb-max-ejection-time # just panel (c)
+#
+# ==========================================================================
+
+defaults: &defaults
+  client_profile: post-cart-stress-open
+  fault_manifest: cartservice-100pct
+  warmup: 30
+  prefault: 60
+  fault: 10
+  recovery: 300
+  cooldown: 10
+
+sweeps:
+
+  # Panel (a): Rate-based ejection threshold theta
+  #   Low  theta → trips on healthy variance → pre-fault goodput collapses
+  #   High theta → doesn't trip until near-total failure → no protection
+  - name: cb-threshold
+    description: "Recovery time vs. CB ejection threshold theta"
+    policies: [circuit-breaker]
+    parameter:
+      name: failure_percentage_threshold
+      location: policy_yaml
+      field: outlier_detection.failure_percentage_threshold
+      default: 80
+      values: [80]
+    base:
+      <<: *defaults
+
+  # Panel (b): Initial ejection duration
+  #   Short → rapid un-ejection → retry storm re-trips immediately
+  #   Long  → single ejection lasts longer (but still bounded by max_ejection_time)
+  - name: cb-ejection-time
+    description: "Recovery time vs. CB base ejection duration"
+    policies: [circuit-breaker]
+    parameter:
+      name: base_ejection_time
+      location: policy_yaml
+      field: outlier_detection.base_ejection_time
+      default: "5s"
+      values: ["1s", "2s", "5s", "10s", "20s", "30s"]
+    base:
+      <<: *defaults
+
+  # Panel (c): Exponential backoff cap
+  #   Low  → ejection stays short regardless of re-trip count → host returns
+  #          to service quickly, but may re-trip if fault still active
+  #   High → after a few re-trips, ejection window exceeds recovery phase
+  #          → host never returns in time → "never recovers"
+  - name: cb-max-ejection-time
+    description: "Recovery time vs. CB max ejection time (exponential backoff cap)"
+    policies: [circuit-breaker]
+    parameter:
+      name: max_ejection_time
+      location: policy_yaml
+      field: outlier_detection.max_ejection_time
+      default: "30s"
+      values: ["1s", "5s", "10s"]
+    base:
+      <<: *defaults
+
+  # Panel (d): Count-based detection (alternative mode)
+  #   Uses circuit-breaker-consecutive.yaml (enforcing_failure_percentage=0,
+  #   enforcing_consecutive_5xx=100). Sweeps the consecutive count N.
+  #   Low N → trips on any short burst → very sensitive
+  #   High N → needs long run of failures → slow to trip but robust to noise
+  - name: cb-consecutive
+    description: "Recovery time vs. CB consecutive-5xx count (count-based mode)"
+    policies: [circuit-breaker-consecutive]
+    parameter:
+      name: consecutive_5xx
+      location: policy_yaml
+      field: outlier_detection.consecutive_5xx
+      default: 5
+      values: [1, 3, 5, 10, 20, 50]
+    base:
+      <<: *defaults
