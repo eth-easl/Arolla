@@ -7,7 +7,7 @@
 # ============================================================================
 
 # ---------- SSH settings ----------
-SSH_USER="yazhuoz"
+SSH_USER=""
 SSH_KEY=""                          # e.g. "~/.ssh/id_rsa" (leave empty to use default)
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 
@@ -16,28 +16,28 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 #
 # Logical  | Emulab host         | Role
 # ---------+---------------------+---------------------------------------
-# node0    | pc858.emulab.net    | Kubernetes master
-# node1    | pc846.emulab.net    | Worker 1
-# node2    | pc859.emulab.net    | Worker 2
-# node3    | pc718.emulab.net    | Worker 3
-# node4    | pc848.emulab.net    | Worker 4
-# node5    | pc843.emulab.net    | External load-gen / client host
+# node0    | pcxxx.emulab.net    | Kubernetes master
+# node1    | pcxxx.emulab.net    | Worker 1
+# node2    | pcxxx.emulab.net    | Worker 2
+# node3    | pcxxx.emulab.net    | Worker 3
+# node4    | pcxxx.emulab.net    | Worker 4
+# node5    | pcxxx.emulab.net    | External load-gen / client host
 #
 # Note: nodes are running Ubuntu 24.04 (the older allocation used 22.04).
 # If kubeadm / containerd steps fail, verify deploy-k8s.sh package pins.
 
 # Master node
-MASTER_HOST="pc858.emulab.net"      # SSH-reachable address
+MASTER_HOST="pcxxx.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
 MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc846.emulab.net" "pc859.emulab.net" "pc718.emulab.net" "pc848.emulab.net")
+WORKER_HOSTS=("pcxxx.emulab.net" "pcxxx.emulab.net" "pcxxx.emulab.net" "pcxxx.emulab.net")
 WORKER_HOSTNAMES=("worker01" "worker02" "worker03" "worker04")
 WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
 
 # Client node (external load generator — not part of K8s cluster)
-CLIENT_HOST="pc843.emulab.net"      # SSH-reachable address
+CLIENT_HOST="pcxxx.emulab.net"      # SSH-reachable address
 
 # ---------- Kubernetes settings ----------
 K8S_VERSION="v1.30"                 # Kubernetes APT repo channel
@@ -58,7 +58,7 @@ ISTIO_NAMESPACE="istio-system"     # Namespace for Istio control plane
 ISTIO_TEST_NS="istio-test"         # Namespace for demo app + Gateway (with sidecar injection)
 
 # ---------- Kubeconfig ----------
-KUBECONFIG_PATH="$HOME/.kube/config-sensitivity"   # Cluster-specific kubeconfig file
+KUBECONFIG_PATH="$HOME/.kube/config"   # Cluster-specific kubeconfig file
 export KUBECONFIG="$KUBECONFIG_PATH"
 
 # ---------- Misc ----------
