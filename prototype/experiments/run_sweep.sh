@@ -126,17 +126,22 @@ else:
     # (which strips comments). We match "key: old_value" and replace
     # the value part. For nested keys like outlier_detection.interval
     # we match on the LAST component (the leaf).
+    #
+    # When the leaf key appears multiple times (e.g. "value:" in an
+    # EnvoyFilter that also has "patch.value:"), we replace the LAST
+    # occurrence — the most deeply nested one is typically the target.
     leaf = field.split(".")[-1]
-    # Match the leaf key followed by a colon and a value, preserving
-    # any inline comment. Replace only the value portion.
     pattern = re.compile(
         r'^(\s*' + re.escape(leaf) + r'\s*:\s*)(\S+)(.*)',
         re.MULTILINE,
     )
-    new_text, n = pattern.subn(r'\g<1>' + raw_value + r'\g<3>', text, count=1)
-    if n == 0:
+    matches = list(pattern.finditer(text))
+    if not matches:
         print(f"WARNING: field '{leaf}' not found in {fpath}", file=sys.stderr)
-    path.write_text(new_text)
+    else:
+        m = matches[-1]  # last (most deeply nested) match
+        new_text = text[:m.start(2)] + raw_value + text[m.end(2):]
+        path.write_text(new_text)
 PYEOF
 }
 
