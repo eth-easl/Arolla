@@ -19,8 +19,16 @@ prototype/experiments/run-experiment.sh \
 
 NUM_LOADERS=4 prototype/experiments/run_sweep.sh prototype/experiments/sweeps/rps_sweep.yaml
 
+NUM_LOADERS=4 prototype/experiments/run_sweep.sh prototype/experiments/sweeps/arolla-sensitivity.yaml
+
 python3 prototype/experiments/plot_sensitivity.py outputs/prototype/sensitivity/20260410_120000/ --help
 
 
 python3 prototype/experiments/paper_plotting.py --sweep-fault-duration --x-max 30 \
   outputs/nsdi/failure_duration_sweep/fault-duration
+
+python3 plot_arolla_sensitivity.py \
+    outputs/prototype/arolla-sensitivity/<timestamp>/post-cart-stress-open
+
+python3 plot_param_sensitivity.py sweeps/arolla-sensitivity.yaml \
+    outputs/prototype/arolla-sensitivity/<ts>/post-cart-stress-open
