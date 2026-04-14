@@ -89,6 +89,10 @@ start_clients() {
       done < \"${REMOTE_PID_FILE}\"
     fi
 
+    # Raise fd limit so open-loop profiles can sustain thousands of
+    # concurrent sockets without EMFILE (default 1024 is too low).
+    ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
+
     # Fresh run: clear stale pid + log files.
     rm -f \"${REMOTE_PID_FILE}\" \"${REMOTE_BASE}\"/traffic_gen.shard*.log \"${REMOTE_BASE}\"/traffic_gen.log
 
@@ -109,6 +113,7 @@ start_clients() {
         > \"\$log_i\" 2>&1 < /dev/null &
       echo \$! >> \"${REMOTE_PID_FILE}\"
     done
+    sync
 
     # Liveness check: traffic_gen.py can exit immediately on bad config
     # (no profiles selected, missing fields, parse errors, etc.). nohup
@@ -164,6 +169,9 @@ stop_clients() {
         kill -9 \"\$pid\" 2>/dev/null || true
       fi
     done < \"${REMOTE_PID_FILE}\"
+    # Safety net: kill any traffic_gen.py orphans not in the pid file
+    # (e.g. if a PID was lost due to a truncated write).
+    pkill -f \"traffic_gen.py\" 2>/dev/null || true
     n=\$(wc -l < \"${REMOTE_PID_FILE}\" | tr -d \" \")
     rm -f \"${REMOTE_PID_FILE}\"
     echo \"stopped \$n shard(s)\"

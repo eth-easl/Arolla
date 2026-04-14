@@ -16,28 +16,28 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 #
 # Logical  | Emulab host         | Role
 # ---------+---------------------+---------------------------------------
-# node0    | pc835.emulab.net    | Kubernetes master
-# node1    | pc822.emulab.net    | Worker 1
-# node2    | pc832.emulab.net    | Worker 2
-# node3    | pc830.emulab.net    | Worker 3
-# node4    | pc829.emulab.net    | Worker 4
-# node5    | pc827.emulab.net    | External load-gen / client host
+# node0    | pc858.emulab.net    | Kubernetes master
+# node1    | pc846.emulab.net    | Worker 1
+# node2    | pc859.emulab.net    | Worker 2
+# node3    | pc718.emulab.net    | Worker 3
+# node4    | pc848.emulab.net    | Worker 4
+# node5    | pc843.emulab.net    | External load-gen / client host
 #
 # Note: nodes are running Ubuntu 24.04 (the older allocation used 22.04).
 # If kubeadm / containerd steps fail, verify deploy-k8s.sh package pins.
 
 # Master node
-MASTER_HOST="pc835.emulab.net"      # SSH-reachable address
+MASTER_HOST="pc858.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
 MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc822.emulab.net" "pc832.emulab.net" "pc830.emulab.net" "pc829.emulab.net")
+WORKER_HOSTS=("pc846.emulab.net" "pc859.emulab.net" "pc718.emulab.net" "pc848.emulab.net")
 WORKER_HOSTNAMES=("worker01" "worker02" "worker03" "worker04")
 WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
 
 # Client node (external load generator — not part of K8s cluster)
-CLIENT_HOST="pc827.emulab.net"      # SSH-reachable address
+CLIENT_HOST="pc843.emulab.net"      # SSH-reachable address
 
 # ---------- Kubernetes settings ----------
 K8S_VERSION="v1.30"                 # Kubernetes APT repo channel
@@ -58,7 +58,7 @@ ISTIO_NAMESPACE="istio-system"     # Namespace for Istio control plane
 ISTIO_TEST_NS="istio-test"         # Namespace for demo app + Gateway (with sidecar injection)
 
 # ---------- Kubeconfig ----------
-KUBECONFIG_PATH="$HOME/.kube/config-primary"   # Cluster-specific kubeconfig file
+KUBECONFIG_PATH="$HOME/.kube/config-sensitivity"   # Cluster-specific kubeconfig file
 export KUBECONFIG="$KUBECONFIG_PATH"
 
 # ---------- Misc ----------

@@ -146,6 +146,7 @@ POLICY_FILES=(
   "arolla:arolla.yaml"
   "no-control:no-control.yaml"
   "circuit-breaker:circuit-breaker.yaml"
+  "circuit-breaker-consecutive:circuit-breaker-consecutive.yaml"
   "envoy-retry-budget:envoy-retry-budget.yaml"
 )
 
