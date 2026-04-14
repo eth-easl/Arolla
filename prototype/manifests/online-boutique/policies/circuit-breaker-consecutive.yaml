@@ -1,0 +1,45 @@
+# Circuit breaker — consecutive-5xx detection mode (alternative to
+# failure-percentage mode in circuit-breaker.yaml).
+#
+# Trips when a host returns N consecutive 5xx responses, regardless of
+# overall failure rate. This is an orthogonal detection philosophy:
+#
+#   failure-percentage:  "X% of recent N requests failed"  (rate-based)
+#   consecutive-5xx:     "N failures in a row"            (count-based)
+#
+# Rate-based detection is slow to trip on bursts in a high-throughput
+# cluster (the denominator grows fast). Count-based detection trips
+# immediately on a sustained burst but is vulnerable to random runs of
+# failures in normally-noisy clusters.
+#
+# Scope: every SIDECAR_OUTBOUND cluster in the online-boutique namespace,
+# matching circuit-breaker.yaml for scope-symmetric comparison.
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: arolla-baseline-circuit-breaker
+  namespace: online-boutique
+spec:
+  configPatches:
+  - applyTo: CLUSTER
+    match:
+      context: SIDECAR_OUTBOUND
+    patch:
+      operation: MERGE
+      value:
+        outlier_detection:
+          # Count-based detection: trip after N consecutive 5xx responses.
+          consecutive_5xx: 5
+          # Enforce it (default is 100, but be explicit).
+          enforcing_consecutive_5xx: 100
+          # Disable rate-based detection so only the consecutive path is
+          # in play. Setting enforcing_failure_percentage to 0 makes the
+          # rate threshold log-only.
+          enforcing_failure_percentage: 0
+          # Cart has 1 replica → minimum-hosts gate must allow 1.
+          failure_percentage_minimum_hosts: 1
+          interval: 1s
+          base_ejection_time: 5s
+          max_ejection_time: 30s
+          max_ejection_percent: 100
