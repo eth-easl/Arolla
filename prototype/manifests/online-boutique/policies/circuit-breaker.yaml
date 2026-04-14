@@ -33,6 +33,12 @@ spec:
           # Pin consecutive-5xx mode off so only failure-rate is in play.
           enforcing_consecutive_5xx: 0
           interval: 1s            # re-evaluate every 1s
-          base_ejection_time: 5s 
+          base_ejection_time: 5s
+          # Cap on exponential ejection backoff. Envoy multiplies
+          # base_ejection_time by the ejection count on repeated trips,
+          # capped here. Default upstream is 300s — much longer than our
+          # recovery window, which traps the system in "never recovers"
+          # under retry storms. Explicit to enable sweep-based tuning.
+          max_ejection_time: 30s
           # Cart has 1 replica; allow 100% so the lone host can be ejected.
           max_ejection_percent: 100

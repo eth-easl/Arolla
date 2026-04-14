@@ -157,8 +157,8 @@ upload_manifests() {
         local dirname
         dirname=$(basename "$subdir")
         case "${dirname}" in
-            policies|faults|chaos)
-                info "Skipping experiment-infrastructure subdir: ${dirname}/ (managed by deploy-policy.sh / run-experiment.sh)"
+            policies|faults|chaos|cluster-profiles)
+                info "Skipping experiment-infrastructure subdir: ${dirname}/ (managed by deploy-policy.sh / run-experiment.sh / deploy-cluster-profile.sh)"
                 continue
                 ;;
         esac
