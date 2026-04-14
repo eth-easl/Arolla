@@ -25,4 +25,3 @@ python3 prototype/experiments/paper_plotting.py --sweep-fault-duration --x-max 3
   outputs/nsdi/failure_duration_sweep/fault-duration
 
 python3 prototype/experiments/paper_plotting.py --overhead-boxplot --y-min 5 --x-max 1200 outputs/nsdi/rps_sweep/combined
-

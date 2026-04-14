@@ -1,0 +1,85 @@
+# ==========================================================================
+# Envoy retry-budget parameter sensitivity analysis (2-panel figure)
+# ==========================================================================
+#
+# Envoy circuit_breakers.retry_budget — caps concurrent retries as a
+# fraction of active requests. Two OPAT sweeps:
+#
+#   Panel (a): budget_percent
+#              The core knob: retries allowed as % of active requests.
+#              Low  → almost no retries → fast recovery but retries never
+#                     help with partial failures.
+#              High → many retries → amplification → slow recovery.
+#              Expected: monotonic or shallow U-shape. The budget has no
+#              feedback loop (unlike Arolla's event refill), so there is
+#              no self-tuning — recovery depends entirely on picking the
+#              right static percentage for the failure severity.
+#
+#   Panel (b): min_retry_concurrency
+#              Floor: minimum concurrent retries always allowed regardless
+#              of the budget calculation. At high load (1200 rps), the
+#              budget_percent term dominates. This parameter matters at
+#              low load or during recovery when active request count drops.
+#              Expected: mostly flat at high load; sensitivity at extremes.
+#
+# Fixed failure scenario: 100% abort on cartservice for 10s.
+# Defaults held constant: budget_percent=10, min_retry_concurrency=1.
+#
+# Running:
+#   cd prototype/experiments
+#   ./run_sweep.sh sweeps/rb-sensitivity.yaml                  # both sweeps
+#   ./run_sweep.sh sweeps/rb-sensitivity.yaml rb-budget        # just panel (a)
+#
+# ==========================================================================
+
+defaults: &defaults
+  client_profile: post-cart-stress-open
+  fault_manifest: cartservice-100pct
+  warmup: 30
+  prefault: 60
+  fault: 10
+  recovery: 300
+  cooldown: 10
+
+sweeps:
+
+  # Panel (a): Budget percent
+  #   Low  → retries heavily restricted → server not overloaded → fast recovery
+  #   High → essentially no retry cap → amplification → slow recovery
+  #   Default: 10
+  #
+  #   Effective limit = max(budget_percent/100 * active_requests,
+  #                         min_retry_concurrency)
+  #   At 1200 rps with 10%: ~120 concurrent retries allowed.
+  #   At 1200 rps with 1%:  ~12 concurrent retries allowed.
+  - name: rb-budget
+    description: "Recovery time vs. Envoy retry budget percent"
+    policies: [envoy-retry-budget]
+    parameter:
+      name: budget_percent
+      location: policy_yaml
+      field: retry_budget.budget_percent.value
+      default: 10.0
+      values: [0.001, 0.01, 0.1, 1]
+    base:
+      <<: *defaults
+
+  # Panel (b): Minimum retry concurrency
+  #   Floor for concurrent retries. At high load, budget_percent dominates.
+  #   Matters when active request count is low (startup, recovery tail).
+  #   Default: 1
+  #
+  #   At 1200 rps with 10% budget → ~120 allowed → min=1 vs min=50 irrelevant.
+  #   During recovery if only 30 active requests → 10% = 3 allowed →
+  #   min=50 would override and allow 50 retries.
+  - name: rb-min-concurrency
+    description: "Recovery time vs. Envoy retry budget minimum concurrency"
+    policies: [envoy-retry-budget]
+    parameter:
+      name: min_retry_concurrency
+      location: policy_yaml
+      field: retry_budget.min_retry_concurrency
+      default: 1
+      values: [0]
+    base:
+      <<: *defaults
