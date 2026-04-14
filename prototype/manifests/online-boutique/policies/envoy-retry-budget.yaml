@@ -1,30 +1,14 @@
-# Baseline 3: Envoy retry budget — concurrent retries capped at a
-# fraction of active+pending requests, applied namespace-wide.
-#
-# Scope: every SIDECAR_OUTBOUND cluster in the online-boutique
-# namespace. This matches arolla's namespace-wide attachment so the
-# comparison is scope-symmetric — both policies see all retry traffic
-# across the call graph, not just retries to cart. To restrict the
-# patch to a specific upstream, add `cluster.service: <FQDN>` under
-# match below.
+# Baseline 3: Envoy retry budget (via Istio 1.27+ native API).
+
 ---
-apiVersion: networking.istio.io/v1alpha3
-kind: EnvoyFilter
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
 metadata:
   name: arolla-baseline-retry-budget
   namespace: online-boutique
 spec:
-  configPatches:
-  - applyTo: CLUSTER
-    match:
-      context: SIDECAR_OUTBOUND
-    patch:
-      operation: MERGE
-      value:
-        circuit_breakers:
-          thresholds:
-          - priority: DEFAULT
-            retry_budget:
-              budget_percent:
-                value: 10.0
-              min_retry_concurrency: 1
+  host: "*.online-boutique.svc.cluster.local"
+  trafficPolicy:
+    retryBudget:
+      percent: 1.0          # cap retries at 10% of active requests
+      minRetryConcurrency: 1 # always allow at least 1 concurrent retry
