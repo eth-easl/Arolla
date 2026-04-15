@@ -304,7 +304,7 @@ fi
 # --------------------------------------------------------------------------- #
 
 IFS=',' read -r -a POLICIES <<< "${POLICIES_CSV}"
-VALID_POLICIES=("no-control" "circuit-breaker" "circuit-breaker-consecutive" "envoy-retry-budget" "arolla")
+VALID_POLICIES=("no-control" "circuit-breaker" "circuit-breaker-consecutive" "envoy-retry-budget" "arolla" "arolla-fairness" "arolla-fairness-record")
 for p in "${POLICIES[@]}"; do
   found=false
   for v in "${VALID_POLICIES[@]}"; do
@@ -409,17 +409,38 @@ else
 fi
 
 # Build the run directory path now that we know which profile(s) will run.
-# Structure: outputs/prototype/<profile_name>/<profile_name>_<timestamp>/
-# When multiple profiles are specified, join their names with '+'.
-_profile_slug="${RESOLVED_PROFILES[0]}"
-if (( ${#RESOLVED_PROFILES[@]} > 1 )); then
-  _profile_slug="$(IFS=+; echo "${RESOLVED_PROFILES[*]}")"
+# Structure: outputs/prototype/<slug>/<slug>_<timestamp>/
+# Strip directory prefixes from profile names (e.g. "fairness/client1" → "client1")
+# to avoid deeply nested output paths. When all profiles share a common
+# directory prefix (e.g. "fairness/"), use that as the slug prefix.
+_basenames=()
+_dirs=()
+for _p in "${RESOLVED_PROFILES[@]}"; do
+  _basenames+=("$(basename "${_p}")")
+  _d="$(dirname "${_p}")"
+  [[ "${_d}" == "." ]] && _d=""
+  _dirs+=("${_d}")
+done
+# If all profiles share the same directory, use it as a prefix.
+_common_dir="${_dirs[0]}"
+for _d in "${_dirs[@]}"; do
+  [[ "${_d}" != "${_common_dir}" ]] && _common_dir="" && break
+done
+_joined_names="$(IFS=+; echo "${_basenames[*]}")"
+if [[ -n "${_common_dir}" ]]; then
+  _profile_slug="${_common_dir}/${_joined_names}"
+else
+  _profile_slug="${_joined_names}"
 fi
 if "${OUTPUT_EXPLICIT}"; then
   # -o was passed (e.g. from run_sweep.sh) — use it directly.
   RUN_DIR="${OUTPUT_ROOT}"
 else
-  RUN_DIR="${OUTPUT_ROOT}/${_profile_slug}/${_profile_slug}_${RUN_TS}"
+  if [[ -n "${_common_dir}" ]]; then
+    RUN_DIR="${OUTPUT_ROOT}/${_common_dir}/${RUN_TS}"
+  else
+    RUN_DIR="${OUTPUT_ROOT}/${_profile_slug}/${RUN_TS}"
+  fi
 fi
 
 print_plan

@@ -44,6 +44,8 @@ POLICY_LABELS = {
     "circuit-breaker":    "Circuit breaker",
     "envoy-retry-budget": "Retry budget",
     "arolla":             "Arolla",
+    "arolla-fairness":    "Arolla (fairness)",
+    "arolla-fairness-record": "Arolla (fairness)",
 }
 
 POLICY_COLORS = {
@@ -51,6 +53,8 @@ POLICY_COLORS = {
     "circuit-breaker":    "#E68C14",  # warnorg
     "envoy-retry-budget": "#3264B4",  # calmblue
     "arolla":             "#218B21",  # goodputgreen
+    "arolla-fairness":    "#1B6B6B",  # teal
+    "arolla-fairness-record": "#1B6B6B",
 }
 
 # !55 variants (55% color + 45% white) for bar fills.
@@ -59,6 +63,8 @@ POLICY_COLORS_FILL = {
     "circuit-breaker":    "#F1C07E",  # warnorg!55
     "envoy-retry-budget": "#8EAAD6",  # calmblue!55
     "arolla":             "#85BF85",  # goodputgreen!55
+    "arolla-fairness":    "#7BB8B8",  # teal!55
+    "arolla-fairness-record": "#7BB8B8",
 }
 
 POLICY_MARKERS = {
@@ -66,9 +72,11 @@ POLICY_MARKERS = {
     "circuit-breaker":    "^",   # triangle
     "envoy-retry-budget": "D",   # diamond
     "arolla":             "o",   # circle
+    "arolla-fairness":    "v",   # inverted triangle
+    "arolla-fairness-record": "v",
 }
 
-POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla"]
+POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla", "arolla-fairness", "arolla-fairness-record"]
 
 
 def _apply_paper_style() -> None:
@@ -2229,6 +2237,514 @@ def print_retry_summary(runs: Dict[str, dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fairness plots (§6.4)
+# ---------------------------------------------------------------------------
+
+# Per-tenant color palette — warm/cool tones distinguishable by name.
+# Auto-assigned for unknown tenants via TENANT_FALLBACK_COLORS.
+TENANT_COLORS = {
+    "client1": "#E07B7B",   # salmon
+    "client2": "#70AD47",   # green
+    "client3": "#5B9BD5",   # blue
+    "client4": "#E6913E",   # orange
+}
+
+TENANT_LABELS = {
+    "client1": "Client 1: 3 retries, no backoff",
+    "client2": "Client 2: 3 retries, exp backoff",
+    "client3": "Client 3: 10 retries, no backoff",
+    "client4": "Client 4: 10 retries, no backoff",
+}
+
+# Fallback colors for tenants not in the map above.
+TENANT_FALLBACK_COLORS = [
+    "#9B59B6", "#3498DB", "#E67E22", "#1ABC9C", "#E74C3C", "#2ECC71",
+]
+
+
+def _tenant_color(tenant: str, idx: int = 0) -> str:
+    return TENANT_COLORS.get(tenant, TENANT_FALLBACK_COLORS[idx % len(TENANT_FALLBACK_COLORS)])
+
+
+def _tenant_label(tenant: str) -> str:
+    return TENANT_LABELS.get(tenant, tenant)
+
+
+def plot_fairness_retry_share(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+) -> None:
+    """
+    Bar chart: per-tenant retry share (%) for each policy.
+
+    Retry share = (retries admitted for tenant) / (total retries admitted)
+    across the fault window. A dashed line marks the ideal equal share.
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    # Discover tenants from the first policy that has data.
+    all_tenants: List[str] = []
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is not None and "profile" in df.columns:
+            all_tenants = sorted(df["profile"].unique().tolist())
+            break
+    if not all_tenants:
+        return
+
+    # For each policy, compute per-tenant retry share.
+    # Preferred source: server-side per-tenant Envoy stats from arolla-fairness-record
+    # (whole-run counters, diffed pre vs post). Fallback: client-side CSV inference.
+    policy_tenant_shares: Dict[str, Dict[str, float]] = {}
+    for policy in ordered:
+        d = runs[policy]
+        tenant_stats = d.get("tenant_arolla_stats", {})
+
+        if tenant_stats:
+            # Server-side stats available — use them (most accurate).
+            total_admitted = sum(ts["admitted"] for ts in tenant_stats.values())
+            if total_admitted == 0:
+                policy_tenant_shares[policy] = {t: 0.0 for t in all_tenants}
+            else:
+                shares = {}
+                for tenant in all_tenants:
+                    # Match tenant profile name to sanitized stat name
+                    # (e.g. "tenant-conservative" → "tenant_conservative").
+                    safe = tenant.replace("-", "_")
+                    count = tenant_stats.get(safe, {}).get("admitted", 0)
+                    shares[tenant] = count / total_admitted * 100.0
+                policy_tenant_shares[policy] = shares
+        else:
+            # Fallback: infer from client-side CSV (status != 429 and != 0).
+            df = d.get("df")
+            if df is None or df.empty or "profile" not in df.columns:
+                continue
+            t_ref = d["t_ref"]
+            fault_start = d["fault_start_bin"]
+            fault_end = d["fault_end_bin"]
+
+            df_ts = df.copy()
+            df_ts["bin"] = ((df_ts["timestamp"] - t_ref)).astype(int)
+            fault_retries = df_ts[
+                (df_ts["bin"] >= fault_start) &
+                (df_ts["bin"] < fault_end) &
+                (df_ts["is_retry"] == True)
+            ]
+            admitted = fault_retries[
+                (fault_retries["status"] > 0) & (fault_retries["status"] != 429)
+            ]
+
+            total_admitted = len(admitted)
+            if total_admitted == 0:
+                policy_tenant_shares[policy] = {t: 0.0 for t in all_tenants}
+                continue
+
+            shares = {}
+            for tenant in all_tenants:
+                count = len(admitted[admitted["profile"] == tenant])
+                shares[tenant] = count / total_admitted * 100.0
+            policy_tenant_shares[policy] = shares
+
+    if not policy_tenant_shares:
+        return
+
+    # Plot grouped bar chart (like the uploaded reference figure).
+    n_policies = len(policy_tenant_shares)
+    n_tenants = len(all_tenants)
+    bar_width = 0.8 / n_tenants
+    x = np.arange(n_policies)
+
+    fig, ax = plt.subplots(figsize=(max(6.4, n_policies * 2.0), 4.0))
+
+    for i, tenant in enumerate(all_tenants):
+        offsets = x + (i - n_tenants / 2 + 0.5) * bar_width
+        values = [
+            policy_tenant_shares[p].get(tenant, 0.0)
+            for p in policy_tenant_shares
+        ]
+        color = _tenant_color(tenant, i)
+        label = _tenant_label(tenant)
+        ax.bar(offsets, values, bar_width * 0.9, label=label, color=color,
+               alpha=0.85, edgecolor="white", linewidth=0.5)
+
+    # Ideal equal share line.
+    ideal = 100.0 / n_tenants if n_tenants > 0 else 0
+    ax.axhline(ideal, color="#C83232", linestyle="--", linewidth=1.5,
+               alpha=0.7, label=f"Equal share ({ideal:.0f}%)")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([
+        POLICY_LABELS.get(p, p) for p in policy_tenant_shares
+    ])
+    ax.set_ylabel("Retry Share (%)")
+    ax.set_ylim(0, max(55, ax.get_ylim()[1] * 1.05))
+    ax.legend(loc="upper right", frameon=True, fancybox=False,
+              edgecolor="#888888", framealpha=0.95)
+    fig.tight_layout()
+    out_path = out_dir / "retry-share.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_fairness_success_rate(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+) -> None:
+    """
+    Per-tenant success rate over time, one subplot per policy.
+
+    Each subplot shows success rate (%) for each tenant as a separate line,
+    with fault region shaded.
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    # Discover tenants.
+    all_tenants: List[str] = []
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is not None and "profile" in df.columns:
+            all_tenants = sorted(df["profile"].unique().tolist())
+            break
+    if not all_tenants:
+        return
+
+    n_policies = len(ordered)
+    fig, axes = plt.subplots(n_policies, 1, figsize=(7.0, 3.0 * n_policies),
+                             sharex=True, squeeze=False)
+    axes = axes.flatten()
+
+    prefault_sec = float(experiment.get("prefault_sec", 0))
+    fault_sec = float(experiment.get("fault_sec", 0))
+    recovery_sec = float(experiment.get("recovery_sec", 0))
+    cooldown_sec = float(experiment.get("cooldown_sec", 0))
+    total_duration = prefault_sec + fault_sec + recovery_sec + cooldown_sec
+    fault_start_x, fault_end_x = _fault_band_x(experiment)
+
+    for idx, policy in enumerate(ordered):
+        ax = axes[idx]
+        d = runs[policy]
+        df = d.get("df")
+        t_ref = d.get("t_ref", 0)
+        t_end = d.get("t_cooldown_end", 0)
+
+        if df is None or df.empty or "profile" not in df.columns:
+            ax.set_title(POLICY_LABELS.get(policy, policy))
+            continue
+
+        for tenant in all_tenants:
+            tenant_df = df[df["profile"] == tenant]
+            sr = success_rate_timeseries(tenant_df, t_ref, t_end,
+                                         bin_sec=1.0, smooth_win=5)
+            if sr.empty:
+                continue
+            color = _tenant_color(tenant, all_tenants.index(tenant))
+            label = _tenant_label(tenant)
+            ax.plot(sr.index, sr.values, label=label, color=color, linewidth=1.5)
+
+        # Fault band.
+        if fault_sec > 0:
+            ax.axvspan(fault_start_x, fault_end_x, color="lightgray",
+                       alpha=0.55, zorder=0)
+            ax.text(
+                (fault_start_x + fault_end_x) / 2.0, 98, "fault",
+                ha="center", va="top",
+                fontsize=10, fontstyle="italic", color="#555555",
+            )
+
+        ax.set_title(POLICY_LABELS.get(policy, policy))
+        ax.set_ylim(-5, 105)
+        ax.set_ylabel("Success rate (%)")
+        if total_duration > 0:
+            ax.set_xlim(0, total_duration)
+        if idx == 0:
+            ax.legend(loc="lower right", frameon=True, fancybox=False,
+                      edgecolor="#888888", framealpha=0.95, fontsize=9)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout()
+    out_path = out_dir / "success-rate-per-tenant.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_fairness_goodput_per_tenant(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+) -> None:
+    """
+    Per-tenant goodput (successful requests/s) over time, one subplot per policy.
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    all_tenants: List[str] = []
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is not None and "profile" in df.columns:
+            all_tenants = sorted(df["profile"].unique().tolist())
+            break
+    if not all_tenants:
+        return
+
+    n_policies = len(ordered)
+    fig, axes = plt.subplots(n_policies, 1, figsize=(7.0, 3.0 * n_policies),
+                             sharex=True, squeeze=False)
+    axes = axes.flatten()
+
+    prefault_sec = float(experiment.get("prefault_sec", 0))
+    fault_sec = float(experiment.get("fault_sec", 0))
+    recovery_sec = float(experiment.get("recovery_sec", 0))
+    cooldown_sec = float(experiment.get("cooldown_sec", 0))
+    total_duration = prefault_sec + fault_sec + recovery_sec + cooldown_sec
+    fault_start_x, fault_end_x = _fault_band_x(experiment)
+
+    for idx, policy in enumerate(ordered):
+        ax = axes[idx]
+        d = runs[policy]
+        df = d.get("df")
+        t_ref = d.get("t_ref", 0)
+        t_end = d.get("t_cooldown_end", 0)
+
+        if df is None or df.empty or "profile" not in df.columns:
+            ax.set_title(POLICY_LABELS.get(policy, policy))
+            continue
+
+        for tenant in all_tenants:
+            tenant_df = df[df["profile"] == tenant]
+            gp = goodput_timeseries(tenant_df, t_ref, t_end, bin_sec=1.0)
+            if gp.empty:
+                continue
+            color = _tenant_color(tenant, all_tenants.index(tenant))
+            label = _tenant_label(tenant)
+            ax.plot(gp.index, gp.values, label=label, color=color, linewidth=1.5)
+
+        if fault_sec > 0:
+            ax.axvspan(fault_start_x, fault_end_x, color="lightgray",
+                       alpha=0.55, zorder=0)
+            ymax = ax.get_ylim()[1]
+            ax.text(
+                (fault_start_x + fault_end_x) / 2.0,
+                ymax - 0.04 * ymax, "fault",
+                ha="center", va="top",
+                fontsize=10, fontstyle="italic", color="#555555",
+            )
+
+        ax.set_title(POLICY_LABELS.get(policy, policy))
+        ax.set_ylabel("Goodput (req/s)")
+        if total_duration > 0:
+            ax.set_xlim(0, total_duration)
+        if idx == 0:
+            ax.legend(loc="lower right", frameon=True, fancybox=False,
+                      edgecolor="#888888", framealpha=0.95, fontsize=9)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout()
+    out_path = out_dir / "goodput-per-tenant.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_fairness_latency_per_tenant(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+) -> None:
+    """
+    Per-tenant p50 latency (ms) over time, one subplot per policy.
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    all_tenants: List[str] = []
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is not None and "profile" in df.columns:
+            all_tenants = sorted(df["profile"].unique().tolist())
+            break
+    if not all_tenants:
+        return
+
+    n_policies = len(ordered)
+    fig, axes = plt.subplots(n_policies, 1, figsize=(7.0, 3.0 * n_policies),
+                             sharex=True, squeeze=False)
+    axes = axes.flatten()
+
+    prefault_sec = float(experiment.get("prefault_sec", 0))
+    fault_sec = float(experiment.get("fault_sec", 0))
+    recovery_sec = float(experiment.get("recovery_sec", 0))
+    cooldown_sec = float(experiment.get("cooldown_sec", 0))
+    total_duration = prefault_sec + fault_sec + recovery_sec + cooldown_sec
+    fault_start_x, fault_end_x = _fault_band_x(experiment)
+
+    for idx, policy in enumerate(ordered):
+        ax = axes[idx]
+        d = runs[policy]
+        df = d.get("df")
+        t_ref = d.get("t_ref", 0)
+        t_end = d.get("t_cooldown_end", 0)
+
+        if df is None or df.empty or "profile" not in df.columns:
+            ax.set_title(POLICY_LABELS.get(policy, policy))
+            continue
+
+        for tenant in all_tenants:
+            tenant_df = df[df["profile"] == tenant]
+            lat = client_latency_timeseries(tenant_df, t_ref, t_end, bin_sec=1.0)
+            p50 = lat.get("p50")
+            if p50 is None or p50.empty:
+                continue
+            color = _tenant_color(tenant, all_tenants.index(tenant))
+            label = _tenant_label(tenant)
+            ax.plot(p50.index, p50.values, label=label, color=color, linewidth=1.5)
+
+        if fault_sec > 0:
+            ax.axvspan(fault_start_x, fault_end_x, color="lightgray",
+                       alpha=0.55, zorder=0)
+            ymax = ax.get_ylim()[1]
+            ax.text(
+                (fault_start_x + fault_end_x) / 2.0,
+                ymax - 0.04 * ymax, "fault",
+                ha="center", va="top",
+                fontsize=10, fontstyle="italic", color="#555555",
+            )
+
+        ax.set_title(POLICY_LABELS.get(policy, policy))
+        ax.set_ylabel("Latency p50 (ms)")
+        ax.set_yscale("log")
+        if total_duration > 0:
+            ax.set_xlim(0, total_duration)
+        if idx == 0:
+            ax.legend(loc="upper right", frameon=True, fancybox=False,
+                      edgecolor="#888888", framealpha=0.95, fontsize=9)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout()
+    out_path = out_dir / "latency-per-tenant.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def _fairness_bar_chart(
+    runs: Dict[str, dict],
+    out_dir: Path,
+    experiment: dict,
+    *,
+    phase: str,
+    metric: str,
+    ylabel: str,
+    filename: str,
+    ylim: Optional[tuple] = None,
+) -> None:
+    """
+    Grouped bar chart: one group per policy, one bar per tenant.
+
+    `metric` is one of:
+      - "goodput": successful requests/s (ok count / phase duration)
+      - "first_attempt_sr": first-attempt success rate (%)
+    `phase` is "fault" or "recovery".
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    all_tenants: List[str] = []
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is not None and "profile" in df.columns:
+            all_tenants = sorted(df["profile"].unique().tolist())
+            break
+    if not all_tenants:
+        return
+
+    # Compute per-policy per-tenant values.
+    policy_values: Dict[str, Dict[str, float]] = {}
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is None or df.empty or "profile" not in df.columns:
+            continue
+        t_ref = d["t_ref"]
+        fault_start = d["fault_start_bin"]
+        fault_end = d["fault_end_bin"]
+        t_cooldown = d["t_cooldown_end"]
+
+        if phase == "fault":
+            ts_start = t_ref + fault_start
+            ts_end = t_ref + fault_end
+        else:  # recovery
+            ts_start = t_ref + fault_end
+            ts_end = t_cooldown
+
+        duration = ts_end - ts_start
+        if duration <= 0:
+            continue
+
+        phase_df = df[(df["timestamp"] >= ts_start) & (df["timestamp"] < ts_end)]
+
+        vals = {}
+        for tenant in all_tenants:
+            sub = phase_df[phase_df["profile"] == tenant]
+            if metric == "goodput":
+                ok_count = sub["ok"].sum() if not sub.empty else 0
+                vals[tenant] = ok_count / duration
+            elif metric == "first_attempt_sr":
+                first = sub[~sub["is_retry"]]
+                if len(first) > 0:
+                    vals[tenant] = first["ok"].sum() / len(first) * 100.0
+                else:
+                    vals[tenant] = 0.0
+        policy_values[policy] = vals
+
+    if not policy_values:
+        return
+
+    n_policies = len(policy_values)
+    n_tenants = len(all_tenants)
+    bar_width = 0.8 / n_tenants
+    x = np.arange(n_policies)
+
+    fig, ax = plt.subplots(figsize=(max(6.4, n_policies * 2.0), 4.0))
+
+    for i, tenant in enumerate(all_tenants):
+        offsets = x + (i - n_tenants / 2 + 0.5) * bar_width
+        values = [
+            policy_values[p].get(tenant, 0.0) for p in policy_values
+        ]
+        color = _tenant_color(tenant, i)
+        label = _tenant_label(tenant)
+        ax.bar(offsets, values, bar_width * 0.9, label=label, color=color,
+               alpha=0.85, edgecolor="white", linewidth=0.5)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in policy_values])
+    ax.set_ylabel(ylabel)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.legend(loc="best", frameon=True, fancybox=False,
+              edgecolor="#888888", framealpha=0.95, fontsize=9)
+    fig.tight_layout()
+    out_path = out_dir / filename
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -2360,6 +2876,43 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
                 elif "arolla_retries_rejected_total" in name:
                     arolla_rejected += delta
 
+    # Per-tenant Arolla stats (from arolla-fairness-record filter).
+    # Stats names: arolla_tenant_<safe_name>_admitted_total / _rejected_total
+    # Diffed: post minus pre to scope to this run only.
+    tenant_arolla_stats: Dict[str, Dict[str, float]] = {}
+    if sidecar_dir.exists():
+        for stats_file in sorted(sidecar_dir.glob("*.stats")):
+            if "." in stats_file.stem:
+                continue
+            svc_name = stats_file.stem
+            pre_file = sidecar_dir / f"{svc_name}.pre.stats"
+            post_parsed = parse_envoy_stats(stats_file)
+            pre_parsed = parse_envoy_stats(pre_file) if pre_file.exists() else {}
+            for name, val in post_parsed.items():
+                # Envoy prefixes wasm custom metrics with "wasmcustom.".
+                clean = name.replace("wasmcustom.", "")
+                if "arolla_tenant_" not in clean:
+                    continue
+                delta = val - pre_parsed.get(name, 0.0)
+                if delta <= 0:
+                    continue
+                # Parse tenant name and metric type from stat name.
+                # Format: arolla_tenant_<safe_name>_admitted_total
+                #      or arolla_tenant_<safe_name>_rejected_total
+                suffix = clean.replace("arolla_tenant_", "")
+                if suffix.endswith("_admitted_total"):
+                    tenant = suffix[:-len("_admitted_total")]
+                    if tenant == "__default__":
+                        continue
+                    tenant_arolla_stats.setdefault(tenant, {"admitted": 0, "rejected": 0})
+                    tenant_arolla_stats[tenant]["admitted"] += delta
+                elif suffix.endswith("_rejected_total"):
+                    tenant = suffix[:-len("_rejected_total")]
+                    if tenant == "__default__":
+                        continue
+                    tenant_arolla_stats.setdefault(tenant, {"admitted": 0, "rejected": 0})
+                    tenant_arolla_stats[tenant]["rejected"] += delta
+
     # Per-phase retry deltas, sourced from the .pre / .warmup_end /
     # .fault_start / .fault_end / .recovery_end / "" snapshots written by
     # run-experiment.sh's dump_sidecar_stats. Older runs only have .pre and
@@ -2393,6 +2946,11 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         "arolla_rejected": arolla_rejected,
         "phase_retry_deltas": phase_retry_deltas,
         "run_retry_deltas": run_retry_deltas,
+        "tenant_arolla_stats": tenant_arolla_stats,
+        # Raw data for per-tenant fairness plots.
+        "df": df,
+        "t_ref": t_ref,
+        "t_cooldown_end": t_cooldown_end,
     }
 
 
@@ -2502,6 +3060,37 @@ def main():
     plot_chain_retry_by_phase(
         runs, plots_dir / "chain-retry-by-phase.pdf",
     )
+
+    # ---- Fairness plots (§6.4) ----
+    # Only generated when multiple client profiles (tenants) are present.
+    has_tenants = any(
+        d.get("df") is not None and "profile" in d["df"].columns
+        and d["df"]["profile"].nunique() > 1
+        for d in runs.values()
+    )
+    if has_tenants:
+        fairness_dir = plots_dir / "fairness"
+        fairness_dir.mkdir(exist_ok=True)
+        print(f"\nfairness plots:")
+        plot_fairness_retry_share(runs, fairness_dir, experiment)
+        plot_fairness_success_rate(runs, fairness_dir, experiment)
+        plot_fairness_goodput_per_tenant(runs, fairness_dir, experiment)
+        plot_fairness_latency_per_tenant(runs, fairness_dir, experiment)
+        # Aggregated bar charts: per-tenant goodput and first-attempt SR
+        for phase in ("fault", "recovery"):
+            _fairness_bar_chart(
+                runs, fairness_dir, experiment,
+                phase=phase, metric="goodput",
+                ylabel="Goodput (ok req/s)",
+                filename=f"goodput-bar-{phase}.pdf",
+            )
+            _fairness_bar_chart(
+                runs, fairness_dir, experiment,
+                phase=phase, metric="first_attempt_sr",
+                ylabel="First-attempt success rate (%)",
+                filename=f"first-attempt-sr-bar-{phase}.pdf",
+                ylim=(0, 105),
+            )
 
 
 # ---------------------------------------------------------------------------
