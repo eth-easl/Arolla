@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: load-generator
+spec:
+  containers:
+    - name: hey
+      image: ricoli/hey
+      command: ["/bin/sh", "-c"]
+      # -c Number of workers to run concurrently.
+      # -z Duration of application to send requests.
+      args: ["hey -c 5000 -z 1m http://slack-clone-app-svc:8080/api/message/42"]
+  restartPolicy: Never

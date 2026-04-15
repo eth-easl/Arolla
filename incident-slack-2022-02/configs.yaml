@@ -1,0 +1,27 @@
+# MySQL configuration (purposefully hindered to fail soon)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+data:
+  custom.cnf: |
+    [mysqld]
+    max_connections = 20
+    innodb_buffer_pool_size = 128M
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcrouter-config
+data:
+  mcrouter.json: |
+    {
+      "pools": {
+        "A": {
+          "servers": [
+            "memcached-headless.default.svc.cluster.local:11211"
+          ]
+        }
+      },
+      "route": "PoolRoute|A"
+    }
