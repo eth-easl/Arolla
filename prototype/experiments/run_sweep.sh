@@ -158,7 +158,13 @@ resolve_file() {
       echo "${PROTO_DIR}/manifests/online-boutique/service-retries.yaml"
       ;;
     policy_yaml)
+      # arolla's pluginConfig lives in two manifests (sidecar + gateway).
+      # Both must be edited in lockstep or the gateway keeps stale params
+      # while the sidecar sweeps, skewing every sensitivity/grid cell.
       echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml"
+      if [[ "${policy}" == "arolla" ]]; then
+        echo "${PROTO_DIR}/manifests/online-boutique/policies/arolla-gateway.yaml"
+      fi
       ;;
     fault_yaml)
       # Edit the fault manifest directly. The fault_manifest field in the
@@ -267,13 +273,16 @@ for s in sweeps:
     # ---- Edit the parameter in the target file ----
     if [[ "$PARAM_LOC" != "cli" ]]; then
       if [[ "$PARAM_LOC" == "policy_yaml" ]]; then
-        # Policy-specific file: edit each policy's manifest.
+        # Policy-specific file(s): some policies (arolla) have more than
+        # one manifest — resolve_file emits each on its own line.
         for pol in "${POLICIES_ARR[@]}"; do
-          TARGET_FILE=$(resolve_file "$PARAM_LOC" "$pol" "$PROFILE")
-          backup "$TARGET_FILE"
-          FILES_TO_RESTORE+=("$TARGET_FILE")
-          set_field "$TARGET_FILE" "$PARAM_FIELD" "$VALUE"
-          log "  set ${TARGET_FILE##*/} → ${PARAM_FIELD}=${VALUE}"
+          while IFS= read -r TARGET_FILE; do
+            [[ -z "$TARGET_FILE" ]] && continue
+            backup "$TARGET_FILE"
+            FILES_TO_RESTORE+=("$TARGET_FILE")
+            set_field "$TARGET_FILE" "$PARAM_FIELD" "$VALUE"
+            log "  set ${TARGET_FILE##*/} → ${PARAM_FIELD}=${VALUE}"
+          done < <(resolve_file "$PARAM_LOC" "$pol" "$PROFILE")
         done
       else
         # Shared file (client_profile or service_retries).

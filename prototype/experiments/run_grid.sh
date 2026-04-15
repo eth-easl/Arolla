@@ -122,7 +122,13 @@ resolve_file() {
     service_retries)
       echo "${PROTO_DIR}/manifests/online-boutique/service-retries.yaml" ;;
     policy_yaml)
-      echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml" ;;
+      # arolla's pluginConfig lives in two manifests (sidecar + gateway);
+      # both must be edited in lockstep or the gateway stays stale while
+      # the sidecar sweeps.
+      echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml"
+      [[ "${policy}" == "arolla" ]] && \
+        echo "${PROTO_DIR}/manifests/online-boutique/policies/arolla-gateway.yaml"
+      ;;
     *)
       err "unknown parameter location: ${location}" ;;
   esac
@@ -271,11 +277,15 @@ print(f'FAULT_MANIFEST={shlex.quote(r[\"fault_manifest\"])}')
 
     if [[ "$loc" == "policy_yaml" ]]; then
       for pol in "${POLICIES_ARR[@]}"; do
-        target=$(resolve_file "$loc" "$pol" "$PROFILE")
-        backup "$target"
-        FILES_TO_RESTORE+=("$target")
-        set_field "$target" "$field" "$value"
-        log "  set ${target##*/} → ${field}=${value}"
+        # resolve_file may emit multiple paths (e.g. arolla → sidecar +
+        # gateway manifests) — edit each so pluginConfig stays in sync.
+        while IFS= read -r target; do
+          [[ -z "$target" ]] && continue
+          backup "$target"
+          FILES_TO_RESTORE+=("$target")
+          set_field "$target" "$field" "$value"
+          log "  set ${target##*/} → ${field}=${value}"
+        done < <(resolve_file "$loc" "$pol" "$PROFILE")
       done
     elif [[ "$loc" == "cli" ]]; then
       err "location: cli is not implemented — parameter '${field}' would be silently ignored"
