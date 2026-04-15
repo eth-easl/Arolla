@@ -1,18 +1,4 @@
 # Baseline 3: Envoy retry budget (via Istio 1.27+ native API).
-#
-# Istio 1.27 added `spec.trafficPolicy.retryBudget` to DestinationRule,
-# which translates to Envoy's CircuitBreakers.Thresholds.RetryBudget on
-# the correct DEFAULT threshold.
-#
-# Why not EnvoyFilter: EnvoyFilter's MERGE on circuit_breakers.thresholds
-# APPENDS to the repeated field (protobuf3 semantics), producing two
-# DEFAULT thresholds. Envoy uses the first (without the budget), so the
-# patch is silently ignored. See istio/istio#36731. The DestinationRule
-# API avoids this by patching the existing default threshold directly.
-#
-# Scope: wildcard host matches every service in the online-boutique
-# namespace. This matches arolla's namespace-wide attachment for a
-# scope-symmetric comparison.
 ---
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
