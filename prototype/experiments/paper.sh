@@ -38,9 +38,21 @@ DRY_RUN="${DRY_RUN:-0}"
 
 # ---- helpers --------------------------------------------------------------
 # All external invocations go through `exec_cmd` so DRY_RUN can intercept.
+# Leading VAR=val tokens are passed through env(1) — bash's built-in
+# variable-prefix syntax only works at parse time, not when reconstituted
+# through "$@", so `exec_cmd NUM_LOADERS=4 cmd` needs env to take effect.
 exec_cmd() {
+  local env_args=()
+  while [[ $# -gt 0 && "$1" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; do
+    env_args+=("$1"); shift
+  done
   if [[ "${DRY_RUN}" == "1" ]]; then
-    printf '[dry-run]'; printf ' %q' "$@"; printf '\n'
+    printf '[dry-run]'
+    (( ${#env_args[@]} > 0 )) && printf ' %q' "${env_args[@]}"
+    printf ' %q' "$@"
+    printf '\n'
+  elif (( ${#env_args[@]} > 0 )); then
+    env "${env_args[@]}" "$@"
   else
     "$@"
   fi
@@ -48,7 +60,10 @@ exec_cmd() {
 
 run_experiment() {
   local policies="$1"
-  exec_cmd "${SCRIPT_DIR}/run-experiment.sh" \
+  # env-prefix so NUM_LOADERS is visible at the call site (and in dry-run
+  # output), not just silently inherited from the exported env.
+  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
+    "${SCRIPT_DIR}/run-experiment.sh" \
     --policies "${policies}" \
     --client-profiles "${PROFILE}" \
     -F "${FAULT_MANIFEST}" \
@@ -58,7 +73,14 @@ run_experiment() {
 
 run_sweep() {
   local yaml="$1"
-  exec_cmd "${SCRIPT_DIR}/run_sweep.sh" "${SCRIPT_DIR}/sweeps/${yaml}"
+  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
+    "${SCRIPT_DIR}/run_sweep.sh" "${SCRIPT_DIR}/sweeps/${yaml}"
+}
+
+run_grid() {
+  local yaml="$1"
+  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
+    "${SCRIPT_DIR}/run_grid.sh" "${SCRIPT_DIR}/sweeps/${yaml}"
 }
 
 plot_py() { exec_cmd python3 "${SCRIPT_DIR}/paper_plotting.py" "$@"; }
@@ -87,6 +109,12 @@ circuit_breaker_sensitivity() { run_sweep "cb-sensitivity.yaml"; }
 retry_budget_sensitivity()    { run_sweep "rb-sensitivity.yaml"; }
 
 # ==========================================================================
+# Parameter grids (cartesian product — multi-dimensional sensitivity)
+# ==========================================================================
+retry_budget_grid()           { run_grid "rb-grid.yaml"; }
+arolla_grid()                 { run_grid "arolla-grid.yaml"; }
+
+# ==========================================================================
 # Plotting — re-plot from an existing output dir without re-running.
 # ==========================================================================
 plot_effectiveness()             { plot_py "${1:?usage: plot_effectiveness <run_dir>}"; }
@@ -101,7 +129,7 @@ plot_overhead()                  { plot_py --overhead-boxplot --y-min 5 --x-max 
 list_targets() {
   grep -E '^[a-zA-Z_][a-zA-Z0-9_]*\(\)\s*\{' "$0" \
     | sed -E 's/\(\).*//' \
-    | grep -vE '^(exec_cmd|run_experiment|run_sweep|plot_py|list_targets|main)$'
+    | grep -vE '^(exec_cmd|run_experiment|run_sweep|run_grid|plot_py|list_targets|main)$'
 }
 
 # in main, pass targets on the CLI — or override the default below
