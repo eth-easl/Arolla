@@ -1,43 +1,14 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# paper.sh — dispatcher for reproducing the paper's experiments.
-# ==========================================================================
+# paper.sh — named experiments for the paper. Pick one (or more) to run.
 #
 # Usage:
-#   ./paper.sh <target> [args]
-#
-# Targets:
-#   setup                      cluster profile + wasm build/upload/serve
-#   verify                     verify retry-budget + circuit-breaker applied
-#
-#   fig2                       Figure 2: all 4 policies, single run
-#   fig2-nc                    Figure 2: no-control only (re-run)
-#   fig2-cb                    Figure 2: circuit-breaker only (re-run)
-#   fig2-rb                    Figure 2: envoy-retry-budget only (re-run)
-#   fig2-arolla                Figure 2: arolla only (re-run)
-#
-#   fig3-load                  Figure 3: RPS sweep
-#   fig3-rate                  Figure 3: failure-rate sweep
-#   fig3-dur                   Figure 3: fault-duration sweep
-#
-#   fig5-arolla                Figure 5: arolla parameter sensitivity
-#   fig5-cb                    Figure 5: circuit-breaker parameter sensitivity
-#   fig5-rb                    Figure 5: retry-budget parameter sensitivity
-#
-#   plot-fig2    <run_dir>     plot Figure 2 from combined dir
-#   plot-fig3-load <dir>       plot Figure 3 RPS panel
-#   plot-fig3-rate <dir>       plot Figure 3 failure-rate panel
-#   plot-fig3-dur  <dir>       plot Figure 3 fault-duration panel
-#   plot-fig6    <rps_dir>     plot Figure 6 (overhead boxplot)
-#
-# Prereqs:
-#   - Cluster deployed (deploy-k8s.sh on primary + second cluster)
-#   - Istio >= 1.27 (native retry_budget API support)
-#   - 2-replica cluster profile applied
-#   - Arolla wasm built + served
-#
-# Env overrides:
-#   NUM_LOADERS (default 4)
+#   ./paper.sh                                     # show help + list of targets
+#   ./paper.sh effectiveness_retry_budget_only     # re-run a single policy
+#   ./paper.sh recovery_vs_load recovery_vs_fault_duration
+#   ./paper.sh plot_effectiveness <run_dir>        # re-plot from existing data
+#   ./paper.sh --dry-run <target>                  # print commands without running
+#   ./paper.sh --list                              # list only target names
 # ==========================================================================
 
 set -euo pipefail
@@ -45,21 +16,35 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Common experiment parameters (Figure 2 & per-policy re-runs)
+# ---- shared knobs ---------------------------------------------------------
+export NUM_LOADERS="${NUM_LOADERS:-4}"
+PROFILE="post-cart-stress-open"
+FAULT_MANIFEST="cartservice-100pct"
 WARMUP=30
 PREFAULT=60
 FAULT=10
 RECOVERY=60
 COOLDOWN=10
-PROFILE="post-cart-stress-open"
-FAULT_MANIFEST="cartservice-100pct"
 ALL_POLICIES="no-control,circuit-breaker,envoy-retry-budget,arolla"
 
-export NUM_LOADERS="${NUM_LOADERS:-4}"
+# Set DRY_RUN=1 (env var) or pass --dry-run to print each command instead of
+# executing it. Good for verifying what each target will do before burning a
+# 3-hour grid on the cluster.
+DRY_RUN="${DRY_RUN:-0}"
+
+# ---- helpers --------------------------------------------------------------
+# All external invocations go through `exec_cmd` so DRY_RUN can intercept.
+exec_cmd() {
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf '[dry-run]'; printf ' %q' "$@"; printf '\n'
+  else
+    "$@"
+  fi
+}
 
 run_experiment() {
   local policies="$1"
-  NUM_LOADERS="${NUM_LOADERS}" "${SCRIPT_DIR}/run-experiment.sh" \
+  exec_cmd "${SCRIPT_DIR}/run-experiment.sh" \
     --policies "${policies}" \
     --client-profiles "${PROFILE}" \
     -F "${FAULT_MANIFEST}" \
@@ -69,77 +54,86 @@ run_experiment() {
 
 run_sweep() {
   local yaml="$1"
-  NUM_LOADERS="${NUM_LOADERS}" "${SCRIPT_DIR}/run_sweep.sh" \
-    "${SCRIPT_DIR}/sweeps/${yaml}"
+  exec_cmd "${SCRIPT_DIR}/run_sweep.sh" "${SCRIPT_DIR}/sweeps/${yaml}"
 }
 
-plot() {
-  python3 "${SCRIPT_DIR}/paper_plotting.py" "$@"
+plot_py() { exec_cmd python3 "${SCRIPT_DIR}/paper_plotting.py" "$@"; }
+
+# ==========================================================================
+# Effectiveness under sustained partial failure
+# ==========================================================================
+effectiveness_experiment()            { run_experiment "${ALL_POLICIES}"; }
+effectiveness_no_control_only()       { run_experiment "no-control"; }
+effectiveness_circuit_breaker_only()  { run_experiment "circuit-breaker"; }
+effectiveness_retry_budget_only()     { run_experiment "envoy-retry-budget"; }
+effectiveness_arolla_only()           { run_experiment "arolla"; }
+
+# ==========================================================================
+# Recovery time vs. workload / failure characteristics
+# ==========================================================================
+recovery_vs_load()            { run_sweep "rps_sweep.yaml"; }
+recovery_vs_failure_rate()    { run_sweep "failure_rate_sweep.yaml"; }
+recovery_vs_fault_duration()  { run_sweep "failure_duration_sweep.yaml"; }
+
+# ==========================================================================
+# Per-policy parameter sensitivity
+# ==========================================================================
+arolla_sensitivity()          { run_sweep "arolla-sensitivity.yaml"; }
+circuit_breaker_sensitivity() { run_sweep "cb-sensitivity.yaml"; }
+retry_budget_sensitivity()    { run_sweep "rb-sensitivity.yaml"; }
+
+# ==========================================================================
+# Plotting — re-plot from an existing output dir without re-running.
+# ==========================================================================
+plot_effectiveness()             { plot_py "${1:?usage: plot_effectiveness <run_dir>}"; }
+plot_recovery_vs_load()          { plot_py --sweep-rps "${1:?usage: plot_recovery_vs_load <combined_dir>}"; }
+plot_recovery_vs_failure_rate()  { plot_py --sweep-failure-rate "${1:?usage: plot_recovery_vs_failure_rate <combined_dir>}"; }
+plot_recovery_vs_fault_duration(){ plot_py --sweep-fault-duration --x-max 30 "${1:?usage: plot_recovery_vs_fault_duration <combined_dir>}"; }
+plot_overhead()                  { plot_py --overhead-boxplot --y-min 5 --x-max 1200 "${1:?usage: plot_overhead <rps_combined_dir>}"; }
+
+# ==========================================================================
+# Dispatcher
+# ==========================================================================
+list_targets() {
+  grep -E '^[a-zA-Z_][a-zA-Z0-9_]*\(\)\s*\{' "$0" \
+    | sed -E 's/\(\).*//' \
+    | grep -vE '^(exec_cmd|run_experiment|run_sweep|plot_py|list_targets|main)$'
 }
 
-target="${1:-}"
-shift || true
+# in main, pass targets on the CLI — or override the default below
+main() {
+  # Strip --dry-run / -n from the arg list before dispatching.
+  local args=()
+  for a in "$@"; do
+    case "$a" in
+      -n|--dry-run) DRY_RUN=1 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  set -- ${args[@]+"${args[@]}"}
+  [[ "${DRY_RUN}" == "1" ]] && echo "[dry-run mode: commands will be printed, not executed]" >&2
 
-case "${target}" in
-  setup)
-    "${PROTO_DIR}/deploy-cluster-profile.sh" 2-replica
-    "${PROTO_DIR}/deploy-policy.sh" build-wasm
-    "${PROTO_DIR}/deploy-policy.sh" upload-wasm
-    "${PROTO_DIR}/deploy-policy.sh" serve-wasm
-    ;;
+  case "${1:-}" in
+    -h|--help|"")
+      sed -n '2,11p' "$0"
+      return
+      ;;
+    -l|--list) list_targets; return ;;
+  esac
+  while [[ $# -gt 0 ]]; do
+    local target="$1"; shift
+    if ! declare -F "${target}" >/dev/null; then
+      echo "unknown target: ${target}" >&2
+      echo "run '$0 --list' for available targets" >&2
+      exit 2
+    fi
+    # plot_* targets consume the next positional arg (the dir to plot).
+    if [[ "${target}" == plot_* ]]; then
+      "${target}" "${1:-}"; [[ $# -gt 0 ]] && shift || true
+    else
+      "${target}"
+    fi
+  done
+}
 
-  verify)
-    "${PROTO_DIR}/deploy-policy.sh" switch envoy-retry-budget
-    "${SCRIPT_DIR}/verify_retry_budget.sh"
-    "${PROTO_DIR}/deploy-policy.sh" switch circuit-breaker
-    "${SCRIPT_DIR}/verify_circuit_breaker.sh"
-    ;;
-
-  # ---- Figure 2 ---------------------------------------------------------
-  fig2)        run_experiment "${ALL_POLICIES}" ;;
-  fig2-nc)     run_experiment "no-control" ;;
-  fig2-cb)     run_experiment "circuit-breaker" ;;
-  fig2-rb)     run_experiment "envoy-retry-budget" ;;
-  fig2-arolla) run_experiment "arolla" ;;
-
-  # ---- Figure 3 ---------------------------------------------------------
-  fig3-load) run_sweep "rps_sweep.yaml" ;;
-  fig3-rate) run_sweep "failure_rate_sweep.yaml" ;;
-  fig3-dur)  run_sweep "failure_duration_sweep.yaml" ;;
-
-  # ---- Figure 5 (sensitivity) ------------------------------------------
-  fig5-arolla) run_sweep "arolla-sensitivity.yaml" ;;
-  fig5-cb)     run_sweep "cb-sensitivity.yaml" ;;
-  fig5-rb)     run_sweep "rb-sensitivity.yaml" ;;
-
-  # ---- Plotting --------------------------------------------------------
-  plot-fig2)
-    [[ $# -ge 1 ]] || { echo "usage: $0 plot-fig2 <run_dir>"; exit 2; }
-    plot "$1"
-    ;;
-  plot-fig3-load)
-    [[ $# -ge 1 ]] || { echo "usage: $0 plot-fig3-load <combined_dir>"; exit 2; }
-    plot --sweep-rps "$1"
-    ;;
-  plot-fig3-rate)
-    [[ $# -ge 1 ]] || { echo "usage: $0 plot-fig3-rate <combined_dir>"; exit 2; }
-    plot --sweep-failure-rate "$1"
-    ;;
-  plot-fig3-dur)
-    [[ $# -ge 1 ]] || { echo "usage: $0 plot-fig3-dur <combined_dir>"; exit 2; }
-    plot --sweep-fault-duration --x-max 30 "$1"
-    ;;
-  plot-fig6)
-    [[ $# -ge 1 ]] || { echo "usage: $0 plot-fig6 <rps_combined_dir>"; exit 2; }
-    plot --overhead-boxplot --y-min 5 --x-max 1200 "$1"
-    ;;
-
-  ""|-h|--help|help)
-    sed -n '2,40p' "$0"
-    ;;
-  *)
-    echo "unknown target: ${target}" >&2
-    echo "run '$0 help' for usage" >&2
-    exit 2
-    ;;
-esac
+main "$@"
