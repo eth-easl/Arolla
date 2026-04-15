@@ -1,0 +1,22 @@
+[package]
+name = "arolla-filter-fairness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Arolla retry admission with per-tenant max-min fairness (paper Alg. 1, §4.3)"
+
+[lib]
+name = "arolla_filter_fairness"
+crate-type = ["cdylib"]
+
+[dependencies]
+proxy-wasm = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
+strip = true
