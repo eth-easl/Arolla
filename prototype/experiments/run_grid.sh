@@ -184,12 +184,25 @@ NUM_COMBOS=$(echo "$COMBO_NDJSON" | wc -l | tr -d ' ')
 log "expanded ${NUM_COMBOS} grid runs from ${CONFIG}"
 log "batch output: ${OUTPUT_ROOT}"
 
+# Warn on leftover backups from a previous interrupted run. If present, they
+# will be treated as the source of truth by backup() and silently mask any
+# manual edits the user made to policy/profile files in the meantime.
+mapfile -t STALE_BACKUPS < <(find "${PROTO_DIR}" -name '*.sweep-backup' 2>/dev/null)
+if (( ${#STALE_BACKUPS[@]} > 0 )); then
+  warn "found ${#STALE_BACKUPS[@]} stale .sweep-backup file(s) from a prior interrupted run:"
+  for f in "${STALE_BACKUPS[@]}"; do warn "  ${f}"; done
+  warn "these will be used as the 'clean' baseline for restore. If you want to"
+  warn "use the current file contents as the baseline, delete them and re-run."
+fi
+
 # --------------------------------------------------------------------------
 # Main loop: iterate over combinations. Each iteration edits all parameter
 # fields, runs one experiment, and restores the files.
 # --------------------------------------------------------------------------
 
 prev_sweep=""
+FAILED_CELLS=()   # parallel arrays: FAILED_CELLS[i] → label, FAILED_REASONS[i] → short reason
+FAILED_REASONS=()
 
 while IFS= read -r record; do
   SWEEP_NAME=$(echo "$record" | python3 -c "import json,sys; print(json.load(sys.stdin)['sweep_name'])")
@@ -265,7 +278,7 @@ print(f'FAULT_MANIFEST={shlex.quote(r[\"fault_manifest\"])}')
         log "  set ${target##*/} → ${field}=${value}"
       done
     elif [[ "$loc" == "cli" ]]; then
-      :  # handled below when building CMD
+      err "location: cli is not implemented — parameter '${field}' would be silently ignored"
     else
       target=$(resolve_file "$loc" "" "$PROFILE")
       backup "$target"
@@ -295,14 +308,53 @@ print(f'FAULT_MANIFEST={shlex.quote(r[\"fault_manifest\"])}')
   fi
 
   log "  running: ${CMD[*]}"
-  "${CMD[@]}" </dev/null || warn "run failed for ${SWEEP_NAME}/${LABEL}"
+  cell_ok=true
+  "${CMD[@]}" </dev/null >"${VALUE_DIR}/run.log" 2>&1 || cell_ok=false
 
-  # Restore edited files.
+  # Classify failure: verify-mismatch (policy values wrong) vs other.
+  if ! $cell_ok; then
+    reason="run failed"
+    if grep -q '^\[verify\] FAILED' "${VALUE_DIR}/run.log" 2>/dev/null; then
+      # Pull the first ✗ line from the verify output for a concrete hint.
+      mismatch=$(grep -m1 '✗' "${VALUE_DIR}/run.log" 2>/dev/null || true)
+      reason="policy values NOT applied: ${mismatch#*✗ }"
+    fi
+    warn "${SWEEP_NAME}/${LABEL} — ${reason}"
+    warn "  see ${VALUE_DIR}/run.log"
+    FAILED_CELLS+=("${SWEEP_NAME}/${LABEL}")
+    FAILED_REASONS+=("${reason}")
+  fi
+
+  # Restore edited files. Dedup first — same policy_yaml may appear N times
+  # when multiple grid parameters edit the same file.
+  declare -A seen=()
   for f in "${FILES_TO_RESTORE[@]}"; do
+    [[ -n "${seen[$f]:-}" ]] && continue
+    seen[$f]=1
     restore "$f"
   done
+  unset seen
 
   log "  done: ${VALUE_DIR}"
 done <<< "$COMBO_NDJSON"
 
-log "all selected grid sweeps complete"
+# --------------------------------------------------------------------------
+# Final summary — list every cell that did NOT produce a clean run, with
+# the reason (policy-mismatch vs other). This is what the user reads to
+# know which data files to trust.
+# --------------------------------------------------------------------------
+echo >&2
+if (( ${#FAILED_CELLS[@]} == 0 )); then
+  log "all ${NUM_COMBOS} grid cells completed successfully"
+else
+  warn "========================================================"
+  warn "FAILED CELLS: ${#FAILED_CELLS[@]} / ${NUM_COMBOS}"
+  warn "========================================================"
+  for i in "${!FAILED_CELLS[@]}"; do
+    warn "  ${FAILED_CELLS[i]}"
+    warn "      → ${FAILED_REASONS[i]}"
+  done
+  warn "These cells' data should NOT be trusted. Inspect run.log and re-run."
+fi
+
+log "batch output: ${OUTPUT_ROOT}"
