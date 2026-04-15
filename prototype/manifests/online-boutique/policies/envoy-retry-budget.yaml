@@ -23,5 +23,5 @@ spec:
   host: "*.online-boutique.svc.cluster.local"
   trafficPolicy:
     retryBudget:
-      percent: 0.01          # cap retries at 10% of active requests
-      minRetryConcurrency: 0 # always allow at least 1 concurrent retry
+      percent: 20.0          
+      minRetryConcurrency: 3
