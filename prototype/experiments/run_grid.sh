@@ -51,7 +51,10 @@ SELECTED_SWEEPS=("$@")
 
 SWEEP_STEM="$(basename "${CONFIG}" .yaml)"
 BATCH_TS="$(date +%Y%m%d_%H%M%S)"
-OUTPUT_ROOT="${REPO_ROOT}/outputs/prototype/${SWEEP_STEM}/${BATCH_TS}"
+# Callers (paper.sh) can redirect via OUTPUT_BASE — e.g.
+# OUTPUT_BASE=.../outputs/nsdi routes grids under outputs/nsdi/<grid>/<ts>/
+OUTPUT_BASE="${OUTPUT_BASE:-${REPO_ROOT}/outputs/prototype}"
+OUTPUT_ROOT="${OUTPUT_BASE}/${SWEEP_STEM}/${BATCH_TS}"
 
 log()  { printf '\033[1;34m[grid]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33m[grid]\033[0m %s\n' "$*" >&2; }

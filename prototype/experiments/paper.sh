@@ -15,6 +15,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${PROTO_DIR}/.." && pwd)"
+
+
+export OUTPUT_BASE="${OUTPUT_BASE:-${REPO_ROOT}/outputs/nsdi}"
 
 # ---- shared knobs ---------------------------------------------------------
 export NUM_LOADERS="${NUM_LOADERS:-4}"
