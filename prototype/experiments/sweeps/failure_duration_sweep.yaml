@@ -23,6 +23,6 @@ sweeps:
       name: fault_duration
       location: cli
       field: fault
-      values: [35,40,45,50,55]
+      values: [5,10,15,20,25,30,35,40,45,50,55,60]
     base:
       <<: *defaults
