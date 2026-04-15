@@ -720,6 +720,24 @@ run_single() {
   log "waiting ${POST_POLICY_SETTLE_SEC}s for xDS push to settle"
   sleep "${POST_POLICY_SETTLE_SEC}"
 
+  # ---- Verify the policy is actually applied in Envoy ----
+  # Catches silent policy-apply failures and — when --policy-yaml is passed —
+  # mismatches between what the YAML says and what Envoy actually has loaded
+  # (e.g., a sweep edit that missed its target leaf, or xDS not yet pushed).
+  # Skip policies without a dedicated verify script (no-control, arolla).
+  local verify_script=""
+  case "${policy}" in
+    envoy-retry-budget) verify_script="${SCRIPT_DIR}/verify_retry_budget.sh" ;;
+    circuit-breaker|circuit-breaker-consecutive) verify_script="${SCRIPT_DIR}/verify_circuit_breaker.sh" ;;
+  esac
+  if [[ -n "${verify_script}" && -x "${verify_script}" ]]; then
+    local policy_yaml="${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml"
+    log "[${policy}] verifying policy is applied and values match ${policy}.yaml"
+    if ! "${verify_script}" frontend --policy-yaml "${policy_yaml}"; then
+      err "[${policy}] policy verification failed — aborting run to avoid producing garbage data"
+    fi
+  fi
+
   # ---- Snapshot sidecar bucket state BEFORE any new traffic ----
   # analyze.py's latency CDF subtracts this baseline from the post-run dump
   # so per-service histograms are scoped to this experiment's traffic only.
