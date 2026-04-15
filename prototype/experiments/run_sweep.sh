@@ -178,6 +178,12 @@ resolve_file() {
 # Main loop: iterate over sweeps, then over values within each sweep
 # --------------------------------------------------------------------------
 
+# Failure log (subshell-safe). The `while read` loop below runs in a pipe
+# subshell, so arrays modified inside it don't survive. We use a file.
+FAILURE_LOG="$(mktemp)"
+export FAILURE_LOG
+trap 'rm -f "${FAILURE_LOG}"' EXIT
+
 echo "$SWEEP_JSON" | python3 -c "
 import json, sys
 sweeps = json.load(sys.stdin)
@@ -310,7 +316,23 @@ for s in sweeps:
     log "  running: ${CMD[*]}"
     # Redirect stdin from /dev/null so child processes don't consume the
     # piped sweep data that the while-read loop is iterating over.
-    "${CMD[@]}" </dev/null || warn "run failed for ${SWEEP_NAME}/${VALUE_LABEL}"
+    # Capture stdout+stderr per cell so verification mismatches and other
+    # failures are diagnosable after the fact.
+    cell_ok=true
+    "${CMD[@]}" </dev/null >"${VALUE_DIR}/run.log" 2>&1 || cell_ok=false
+    if ! $cell_ok; then
+      reason="run failed"
+      if grep -q '^\[verify\] FAILED' "${VALUE_DIR}/run.log" 2>/dev/null; then
+        mismatch=$(grep -m1 '✗' "${VALUE_DIR}/run.log" 2>/dev/null || true)
+        reason="policy values NOT applied: ${mismatch#*✗ }"
+      fi
+      warn "${SWEEP_NAME}/${VALUE_LABEL} — ${reason}"
+      warn "  see ${VALUE_DIR}/run.log"
+      # The while-read loop runs in a subshell (printf | while); arrays
+      # don't survive. Append failures to a file so the post-loop summary
+      # can read them.
+      printf '%s\t%s\n' "${SWEEP_NAME}/${VALUE_LABEL}" "${reason}" >>"${FAILURE_LOG}"
+    fi
 
     # ---- Restore edited files to their original state ----
     if (( ${#FILES_TO_RESTORE[@]} > 0 )); then
@@ -326,4 +348,23 @@ for s in sweeps:
   log "SWEEP ${SWEEP_NAME} complete → ${SWEEP_DIR}/"
 done
 
-log "all selected sweeps complete"
+# --------------------------------------------------------------------------
+# Final summary — read the failure log written by the (subshell) while loop
+# and report which cells failed and why.
+# --------------------------------------------------------------------------
+echo >&2
+NUM_FAILED=$(wc -l < "${FAILURE_LOG}" 2>/dev/null | tr -d ' ' || echo 0)
+if (( NUM_FAILED == 0 )); then
+  log "all sweep cells completed successfully"
+else
+  warn "========================================================"
+  warn "FAILED CELLS: ${NUM_FAILED}"
+  warn "========================================================"
+  while IFS=$'\t' read -r cell reason; do
+    warn "  ${cell}"
+    warn "      → ${reason}"
+  done < "${FAILURE_LOG}"
+  warn "These cells' data should NOT be trusted. Inspect run.log and re-run."
+fi
+
+log "batch output: ${OUTPUT_ROOT}"
