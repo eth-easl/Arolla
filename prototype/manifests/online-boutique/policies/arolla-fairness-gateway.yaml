@@ -1,0 +1,26 @@
+# Arolla fairness WasmPlugin attached to the ingress gateway.
+# Same role as arolla-gateway.yaml but uses the fairness filter binary.
+# __MASTER_IP__ is substituted by deploy-policy.sh at apply time.
+---
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: arolla-fairness-gateway
+  namespace: online-boutique
+spec:
+  targetRefs:
+  - kind: Gateway
+    group: gateway.networking.k8s.io
+    name: boutique-gateway
+  phase: AUTHN
+  url: http://__MASTER_IP__:8000/arolla_filter_fairness.wasm
+  failStrategy: FAIL_CLOSE
+  pluginConfig:
+    r: 0.1
+    capacity: 20.0
+    t: 1.0
+    attempt_header: "x-envoy-attempt-count"
+    attempt_header_secondary: "X-Attempt-Number"
+    reject_status: 429
+    tenant_header: "X-Retry-Client-Type"
+    window_s: 10.0
