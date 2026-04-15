@@ -28,7 +28,9 @@
 #   status                Print which policies are currently applied.
 #
 # Policies:
-#   arolla             — Arolla WasmPlugin (paper §4)
+#   arolla             — Arolla WasmPlugin (paper §4, aggregate only)
+#   arolla-fairness    — Arolla WasmPlugin with per-tenant max-min fairness (paper §4.3)
+#   arolla-fairness-record — Same as arolla-fairness + per-tenant Envoy stats
 #   no-control         — reset DestinationRule, no retry gating
 #   circuit-breaker    — Envoy outlier detection (paper §6.1 baseline 2)
 #   envoy-retry-budget — Envoy retry budget 20% (paper §6.1 baseline 3)
@@ -50,11 +52,17 @@ NAMESPACE="online-boutique"
 MANIFEST_DIR="${SCRIPT_DIR}/manifests/online-boutique/policies"
 FAULT_DIR="${SCRIPT_DIR}/manifests/online-boutique/faults"
 FILTER_DIR="${SCRIPT_DIR}/arolla-filter"
+FILTER_FAIRNESS_DIR="${SCRIPT_DIR}/arolla-filter-fairness"
+FILTER_FAIRNESS_RECORD_DIR="${SCRIPT_DIR}/arolla-filter-fairness-record"
 WASM_PATH="${FILTER_DIR}/target/wasm32-wasip1/release/arolla_filter.wasm"
+WASM_FAIRNESS_PATH="${FILTER_FAIRNESS_DIR}/target/wasm32-wasip1/release/arolla_filter_fairness.wasm"
+WASM_FAIRNESS_RECORD_PATH="${FILTER_FAIRNESS_RECORD_DIR}/target/wasm32-wasip1/release/arolla_filter_fairness_record.wasm"
 # Emulab homes live under /users, not /home. Override via env var if your
 # cluster uses a different layout.
 REMOTE_WASM_DIR="${REMOTE_WASM_DIR:-/users/${SSH_USER}/arolla-wasm}"
 REMOTE_WASM_NAME="arolla_filter.wasm"
+REMOTE_WASM_FAIRNESS_NAME="arolla_filter_fairness.wasm"
+REMOTE_WASM_FAIRNESS_RECORD_NAME="arolla_filter_fairness_record.wasm"
 WASM_PORT_DEFAULT=8000
 
 # --------------------------------------------------------------------------- #
@@ -100,19 +108,35 @@ resolve_master_ip() {
 
 cmd_build_wasm() {
   command -v cargo >/dev/null || err "cargo not on PATH — install via rustup"
-  log "building arolla wasm filter (release)"
+  log "building arolla wasm filter (aggregate-only, release)"
   (cd "${FILTER_DIR}" && cargo build --target wasm32-wasip1 --release)
   [[ -f "${WASM_PATH}" ]] || err "build produced no artifact at ${WASM_PATH}"
   log "built: ${WASM_PATH} ($(du -h "${WASM_PATH}" | cut -f1))"
+
+  log "building arolla wasm filter (fairness, release)"
+  (cd "${FILTER_FAIRNESS_DIR}" && cargo build --target wasm32-wasip1 --release)
+  [[ -f "${WASM_FAIRNESS_PATH}" ]] || err "build produced no artifact at ${WASM_FAIRNESS_PATH}"
+  log "built: ${WASM_FAIRNESS_PATH} ($(du -h "${WASM_FAIRNESS_PATH}" | cut -f1))"
+
+  log "building arolla wasm filter (fairness-record, release)"
+  (cd "${FILTER_FAIRNESS_RECORD_DIR}" && cargo build --target wasm32-wasip1 --release)
+  [[ -f "${WASM_FAIRNESS_RECORD_PATH}" ]] || err "build produced no artifact at ${WASM_FAIRNESS_RECORD_PATH}"
+  log "built: ${WASM_FAIRNESS_RECORD_PATH} ($(du -h "${WASM_FAIRNESS_RECORD_PATH}" | cut -f1))"
 }
 
 cmd_upload_wasm() {
-  [[ -f "${WASM_PATH}" ]] || err "wasm not built — run: $0 build-wasm"
+  [[ -f "${WASM_PATH}" ]] || err "aggregate wasm not built — run: $0 build-wasm"
+  [[ -f "${WASM_FAIRNESS_PATH}" ]] || err "fairness wasm not built — run: $0 build-wasm"
+  [[ -f "${WASM_FAIRNESS_RECORD_PATH}" ]] || err "fairness-record wasm not built — run: $0 build-wasm"
   log "preparing remote directory ${REMOTE_WASM_DIR} on ${MASTER_HOST}"
   ssh_master "mkdir -p ${REMOTE_WASM_DIR}"
   log "uploading ${WASM_PATH} → ${MASTER_HOST}:${REMOTE_WASM_DIR}/${REMOTE_WASM_NAME}"
   scp_to_master "${WASM_PATH}" "${REMOTE_WASM_DIR}/${REMOTE_WASM_NAME}"
-  log "uploaded"
+  log "uploading ${WASM_FAIRNESS_PATH} → ${MASTER_HOST}:${REMOTE_WASM_DIR}/${REMOTE_WASM_FAIRNESS_NAME}"
+  scp_to_master "${WASM_FAIRNESS_PATH}" "${REMOTE_WASM_DIR}/${REMOTE_WASM_FAIRNESS_NAME}"
+  log "uploading ${WASM_FAIRNESS_RECORD_PATH} → ${MASTER_HOST}:${REMOTE_WASM_DIR}/${REMOTE_WASM_FAIRNESS_RECORD_NAME}"
+  scp_to_master "${WASM_FAIRNESS_RECORD_PATH}" "${REMOTE_WASM_DIR}/${REMOTE_WASM_FAIRNESS_RECORD_NAME}"
+  log "uploaded all binaries"
 }
 
 cmd_serve_wasm() {
@@ -144,6 +168,8 @@ cmd_stop_wasm() {
 
 POLICY_FILES=(
   "arolla:arolla.yaml"
+  "arolla-fairness:arolla-fairness.yaml"
+  "arolla-fairness-record:arolla-fairness-record.yaml"
   "no-control:no-control.yaml"
   "circuit-breaker:circuit-breaker.yaml"
   "circuit-breaker-consecutive:circuit-breaker-consecutive.yaml"
@@ -174,6 +200,34 @@ render_arolla_gateway() {
   sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla-gateway.yaml"
 }
 
+render_arolla_fairness() {
+  local ip
+  ip="$(resolve_master_ip)"
+  [[ -z "${ip}" ]] && err "empty MASTER_IP"
+  sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla-fairness.yaml"
+}
+
+render_arolla_fairness_gateway() {
+  local ip
+  ip="$(resolve_master_ip)"
+  [[ -z "${ip}" ]] && err "empty MASTER_IP"
+  sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla-fairness-gateway.yaml"
+}
+
+render_arolla_fairness_record() {
+  local ip
+  ip="$(resolve_master_ip)"
+  [[ -z "${ip}" ]] && err "empty MASTER_IP"
+  sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla-fairness-record.yaml"
+}
+
+render_arolla_fairness_record_gateway() {
+  local ip
+  ip="$(resolve_master_ip)"
+  [[ -z "${ip}" ]] && err "empty MASTER_IP"
+  sed "s/__MASTER_IP__/${ip}/g" "${MANIFEST_DIR}/arolla-fairness-record-gateway.yaml"
+}
+
 cmd_apply() {
   local name="${1:-}"
   [[ -z "${name}" ]] && err "usage: $0 apply <policy>"
@@ -181,12 +235,23 @@ cmd_apply() {
   file="$(policy_file "${name}")" || err "unknown policy: ${name}"
 
   log "applying policy: ${name} (${file})"
-  if [[ "${name}" == "arolla" ]]; then
-    render_arolla | kubectl apply -f -
-    render_arolla_gateway | kubectl apply -f -
-  else
-    kubectl apply -f "${file}"
-  fi
+  case "${name}" in
+    arolla)
+      render_arolla | kubectl apply -f -
+      render_arolla_gateway | kubectl apply -f -
+      ;;
+    arolla-fairness)
+      render_arolla_fairness | kubectl apply -f -
+      render_arolla_fairness_gateway | kubectl apply -f -
+      ;;
+    arolla-fairness-record)
+      render_arolla_fairness_record | kubectl apply -f -
+      render_arolla_fairness_record_gateway | kubectl apply -f -
+      ;;
+    *)
+      kubectl apply -f "${file}"
+      ;;
+  esac
 }
 
 cmd_remove() {
@@ -196,12 +261,23 @@ cmd_remove() {
   file="$(policy_file "${name}")" || err "unknown policy: ${name}"
 
   log "removing policy: ${name}"
-  if [[ "${name}" == "arolla" ]]; then
-    render_arolla | kubectl delete --ignore-not-found -f -
-    render_arolla_gateway | kubectl delete --ignore-not-found -f -
-  else
-    kubectl delete --ignore-not-found -f "${file}"
-  fi
+  case "${name}" in
+    arolla)
+      render_arolla | kubectl delete --ignore-not-found -f -
+      render_arolla_gateway | kubectl delete --ignore-not-found -f -
+      ;;
+    arolla-fairness)
+      render_arolla_fairness | kubectl delete --ignore-not-found -f -
+      render_arolla_fairness_gateway | kubectl delete --ignore-not-found -f -
+      ;;
+    arolla-fairness-record)
+      render_arolla_fairness_record | kubectl delete --ignore-not-found -f -
+      render_arolla_fairness_record_gateway | kubectl delete --ignore-not-found -f -
+      ;;
+    *)
+      kubectl delete --ignore-not-found -f "${file}"
+      ;;
+  esac
 }
 
 cmd_switch() {

@@ -58,7 +58,7 @@ remote_mkdir() {
 upload_files() {
   remote_mkdir
   scp ${SSH_OPTS} "${SCRIPT_DIR}/traffic_gen.py" "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/traffic_gen.py" >/dev/null
-  scp ${SSH_OPTS} "${SCRIPT_DIR}/profiles/"*.json "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/profiles/" >/dev/null
+  scp -r ${SSH_OPTS} "${SCRIPT_DIR}/profiles/" "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/" >/dev/null
 }
 
 start_clients() {

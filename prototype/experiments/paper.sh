@@ -17,7 +17,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${PROTO_DIR}/.." && pwd)"
 
-
 export OUTPUT_BASE="${OUTPUT_BASE:-${REPO_ROOT}/outputs/nsdi}"
 
 # ---- shared knobs ---------------------------------------------------------
@@ -93,6 +92,19 @@ effectiveness_no_control_only()       { run_experiment "no-control"; }
 effectiveness_circuit_breaker_only()  { run_experiment "circuit-breaker"; }
 effectiveness_retry_budget_only()     { run_experiment "envoy-retry-budget"; }
 effectiveness_arolla_only()           { run_experiment "arolla"; }
+
+# ==========================================================================
+# Per-tenant fairness (§6.3): multi-profile fan-out exercising the
+# fairness bucket with heterogeneous retry loads.
+# ==========================================================================
+fairness_experiment() {
+  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
+    "${SCRIPT_DIR}/run-experiment.sh" \
+    --policies "no-control,arolla,arolla-fairness" \
+    --client-profiles "fairness/post-cart-stress-open-1,fairness/post-cart-stress-open-3,fairness/post-cart-stress-open-10" \
+    -F "${FAULT_MANIFEST}" \
+    --warmup 30 --prefault 60 --fault 30 --recovery 60 --cooldown 10
+}
 
 # ==========================================================================
 # Recovery time vs. workload / failure characteristics
