@@ -129,8 +129,11 @@ resolve_file() {
       # both must be edited in lockstep or the gateway stays stale while
       # the sidecar sweeps.
       echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml"
-      [[ "${policy}" == "arolla" ]] && \
-        echo "${PROTO_DIR}/manifests/online-boutique/policies/arolla-gateway.yaml"
+      case "${policy}" in
+        arolla|arolla-fairness|arolla-fairness-record)
+          echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}-gateway.yaml"
+          ;;
+      esac
       ;;
     *)
       err "unknown parameter location: ${location}" ;;

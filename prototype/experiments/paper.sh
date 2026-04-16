@@ -17,13 +17,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${PROTO_DIR}/.." && pwd)"
 
-
 export OUTPUT_BASE="${OUTPUT_BASE:-${REPO_ROOT}/outputs/nsdi}"
 
 # ---- shared knobs ---------------------------------------------------------
 export NUM_LOADERS="${NUM_LOADERS:-4}"
 PROFILE="post-cart-stress-open"
-FAULT_MANIFEST="cartservice-100pct"
+FAULT_MANIFEST="cartservice-50pct"
 WARMUP=30
 PREFAULT=60
 FAULT=10
@@ -94,6 +93,28 @@ effectiveness_no_control_only()       { run_experiment "no-control"; }
 effectiveness_circuit_breaker_only()  { run_experiment "circuit-breaker"; }
 effectiveness_retry_budget_only()     { run_experiment "envoy-retry-budget"; }
 effectiveness_arolla_only()           { run_experiment "arolla"; }
+
+# ==========================================================================
+# Per-tenant fairness: multi-profile fan-out exercising the
+# fairness bucket with heterogeneous retry loads.
+# ==========================================================================
+fairness_experiment_same_rps() {
+  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
+    "${SCRIPT_DIR}/run-experiment.sh" \
+    --policies "arolla,arolla-fairness" \
+    --client-profiles "fairness-same-rps/client1,fairness-same-rps/client2,fairness-same-rps/client3,fairness-same-rps/client4,fairness-same-rps/client5,fairness-same-rps/client6" \
+    -F "${FAULT_MANIFEST}" \
+    --warmup 30 --prefault 60 --fault 20 --recovery 60 --cooldown 10
+}
+
+fairness_experiment_diff_rps() {
+  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
+    "${SCRIPT_DIR}/run-experiment.sh" \
+    --policies "arolla,arolla-fairness" \
+    --client-profiles "fairness-diff-rps/client1,fairness-diff-rps/client2,fairness-diff-rps/client3,fairness-diff-rps/client4,fairness-diff-rps/client5,fairness-diff-rps/client6" \
+    -F "${FAULT_MANIFEST}" \
+    --warmup 30 --prefault 60 --fault 20 --recovery 60 --cooldown 10
+}
 
 # ==========================================================================
 # Recovery time vs. workload / failure characteristics

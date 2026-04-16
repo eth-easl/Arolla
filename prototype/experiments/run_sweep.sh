@@ -165,9 +165,11 @@ resolve_file() {
       # Both must be edited in lockstep or the gateway keeps stale params
       # while the sidecar sweeps, skewing every sensitivity/grid cell.
       echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}.yaml"
-      if [[ "${policy}" == "arolla" ]]; then
-        echo "${PROTO_DIR}/manifests/online-boutique/policies/arolla-gateway.yaml"
-      fi
+      case "${policy}" in
+        arolla|arolla-fairness|arolla-fairness-record)
+          echo "${PROTO_DIR}/manifests/online-boutique/policies/${policy}-gateway.yaml"
+          ;;
+      esac
       ;;
     fault_yaml)
       # Edit the fault manifest directly. The fault_manifest field in the
