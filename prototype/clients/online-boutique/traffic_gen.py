@@ -291,9 +291,11 @@ def _normalize_request_step(step: dict[str, Any]) -> None:
 
 def load_profiles(profile_dir: Path) -> list[dict[str, Any]]:
     profiles: list[dict[str, Any]] = []
-    for path in sorted(profile_dir.glob("*.json")):
+    for path in sorted(profile_dir.rglob("*.json")):
         data = json.loads(path.read_text())
         data["_path"] = str(path)
+        # Relative stem for matching via --profiles (e.g. "fairness/post-cart-stress-open-1").
+        data["_relkey"] = str(path.relative_to(profile_dir).with_suffix(""))
         profiles.append(normalize_profile(data))
     return profiles
 
@@ -797,7 +799,8 @@ async def main_async(args) -> int:
     profiles = load_profiles(profile_dir)
     if args.profiles:
         allow = {x.strip() for x in args.profiles.split(",") if x.strip()}
-        profiles = [p for p in profiles if p.get("name") in allow]
+        profiles = [p for p in profiles
+                    if p.get("name") in allow or p.get("_relkey") in allow]
     if not profiles:
         print("No profiles selected.", file=sys.stderr)
         return 1
