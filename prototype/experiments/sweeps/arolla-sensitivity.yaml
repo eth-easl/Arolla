@@ -37,7 +37,7 @@ defaults: &defaults
   warmup: 30
   prefault: 60
   fault: 25
-  recovery: 300
+  recovery: 100
   cooldown: 10
 
 sweeps:
