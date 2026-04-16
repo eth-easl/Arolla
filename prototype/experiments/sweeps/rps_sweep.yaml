@@ -4,7 +4,7 @@ defaults: &defaults
   warmup: 30
   prefault: 60
   fault: 10
-  recovery: 60
+  recovery: 100
   cooldown: 10
 
 sweeps:
@@ -16,6 +16,6 @@ sweeps:
       name: rate_rps
       location: client_profile
       field: rate_rps
-      values: [600, 800, 1000, 1200, 1400, 1600, 1800, 2000]
+      values: [600, 800, 1000, 1200, 1400, 1600, 1800]
     base:
       <<: *defaults
