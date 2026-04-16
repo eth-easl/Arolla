@@ -45,7 +45,6 @@ POLICY_LABELS = {
     "envoy-retry-budget": "Retry budget",
     "arolla":             "Arolla",
     "arolla-fairness":    "Arolla (fairness)",
-    "arolla-fairness-record": "Arolla (fairness)",
 }
 
 POLICY_COLORS = {
@@ -54,7 +53,6 @@ POLICY_COLORS = {
     "envoy-retry-budget": "#3264B4",  # calmblue
     "arolla":             "#218B21",  # goodputgreen
     "arolla-fairness":    "#1B6B6B",  # teal
-    "arolla-fairness-record": "#1B6B6B",
 }
 
 # !55 variants (55% color + 45% white) for bar fills.
@@ -64,7 +62,6 @@ POLICY_COLORS_FILL = {
     "envoy-retry-budget": "#8EAAD6",  # calmblue!55
     "arolla":             "#85BF85",  # goodputgreen!55
     "arolla-fairness":    "#7BB8B8",  # teal!55
-    "arolla-fairness-record": "#7BB8B8",
 }
 
 POLICY_MARKERS = {
@@ -73,10 +70,9 @@ POLICY_MARKERS = {
     "envoy-retry-budget": "D",   # diamond
     "arolla":             "o",   # circle
     "arolla-fairness":    "v",   # inverted triangle
-    "arolla-fairness-record": "v",
 }
 
-POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla", "arolla-fairness", "arolla-fairness-record"]
+POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla", "arolla-fairness"]
 
 
 def _apply_paper_style() -> None:
@@ -2247,13 +2243,17 @@ TENANT_COLORS = {
     "client2": "#70AD47",   # green
     "client3": "#5B9BD5",   # blue
     "client4": "#E6913E",   # orange
+    "client5": "#9B59B6",   # purple
+    "client6": "#1ABC9C",   # teal
 }
 
 TENANT_LABELS = {
     "client1": "Client 1: 3 retries, no backoff",
-    "client2": "Client 2: 3 retries, exp backoff",
-    "client3": "Client 3: 10 retries, no backoff",
+    "client2": "Client 2: 3 retries, no backoff",
+    "client3": "Client 3: 3 retries, no backoff",
     "client4": "Client 4: 10 retries, no backoff",
+    "client5": "Client 5: 10 retries, no backoff",
+    "client6": "Client 6: 10 retries, no backoff",
 }
 
 # Fallback colors for tenants not in the map above.
@@ -2385,6 +2385,359 @@ def plot_fairness_retry_share(
               edgecolor="#888888", framealpha=0.95)
     fig.tight_layout()
     out_path = out_dir / "retry-share.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_fairness_admission_rate(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+) -> None:
+    """
+    Bar chart: per-tenant retry admission rate (%) for each policy.
+
+    Admission rate = admitted retries / total retries attempted (per tenant).
+    This shows how likely each tenant's retry is to be admitted — the true
+    fairness signal, unlike admission *share* which is dominated by offered volume.
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    all_tenants: List[str] = []
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is not None and "profile" in df.columns:
+            all_tenants = sorted(df["profile"].unique().tolist())
+            break
+    if not all_tenants:
+        return
+
+    policy_tenant_rates: Dict[str, Dict[str, float]] = {}
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is None or df.empty or "profile" not in df.columns:
+            continue
+        t_ref = d["t_ref"]
+        fault_start = d["fault_start_bin"]
+        fault_end = d["fault_end_bin"]
+
+        df_ts = df.copy()
+        df_ts["bin"] = ((df_ts["timestamp"] - t_ref)).astype(int)
+        fault_retries = df_ts[
+            (df_ts["bin"] >= fault_start) &
+            (df_ts["bin"] < fault_end) &
+            (df_ts["is_retry"] == True)
+        ]
+
+        rates: Dict[str, float] = {}
+        for tenant in all_tenants:
+            tenant_retries = fault_retries[fault_retries["profile"] == tenant]
+            # Admitted = reached backend (not 429 and not network error).
+            admitted = tenant_retries[
+                (tenant_retries["status"] > 0) & (tenant_retries["status"] != 429)
+            ]
+            total = len(tenant_retries)
+            rates[tenant] = (len(admitted) / total * 100.0) if total > 0 else 0.0
+        policy_tenant_rates[policy] = rates
+
+    if not policy_tenant_rates:
+        return
+
+    n_policies = len(policy_tenant_rates)
+    n_tenants = len(all_tenants)
+    bar_width = 0.8 / n_tenants
+    x = np.arange(n_policies)
+
+    fig, ax = plt.subplots(figsize=(max(6.4, n_policies * 2.0), 4.0))
+
+    for i, tenant in enumerate(all_tenants):
+        offsets = x + (i - n_tenants / 2 + 0.5) * bar_width
+        values = [policy_tenant_rates[p].get(tenant, 0.0) for p in policy_tenant_rates]
+        color = _tenant_color(tenant, i)
+        label = _tenant_label(tenant)
+        ax.bar(offsets, values, bar_width * 0.9, label=label, color=color,
+               alpha=0.85, edgecolor="white", linewidth=0.5)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in policy_tenant_rates])
+    ax.set_ylabel("Retry admission rate (%)")
+    ax.set_ylim(0, max(105, ax.get_ylim()[1] * 1.05))
+    ax.legend(loc="best", frameon=True, fancybox=False,
+              edgecolor="#888888", framealpha=0.95, fontsize=9)
+    fig.tight_layout()
+    out_path = out_dir / "admission-rate.pdf"
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_fairness_polite_vs_aggressive(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+    *, polite_threshold: int = 4,
+) -> None:
+    """
+    Two bar charts comparing polite vs aggressive client treatment:
+
+    1. polite-vs-aggressive-rate.pdf — admission RATE ratio
+         (polite_admitted / polite_retries) / (aggressive_admitted / aggressive_retries)
+       Normalizes for volume; each bar is "how much more likely a polite retry
+       is to be admitted than an aggressive retry, per-retry".
+
+    2. polite-vs-aggressive-count.pdf — admission COUNT ratio
+         polite_admitted / aggressive_admitted
+       Raw count ratio. Even without fairness this reflects volume; with
+       fairness the ratio rises (polite captures more admissions despite
+       sending less volume).
+
+    A client is "polite" if its max observed attempt is <= polite_threshold
+    (default 4 → up to 3 retries); otherwise "aggressive".
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    # Classify tenants by max observed attempt (across all policies).
+    tenant_max_attempt: Dict[str, int] = {}
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is None or df.empty or "profile" not in df.columns:
+            continue
+        for tenant, sub in df.groupby("profile"):
+            m = int(sub["attempt"].max())
+            prev = tenant_max_attempt.get(tenant, 0)
+            if m > prev:
+                tenant_max_attempt[tenant] = m
+    if not tenant_max_attempt:
+        return
+    polite_set = {t for t, m in tenant_max_attempt.items() if m <= polite_threshold}
+    agg_set = set(tenant_max_attempt.keys()) - polite_set
+    if not polite_set or not agg_set:
+        return
+
+    # Per-policy: admission counts and retry counts for each group (fault window).
+    results: Dict[str, Dict[str, int]] = {}
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is None or df.empty or "profile" not in df.columns:
+            continue
+        t_ref = d["t_ref"]
+        fault_start = d["fault_start_bin"]
+        fault_end = d["fault_end_bin"]
+
+        df_ts = df.copy()
+        df_ts["bin"] = ((df_ts["timestamp"] - t_ref)).astype(int)
+        fault_retries = df_ts[
+            (df_ts["bin"] >= fault_start) &
+            (df_ts["bin"] < fault_end) &
+            (df_ts["is_retry"] == True)
+        ]
+
+        def counts_for(group: set) -> tuple:
+            g = fault_retries[fault_retries["profile"].isin(group)]
+            admitted = g[(g["status"] > 0) & (g["status"] != 429)]
+            return len(admitted), len(g)
+
+        p_adm, p_ret = counts_for(polite_set)
+        a_adm, a_ret = counts_for(agg_set)
+        results[policy] = {
+            "polite_adm": p_adm, "polite_ret": p_ret,
+            "agg_adm":    a_adm, "agg_ret":    a_ret,
+        }
+
+    if not results:
+        return
+
+    # Shared helper to render a single-metric bar chart.
+    def _render(ratios: List[float], ylabel: str, filename: str) -> None:
+        n_policies = len(results)
+        x = np.arange(n_policies)
+        colors = [POLICY_COLORS.get(p, "#555555") for p in results]
+
+        fig, ax = plt.subplots(figsize=(max(6.4, n_policies * 1.5), 4.0))
+        ax.bar(x, ratios, 0.6, color=colors, alpha=0.85,
+               edgecolor="white", linewidth=0.5)
+
+        ax.axhline(1.0, color="#888888", linestyle="--", linewidth=1.0,
+                   alpha=0.8, label="1× (parity)")
+
+        finite = [r for r in ratios if not (np.isnan(r) or np.isinf(r))]
+        ymax = max(finite + [1.0]) if finite else 1.0
+        for i, r in enumerate(ratios):
+            label = "—" if (np.isnan(r) or np.isinf(r)) else f"{r:.2f}×"
+            y = r if not (np.isnan(r) or np.isinf(r)) else 0
+            ax.text(x[i], y + ymax * 0.03, label, ha="center", va="bottom",
+                    fontsize=11, fontweight="bold", color="#333333")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in results])
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(0, ymax * 1.15)
+        ax.legend(loc="best", frameon=True, fancybox=False,
+                  edgecolor="#888888", framealpha=0.95, fontsize=9)
+        fig.tight_layout()
+        out_path = out_dir / filename
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  wrote {out_path}")
+
+    # Rate ratio: (polite admitted/retries) / (aggressive admitted/retries).
+    rate_ratios = []
+    for policy in results:
+        r = results[policy]
+        p_rate = r["polite_adm"] / r["polite_ret"] if r["polite_ret"] > 0 else 0.0
+        a_rate = r["agg_adm"] / r["agg_ret"] if r["agg_ret"] > 0 else 0.0
+        rate_ratios.append(p_rate / a_rate if a_rate > 0 else float("nan"))
+    _render(
+        rate_ratios,
+        ylabel=f"Polite / Aggressive admission rate\n(polite = ≤{polite_threshold-1} retries)",
+        filename="polite-vs-aggressive-rate.pdf",
+    )
+
+    # Count ratio: polite admitted / aggressive admitted.
+    count_ratios = []
+    for policy in results:
+        r = results[policy]
+        count_ratios.append(
+            r["polite_adm"] / r["agg_adm"] if r["agg_adm"] > 0 else float("nan")
+        )
+    _render(
+        count_ratios,
+        ylabel=f"Polite admitted / Aggressive admitted\n(polite = ≤{polite_threshold-1} retries)",
+        filename="polite-vs-aggressive-count.pdf",
+    )
+
+
+def plot_fairness_share_over_demand(
+    runs: Dict[str, dict], out_dir: Path, experiment: dict,
+    *, polite_threshold: int = 4,
+) -> None:
+    """
+    Grouped bar chart: over/under-representation per group, per policy.
+
+    For each group (polite / aggressive) and each policy:
+      ratio = admitted_share / volume_share
+
+    Where:
+      admitted_share = group_admitted / total_admitted
+      volume_share   = group_retries  / total_retries
+
+    Interpretation:
+      > 1  → group is over-represented in admissions (policy favors it)
+      = 1  → proportional (admission tracks volume — no differentiation)
+      < 1  → group is under-represented
+
+    This metric is RPS-independent: it works regardless of whether polite
+    and aggressive clients have equal or wildly different offered volumes.
+    """
+    _apply_paper_style()
+
+    ordered = [p for p in POLICY_ORDER if p in runs] + \
+              [p for p in runs if p not in POLICY_ORDER]
+
+    tenant_max_attempt: Dict[str, int] = {}
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is None or df.empty or "profile" not in df.columns:
+            continue
+        for tenant, sub in df.groupby("profile"):
+            m = int(sub["attempt"].max())
+            prev = tenant_max_attempt.get(tenant, 0)
+            if m > prev:
+                tenant_max_attempt[tenant] = m
+    if not tenant_max_attempt:
+        return
+    polite_set = {t for t, m in tenant_max_attempt.items() if m <= polite_threshold}
+    agg_set = set(tenant_max_attempt.keys()) - polite_set
+    if not polite_set or not agg_set:
+        return
+
+    results: Dict[str, Dict[str, float]] = {}
+    for policy in ordered:
+        d = runs[policy]
+        df = d.get("df")
+        if df is None or df.empty or "profile" not in df.columns:
+            continue
+        t_ref = d["t_ref"]
+        fault_start = d["fault_start_bin"]
+        fault_end = d["fault_end_bin"]
+
+        df_ts = df.copy()
+        df_ts["bin"] = ((df_ts["timestamp"] - t_ref)).astype(int)
+        fault_retries = df_ts[
+            (df_ts["bin"] >= fault_start) &
+            (df_ts["bin"] < fault_end) &
+            (df_ts["is_retry"] == True)
+        ]
+        admitted = fault_retries[
+            (fault_retries["status"] > 0) & (fault_retries["status"] != 429)
+        ]
+        total_ret = len(fault_retries)
+        total_adm = len(admitted)
+
+        def ratio_for(group: set) -> float:
+            g_ret = len(fault_retries[fault_retries["profile"].isin(group)])
+            g_adm = len(admitted[admitted["profile"].isin(group)])
+            if total_ret == 0 or total_adm == 0 or g_ret == 0:
+                return float("nan")
+            vol_share = g_ret / total_ret
+            adm_share = g_adm / total_adm
+            return adm_share / vol_share if vol_share > 0 else float("nan")
+
+        results[policy] = {
+            "polite": ratio_for(polite_set),
+            "aggressive": ratio_for(agg_set),
+        }
+
+    if not results:
+        return
+
+    n_policies = len(results)
+    x = np.arange(n_policies)
+    bar_width = 0.35
+
+    fig, ax = plt.subplots(figsize=(max(6.4, n_policies * 2.0), 4.0))
+
+    polite_vals = [results[p]["polite"] for p in results]
+    agg_vals = [results[p]["aggressive"] for p in results]
+
+    ax.bar(x - bar_width/2, polite_vals, bar_width,
+           label=f"Polite (≤{polite_threshold-1} retries)",
+           color="#5B9BD5", alpha=0.85, edgecolor="white", linewidth=0.5)
+    ax.bar(x + bar_width/2, agg_vals, bar_width,
+           label=f"Aggressive (>{polite_threshold-1} retries)",
+           color="#FF6B6B", alpha=0.85, edgecolor="white", linewidth=0.5)
+
+    ax.axhline(1.0, color="#555555", linestyle="--", linewidth=1.2,
+               alpha=0.8, label="Proportional (1×)")
+
+    finite = [v for v in polite_vals + agg_vals if not (np.isnan(v) or np.isinf(v))]
+    ymax = max(finite + [1.0]) if finite else 1.0
+
+    for i, policy in enumerate(results):
+        p = polite_vals[i]
+        a = agg_vals[i]
+        for xp, val in [(x[i] - bar_width/2, p), (x[i] + bar_width/2, a)]:
+            label = "—" if (np.isnan(val) or np.isinf(val)) else f"{val:.2f}×"
+            y = 0 if (np.isnan(val) or np.isinf(val)) else val
+            ax.text(xp, y + ymax * 0.03, label, ha="center", va="bottom",
+                    fontsize=9, fontweight="bold", color="#333333")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([POLICY_LABELS.get(p, p) for p in results])
+    ax.set_ylabel("Admitted share / Volume share")
+    ax.set_ylim(0, ymax * 1.15)
+    ax.legend(loc="best", frameon=True, fancybox=False,
+              edgecolor="#888888", framealpha=0.95, fontsize=9)
+    fig.tight_layout()
+    out_path = out_dir / "share-over-demand.pdf"
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
@@ -3073,6 +3426,9 @@ def main():
         fairness_dir.mkdir(exist_ok=True)
         print(f"\nfairness plots:")
         plot_fairness_retry_share(runs, fairness_dir, experiment)
+        plot_fairness_admission_rate(runs, fairness_dir, experiment)
+        plot_fairness_polite_vs_aggressive(runs, fairness_dir, experiment)
+        plot_fairness_share_over_demand(runs, fairness_dir, experiment)
         plot_fairness_success_rate(runs, fairness_dir, experiment)
         plot_fairness_goodput_per_tenant(runs, fairness_dir, experiment)
         plot_fairness_latency_per_tenant(runs, fairness_dir, experiment)
