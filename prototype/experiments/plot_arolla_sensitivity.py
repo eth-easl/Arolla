@@ -53,15 +53,15 @@ PANELS = [
 ]
 
 # "No recovery" sentinel: points that never recovered are plotted here.
-NEVER_Y = 300
-PLOT_MAX = 330
+NEVER_Y = 100
+PLOT_MAX = 130
 
 # Broken y-axis: bottom row shows the recovered range [0, BREAK_LOW];
 # top row shows the "no recovery" band [BREAK_HIGH, PLOT_MAX]. Collapses
 # the empty middle so the figure height can be reduced without losing
 # either region.
-BREAK_LOW = 150       # top of the lower axis
-BREAK_HIGH = 295      # bottom of the upper axis
+BREAK_LOW = 70       # top of the lower axis
+BREAK_HIGH = 100      # bottom of the upper axis
 
 
 def _paper_style():
@@ -285,6 +285,63 @@ def plot_sensitivity(sweep_root: Path, out_path: Path):
     print(f"  wrote {out_path}")
 
 
+def plot_sensitivity_split(sweep_root: Path, out_dir: Path):
+    """Generate one single-panel PDF per parameter (3 files).
+
+    Same visual style as plot_sensitivity() but each PANEL becomes its own
+    figure. Useful when a paper layout wants to place r/t/C separately.
+    """
+    _paper_style()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for sweep_name, xlabel, default_val in PANELS:
+        sweep_dir = sweep_root / sweep_name
+        if not sweep_dir.is_dir():
+            print(f"  [skip] {sweep_dir} not found", file=sys.stderr)
+            continue
+
+        values, recovery_times = load_sweep(sweep_dir)
+        if not values:
+            print(f"  [skip] no data in {sweep_dir}", file=sys.stderr)
+            continue
+
+        fig, (ax_top, ax_bot) = plt.subplots(
+            2, 1,
+            figsize=(2.6, 1.8),
+            gridspec_kw={"height_ratios": [1, 5], "hspace": 0.08},
+            sharex=True,
+        )
+
+        # Shade the "no recovery" region in the top panel.
+        ax_top.axhspan(BREAK_HIGH, PLOT_MAX, color="#f5f5f5", zorder=0)
+
+        _plot_panel(ax_top, ax_bot, values, recovery_times,
+                    default_val, xlabel)
+
+        ax_top.set_ylim(BREAK_HIGH, PLOT_MAX)
+        ax_bot.set_ylim(-1, BREAK_LOW)
+
+        ax_top.spines["bottom"].set_visible(False)
+        ax_bot.spines["top"].set_visible(False)
+        ax_top.tick_params(bottom=False)
+
+        _draw_break_marks(ax_top, ax_bot)
+
+        ax_top.set_yticks([NEVER_Y])
+        ax_bot.set_ylabel("Recovery time (s)")
+
+        ax_top.text(
+            0.02, NEVER_Y + 10, "no recovery",
+            va="center", fontsize=10, color="#999999", fontstyle="italic",
+            transform=ax_top.get_yaxis_transform(),
+        )
+
+        out_path = out_dir / f"{sweep_name}.pdf"
+        fig.savefig(out_path, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  wrote {out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -294,19 +351,26 @@ def main():
         print(__doc__)
         sys.exit(1)
 
-    sweep_root = Path(sys.argv[1])
-    if len(sys.argv) > 2:
-        out_path = Path(sys.argv[2])
-    else:
-        out_path = sweep_root / "arolla-sensitivity.pdf"
+    args = sys.argv[1:]
+    split = False
+    if "--split" in args:
+        split = True
+        args.remove("--split")
 
+    sweep_root = Path(args[0])
     if not sweep_root.is_dir():
         print(f"[error] not a directory: {sweep_root}", file=sys.stderr)
         sys.exit(1)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"figure -> {out_path}")
-    plot_sensitivity(sweep_root, out_path)
+    if split:
+        out_dir = Path(args[1]) if len(args) > 1 else sweep_root
+        print(f"split figures -> {out_dir}/{{arolla-r,arolla-t,arolla-c}}.pdf")
+        plot_sensitivity_split(sweep_root, out_dir)
+    else:
+        out_path = Path(args[1]) if len(args) > 1 else sweep_root / "arolla-sensitivity.pdf"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"figure -> {out_path}")
+        plot_sensitivity(sweep_root, out_path)
 
 
 if __name__ == "__main__":
