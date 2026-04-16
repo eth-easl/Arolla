@@ -3,7 +3,7 @@ name = "arolla-filter-fairness"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Arolla retry admission with per-tenant max-min fairness (paper Alg. 1, §4.3)"
+description = "Arolla retry admission with attempt-aware fairness: reject if attempt > B_agg"
 
 [lib]
 name = "arolla_filter_fairness"

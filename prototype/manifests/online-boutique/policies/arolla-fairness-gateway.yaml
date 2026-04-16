@@ -22,5 +22,5 @@ spec:
     attempt_header: "x-envoy-attempt-count"
     attempt_header_secondary: "X-Attempt-Number"
     reject_status: 429
-    tenant_header: "X-Retry-Client-Type"
-    window_s: 10.0
+    cheap_threshold: 3
+    cost_mode: "triangular"

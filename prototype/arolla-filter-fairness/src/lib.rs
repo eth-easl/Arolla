@@ -1,49 +1,38 @@
-//! Arolla — server-side retry admission with per-tenant max-min fairness.
+//! Arolla fairness — server-side retry admission with attempt-aware cost.
 //!
-//! Extends the aggregate mixed-refill token bucket (§4.2) with per-tenant
-//! retry allocation (§4.3) to prevent aggressive callers from monopolizing
-//! retry capacity.
+//! Builds on the aggregate mixed-refill token bucket (arolla-filter). Adds a
+//! simple attempt-aware cost function so that deep retries pay exponentially
+//! more than shallow retries, while still respecting the bucket capacity.
 //!
-//! Algorithm (paper Algorithm 1):
+//! Rationale:
+//!   - Shallow retries (1st-2nd retry) usually serve transient errors — cheap.
+//!   - Deep retries (4th+ retry) usually indicate persistent failure — expensive.
+//!   - A single aggressive client at attempt=10 costs 10 tokens, draining half
+//!     a C=20 bucket in one admission. Polite clients (≤3 retries) cost 1 each.
+//!   - This respects demand (everyone can retry) but prevents aggressive clients
+//!     from stealing retry capacity with deep retry chains.
 //!
-//!     Params: r (event refill), C (capacity), t (time refill rate)
-//!     Config: tenant_header (identifies callers), window_s (sliding window)
-//!     State:  B_agg ← C, per-tenant counters (demand, admitted)
+//! Admission rule:
 //!
 //!     on_request(req):
-//!         if req.attempt == 1: ADMIT
-//!         tenant ← req.header[tenant_header] (or "__default__")
+//!         if req.attempt == 1: ADMIT                    (first attempts bypass)
 //!         time_refill: B_agg += t·Δt, cap at C
-//!
-//!         // Aggregate gate (line 8): total admitted never exceeds B_agg
-//!         if B_agg < 1: REJECT
-//!
-//!         // Per-tenant fairness
-//!         fair_share ← R_total / N_active
-//!         if tenant.admitted < fair_share:
-//!             // Guaranteed phase (line 10): below fair share, always admit
-//!             B_agg -= 1; tenant.admitted += 1; ADMIT
-//!         else:
-//!             // Leftover phase (line 13): above fair share, admit only
-//!             // if there is leftover capacity from low-demand tenants
-//!             leftover ← R_total - sum(min(demand_i, fair_share) for all i)
-//!             tenant_leftover_used ← tenant.admitted - fair_share
-//!             if tenant_leftover_used < leftover share:
-//!                 B_agg -= 1; tenant.admitted += 1; ADMIT
-//!             else:
-//!                 REJECT
+//!         cost ← 1 if attempt <= cheap_threshold else attempt
+//!         if B_agg < cost: REJECT (local 429)
+//!         B_agg -= cost; ADMIT
 //!
 //!     on_response(req, resp):
-//!         if resp.success: B_agg = min(B_agg + r, C)
+//!         if resp.success: B_agg = min(B_agg + r, C)    (event refill)
 //!
-//! When `tenant_header` is empty, per-tenant tracking is disabled and the
-//! filter behaves identically to the aggregate-only version.
+//! Strictly simpler than Algorithm 1 fairness (§4.3):
+//!   - No per-tenant state (no HashMap, no window reset).
+//!   - No tenant_header needed.
+//!   - Fairness emerges from the attempt-vs-cost relationship on a shared bucket.
 
 use proxy_wasm::traits::*;
 use proxy_wasm::types::*;
 use serde::Deserialize;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::SystemTime;
 
@@ -61,26 +50,27 @@ proxy_wasm::main! {{
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 struct Config {
-    /// Event refill: tokens deposited on each successful response.
+    /// Event refill: tokens deposited on each successful response. Paper: r.
     r: f64,
-    /// Bucket capacity (maximum tokens).
+    /// Bucket capacity (maximum tokens). Paper: C.
     capacity: f64,
-    /// Time refill rate: tokens added per second.
+    /// Time refill rate: tokens added per second. Paper: t.
     t: f64,
     /// Primary header carrying the per-request attempt counter.
     attempt_header: String,
-    /// Secondary attempt header (for dual-source retry identification).
+    /// Secondary attempt header.
     attempt_header_secondary: String,
     /// HTTP status returned when a retry is rejected.
     reject_status: u32,
-
-    // ---- Per-tenant fairness (§4.3) ----
-
-    /// Header that identifies the tenant. If empty, per-tenant tracking is
-    /// disabled and the filter runs in aggregate-only mode.
-    tenant_header: String,
-    /// Sliding window duration in seconds for per-tenant accounting.
-    window_s: f64,
+    /// Attempts at or below this threshold cost 1 token (cheap path).
+    /// Attempts above this threshold are priced by `cost_mode`.
+    /// Default: 3 → 1st and 2nd retry are cheap; 3rd+ escalates.
+    cheap_threshold: u32,
+    /// Cost schedule for attempts above `cheap_threshold`:
+    ///   "linear"     → cost = attempt             (attempt 5 costs 5)
+    ///   "triangular" → cost = attempt*(attempt-1)/2  (attempt 5 costs 10)
+    ///   "quadratic"  → cost = attempt * attempt      (attempt 5 costs 25)
+    cost_mode: String,
 }
 
 impl Default for Config {
@@ -92,62 +82,57 @@ impl Default for Config {
             attempt_header: "x-envoy-attempt-count".to_string(),
             attempt_header_secondary: "X-Attempt-Number".to_string(),
             reject_status: 429,
-            tenant_header: String::new(), // empty = aggregate-only
-            window_s: 10.0,
+            cheap_threshold: 3,
+            cost_mode: "linear".to_string(),
+        }
+    }
+}
+
+/// Cost schedules for deep retries (attempt > cheap_threshold).
+#[derive(Debug, Clone, Copy)]
+enum CostMode {
+    Linear,
+    Triangular,
+    Quadratic,
+}
+
+impl CostMode {
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "triangular" => CostMode::Triangular,
+            "quadratic" => CostMode::Quadratic,
+            _ => CostMode::Linear,
+        }
+    }
+
+    fn cost(self, attempt: u32) -> f64 {
+        let a = attempt as f64;
+        match self {
+            CostMode::Linear => a,
+            CostMode::Triangular => a * (a - 1.0) / 2.0,
+            CostMode::Quadratic => a * a,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Per-tenant state
-// ---------------------------------------------------------------------------
-
-/// Tracks each tenant's retry demand and admitted retries within the current
-/// sliding window for max-min fair allocation.
-#[derive(Debug, Clone)]
-struct TenantState {
-    /// Number of retries requested in the current window (demand).
-    demand: u64,
-    /// Number of retries admitted in the current window.
-    admitted: u64,
-}
-
-impl TenantState {
-    fn new() -> Self {
-        Self {
-            demand: 0,
-            admitted: 0,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Aggregate bucket + fairness state
+// Token bucket
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
-struct SharedState {
-    // ---- Aggregate token bucket (Algorithm 1, line 2) ----
+struct Bucket {
     tokens: f64,
     last_refill: Option<SystemTime>,
-
-    // ---- Per-tenant fairness (Algorithm 1, lines 5-6, 9-13) ----
-    tenants: HashMap<String, TenantState>,
-    /// Start of the current sliding window (Algorithm 1, line 17-19).
-    window_start: Option<SystemTime>,
 }
 
-impl SharedState {
-    fn new(capacity: f64) -> Self {
+impl Bucket {
+    fn new(initial: f64) -> Self {
         Self {
-            tokens: capacity,
+            tokens: initial,
             last_refill: None,
-            tenants: HashMap::new(),
-            window_start: None,
         }
     }
 
-    /// Lazy time refill (Algorithm 1, line 7): B_agg += t · Δt, cap at C.
     fn refill_time(&mut self, now: SystemTime, t: f64, capacity: f64) {
         match self.last_refill {
             None => {
@@ -162,90 +147,33 @@ impl SharedState {
         }
     }
 
-    /// Event refill (Algorithm 1, line 16): B_agg ← min(B_agg + r, C).
+    /// Fairness admission with attempt-aware cost.
+    ///
+    ///   attempt <= cheap_threshold  → cost = 1 token
+    ///   attempt >  cheap_threshold  → cost = cost_mode.cost(attempt)
+    ///
+    /// Reject if tokens < cost(attempt), else consume cost tokens.
+    /// Returns (admitted, cost_applied) so the caller can log the cost.
+    fn try_admit_fairness(
+        &mut self,
+        attempt: u32,
+        cheap_threshold: u32,
+        cost_mode: CostMode,
+    ) -> (bool, f64) {
+        let cost: f64 = if attempt <= cheap_threshold {
+            1.0
+        } else {
+            cost_mode.cost(attempt)
+        };
+        if self.tokens < cost {
+            return (false, cost);
+        }
+        self.tokens -= cost;
+        (true, cost)
+    }
+
     fn deposit(&mut self, r: f64, capacity: f64) {
         self.tokens = (self.tokens + r).min(capacity);
-    }
-
-    /// Window boundary (Algorithm 1, lines 17-19): reset counters, evict
-    /// inactive tenants.
-    fn maybe_reset_window(&mut self, now: SystemTime, window_s: f64) {
-        let should_reset = match self.window_start {
-            None => true,
-            Some(start) => {
-                if let Ok(elapsed) = now.duration_since(start) {
-                    elapsed.as_secs_f64() >= window_s
-                } else {
-                    false
-                }
-            }
-        };
-        if should_reset {
-            // Line 18: Reset demand[·], admitted[·]
-            for ts in self.tenants.values_mut() {
-                ts.demand = 0;
-                ts.admitted = 0;
-            }
-            // Line 19: Evict inactive tenants.
-            self.tenants.retain(|_, ts| ts.demand > 0 || ts.admitted > 0);
-            self.window_start = Some(now);
-        }
-    }
-
-    /// Algorithm 1, lines 4-13: per-tenant admission.
-    fn try_admit_tenant(&mut self, tenant: &str) -> bool {
-        // Line 6: demand[id] += 1
-        self.tenants
-            .entry(tenant.to_string())
-            .or_insert_with(TenantState::new)
-            .demand += 1;
-
-        // Line 8: if B_agg < 1 then return REJECT
-        if self.tokens < 1.0 {
-            return false;
-        }
-
-        // Line 9: share ← B_agg / N_active
-        let n_active = self.tenants.values().filter(|ts| ts.demand > 0).count();
-        let share = if n_active > 0 {
-            self.tokens / n_active as f64
-        } else {
-            0.0
-        };
-
-        // Read admitted count (borrow-checker friendly).
-        let admitted = self
-            .tenants
-            .get(tenant)
-            .map(|ts| ts.admitted)
-            .unwrap_or(0);
-
-        // Line 10-11: if admitted[id] < share → guaranteed ADMIT
-        if (admitted as f64) < share {
-            self.tokens -= 1.0;
-            self.tenants.get_mut(tenant).unwrap().admitted += 1;
-            return true;
-        }
-
-        // Line 12-13: else if B_agg ≥ 1 → leftover ADMIT
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            self.tenants.get_mut(tenant).unwrap().admitted += 1;
-            return true;
-        }
-
-        // return REJECT
-        false
-    }
-
-    /// Aggregate-only admission (no tenant tracking).
-    fn try_admit_aggregate(&mut self) -> bool {
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -259,9 +187,6 @@ struct MetricIds {
     rejected: u32,
     first_attempts: u32,
     tokens_gauge: u32,
-    // Per-tenant metrics are tracked via response headers (not Envoy stats)
-    // because Envoy stats don't support dynamic label dimensions. The
-    // experiment analyzer reads tenant identity from client CSV columns.
 }
 
 fn define_counter(name: &str) -> u32 {
@@ -279,7 +204,8 @@ fn define_gauge(name: &str) -> u32 {
 #[derive(Default)]
 struct ArollaRoot {
     config: Config,
-    state: Rc<RefCell<SharedState>>,
+    cost_mode: Option<CostMode>,
+    bucket: Rc<RefCell<Bucket>>,
     metrics: MetricIds,
 }
 
@@ -310,26 +236,8 @@ impl RootContext for ArollaRoot {
             }
         }
 
-        let mode = if self.config.tenant_header.is_empty() {
-            "aggregate-only"
-        } else {
-            "per-tenant fairness"
-        };
-        proxy_wasm::hostcalls::log(
-            LogLevel::Info,
-            &format!(
-                "arolla-fairness: mode={}, r={}, C={}, t={}, window={}s, tenant_header='{}'",
-                mode,
-                self.config.r,
-                self.config.capacity,
-                self.config.t,
-                self.config.window_s,
-                self.config.tenant_header,
-            ),
-        )
-        .ok();
-
-        self.state.replace(SharedState::new(self.config.capacity));
+        self.bucket.replace(Bucket::new(self.config.capacity));
+        self.cost_mode = Some(CostMode::from_str(&self.config.cost_mode));
 
         self.metrics = MetricIds {
             admitted: define_counter("arolla_retries_admitted_total"),
@@ -344,7 +252,8 @@ impl RootContext for ArollaRoot {
     fn create_http_context(&self, _context_id: u32) -> Option<Box<dyn HttpContext>> {
         Some(Box::new(ArollaHttp {
             config: self.config.clone(),
-            state: self.state.clone(),
+            cost_mode: self.cost_mode.unwrap_or(CostMode::Linear),
+            bucket: self.bucket.clone(),
             metrics: self.metrics,
         }))
     }
@@ -355,12 +264,13 @@ impl RootContext for ArollaRoot {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP context — one per request
+// HTTP context
 // ---------------------------------------------------------------------------
 
 struct ArollaHttp {
     config: Config,
-    state: Rc<RefCell<SharedState>>,
+    cost_mode: CostMode,
+    bucket: Rc<RefCell<Bucket>>,
     metrics: MetricIds,
 }
 
@@ -368,7 +278,6 @@ impl Context for ArollaHttp {}
 
 impl HttpContext for ArollaHttp {
     fn on_http_request_headers(&mut self, _n: usize, _eos: bool) -> Action {
-        // Read attempt counter from both headers, take the max.
         let a1: u32 = self
             .get_http_request_header(&self.config.attempt_header)
             .and_then(|v| v.parse().ok())
@@ -384,41 +293,35 @@ impl HttpContext for ArollaHttp {
             return Action::Continue;
         }
 
-        // ---- Retry admission ----
+        // Retry path: lazy time-refill, then attempt-aware admission.
         let now = self.get_current_time();
-        let mut st = self.state.borrow_mut();
-        st.refill_time(now, self.config.t, self.config.capacity);
+        let mut bucket = self.bucket.borrow_mut();
+        bucket.refill_time(now, self.config.t, self.config.capacity);
 
-        let admitted = if self.config.tenant_header.is_empty() {
-            // Aggregate-only mode: no per-tenant tracking.
-            st.try_admit_aggregate()
-        } else {
-            // Per-tenant fairness mode.
-            st.maybe_reset_window(now, self.config.window_s);
-
-            let tenant = self
-                .get_http_request_header(&self.config.tenant_header)
-                .unwrap_or_else(|| "__default__".to_string());
-
-            st.try_admit_tenant(&tenant)
-        };
-
-        let tokens_after = st.tokens;
-        drop(st);
-
+        let (admitted, _cost) = bucket.try_admit_fairness(
+            attempt, self.config.cheap_threshold, self.cost_mode,
+        );
         if admitted {
+            let tokens_after = bucket.tokens;
+            drop(bucket);
             let _ = proxy_wasm::hostcalls::increment_metric(self.metrics.admitted, 1);
-            let _ =
-                proxy_wasm::hostcalls::record_metric(self.metrics.tokens_gauge, tokens_after as u64);
+            let _ = proxy_wasm::hostcalls::record_metric(
+                self.metrics.tokens_gauge,
+                tokens_after as u64,
+            );
             Action::Continue
         } else {
+            let tokens_after = bucket.tokens;
+            drop(bucket);
             let _ = proxy_wasm::hostcalls::increment_metric(self.metrics.rejected, 1);
-            let _ =
-                proxy_wasm::hostcalls::record_metric(self.metrics.tokens_gauge, tokens_after as u64);
+            let _ = proxy_wasm::hostcalls::record_metric(
+                self.metrics.tokens_gauge,
+                tokens_after as u64,
+            );
             self.send_http_response(
                 self.config.reject_status,
                 vec![("x-arolla-rejected", "1")],
-                Some(b"retry rejected by arolla\n"),
+                Some(b"retry rejected by arolla (fairness)\n"),
             );
             Action::Pause
         }
@@ -435,13 +338,15 @@ impl HttpContext for ArollaHttp {
 
         if is_success {
             let now = self.get_current_time();
-            let mut st = self.state.borrow_mut();
-            st.refill_time(now, self.config.t, self.config.capacity);
-            st.deposit(self.config.r, self.config.capacity);
-            let tokens_after = st.tokens;
-            drop(st);
-            let _ =
-                proxy_wasm::hostcalls::record_metric(self.metrics.tokens_gauge, tokens_after as u64);
+            let mut bucket = self.bucket.borrow_mut();
+            bucket.refill_time(now, self.config.t, self.config.capacity);
+            bucket.deposit(self.config.r, self.config.capacity);
+            let tokens_after = bucket.tokens;
+            drop(bucket);
+            let _ = proxy_wasm::hostcalls::record_metric(
+                self.metrics.tokens_gauge,
+                tokens_after as u64,
+            );
         }
         Action::Continue
     }
