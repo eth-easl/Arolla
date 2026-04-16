@@ -2,8 +2,8 @@
   "name": "client2",
   "description": "Fairness §6.4: conservative tenant — 1 retry, no backoff. 200 rps open-loop POST /cart.",
   "mode": "open-loop",
-  "rate_rps": 300,
-  "pool_size": 1000,
+  "rate_rps": 200,
+  "pool_size": 800,
   "max_inflight": 0,
   "timeout_s": 3.0,
   "sku_pool": [
@@ -28,7 +28,7 @@
     }
   ],
   "retries": 3,
-  "backoff": { "mode": "exponential", "base_s": 0.1, "max_s": 2.0, "jitter": "full" },
+  "backoff": { "mode": "none" },
   "retry_on_status": [
     0,
     500,
