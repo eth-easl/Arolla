@@ -86,6 +86,7 @@ plot_py() { exec_cmd python3 "${SCRIPT_DIR}/paper_plotting.py" "$@"; }
 
 # ==========================================================================
 # Effectiveness under sustained partial failure
+# all policies (10s fault, 60s recovery) take about 22 minutes
 # ==========================================================================
 effectiveness_experiment()            { run_experiment "${ALL_POLICIES}"; }
 effectiveness_no_control_only()       { run_experiment "no-control"; }
@@ -117,6 +118,9 @@ fairness_experiment_diff_rps() {
 
 # ==========================================================================
 # Recovery time vs. workload / failure characteristics
+# load sweep with two policies takes about 1h30min
+# failure rate sweep with two policies takes about 2h40min
+# fault duration sweep with two policies takes about xx
 # ==========================================================================
 recovery_vs_load()            { run_sweep "rps_sweep.yaml"; }
 recovery_vs_failure_rate()    { run_sweep "failure_rate_sweep.yaml"; }
@@ -141,7 +145,7 @@ arolla_grid()                 { run_grid "arolla-grid.yaml"; }
 plot_effectiveness()             { plot_py "${1:?usage: plot_effectiveness <run_dir>}"; }
 plot_recovery_vs_load()          { plot_py --sweep-rps "${1:?usage: plot_recovery_vs_load <combined_dir>}"; }
 plot_recovery_vs_failure_rate()  { plot_py --sweep-failure-rate "${1:?usage: plot_recovery_vs_failure_rate <combined_dir>}"; }
-plot_recovery_vs_fault_duration(){ plot_py --sweep-fault-duration --x-max 30 "${1:?usage: plot_recovery_vs_fault_duration <combined_dir>}"; }
+plot_recovery_vs_fault_duration(){ plot_py --sweep-fault-duration --x-max 60 "${1:?usage: plot_recovery_vs_fault_duration <combined_dir>}"; }
 plot_overhead()                  { plot_py --overhead-boxplot --y-min 5 --x-max 1200 "${1:?usage: plot_overhead <rps_combined_dir>}"; }
 
 # ==========================================================================

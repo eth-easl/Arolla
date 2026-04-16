@@ -18,11 +18,12 @@ sweeps:
   # can drain the backlog and recover after increasingly severe events.
   - name: fault-duration
     description: "All policies at defaults, vary fault duration"
-    policies: [no-control, circuit-breaker, envoy-retry-budget, arolla]
+    policies: [envoy-retry-budget, arolla, no-control, circuit-breaker]
     parameter:
       name: fault_duration
       location: cli
       field: fault
       values: [5,10,15,20,25,30,35,40,45,50,55,60]
+      # values: [10,20,30,40,50,60]
     base:
       <<: *defaults

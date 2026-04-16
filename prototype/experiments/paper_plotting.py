@@ -261,8 +261,8 @@ def plot_recovery_vs_sweep_paper(
     """
     _paper_style()
 
-    NEVER_Y = 120
-    PLOT_MAX = 130
+    NEVER_Y = 200
+    PLOT_MAX = 230
     arrow_offsets = {
         "no-control":         -2.0,
         "circuit-breaker":    -0.7,
@@ -353,7 +353,7 @@ def plot_recovery_vs_sweep_paper(
                             color=color, linestyle="--", linewidth=1.2,
                             alpha=0.5, zorder=3)
 
-    ax.text(x_values[0], NEVER_Y, "no recovery", va="center", fontsize=8,
+    ax.text(x_values[0], NEVER_Y + 10, "no recovery", va="center", fontsize=10,
             color="#999999", fontstyle="italic")
 
     ax.set_xlabel(x_label)
