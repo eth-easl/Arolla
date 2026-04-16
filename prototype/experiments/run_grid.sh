@@ -199,7 +199,13 @@ log "batch output: ${OUTPUT_ROOT}"
 # Warn on leftover backups from a previous interrupted run. If present, they
 # will be treated as the source of truth by backup() and silently mask any
 # manual edits the user made to policy/profile files in the meantime.
-mapfile -t STALE_BACKUPS < <(find "${PROTO_DIR}" -name '*.sweep-backup' 2>/dev/null)
+#
+# Use a while-read loop instead of `mapfile` so the script runs on macOS
+# bash 3.2 as well as bash 4+.
+STALE_BACKUPS=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] && STALE_BACKUPS+=("$f")
+done < <(find "${PROTO_DIR}" -name '*.sweep-backup' 2>/dev/null)
 if (( ${#STALE_BACKUPS[@]} > 0 )); then
   warn "found ${#STALE_BACKUPS[@]} stale .sweep-backup file(s) from a prior interrupted run:"
   for f in "${STALE_BACKUPS[@]}"; do warn "  ${f}"; done
@@ -343,13 +349,17 @@ print(f'FAULT_MANIFEST={shlex.quote(r[\"fault_manifest\"])}')
 
   # Restore edited files. Dedup first — same policy_yaml may appear N times
   # when multiple grid parameters edit the same file.
-  declare -A seen=()
+  #
+  # Use a delimited-string seen-set instead of `declare -A` (bash 4+) so
+  # the script runs on macOS bash 3.2.
+  seen=""
   for f in "${FILES_TO_RESTORE[@]}"; do
-    [[ -n "${seen[$f]:-}" ]] && continue
-    seen[$f]=1
+    case "|${seen}|" in
+      *"|${f}|"*) continue ;;
+    esac
+    seen="${seen}|${f}"
     restore "$f"
   done
-  unset seen
 
   log "  done: ${VALUE_DIR}"
 done <<< "$COMBO_NDJSON"

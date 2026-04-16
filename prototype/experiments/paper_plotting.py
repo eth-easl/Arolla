@@ -60,6 +60,27 @@ def _paper_style():
     })
 
 
+def _scenario_xticks(total: float):
+    """Return evenly-spaced x-axis ticks for timeline plots.
+
+    Shared across all timeline plots (success-rate, latency-p50, latency-p99)
+    so tick positions line up across the figures. Without this, matplotlib
+    picks ticks based on plot area width, which differs between plots due to
+    log-axis tick labels being wider than linear ones.
+    """
+    if total <= 0:
+        return None
+    # Aim for 4-7 ticks. Prefer "nice" step values in reading-friendly order:
+    # 25, 50, 100, 250, 500 (base-5 multiples) before 20, 200 (base-2 multiples).
+    for step in [25, 50, 100, 250, 500, 1000, 20, 10, 200]:
+        n = total // step
+        if 4 <= n <= 7:
+            return np.arange(0, total + 1, step)
+    # Fallback: ~5 ticks with a multiple-of-10 step.
+    step = max(10, int(total / 5 // 10) * 10)
+    return np.arange(0, total + 1, step)
+
+
 # ---------------------------------------------------------------------------
 # Success rate vs time
 # ---------------------------------------------------------------------------
@@ -96,6 +117,9 @@ def plot_success_rate(runs, experiment, out_path):
     ax.set_ylim(-5, 105)
     if total > 0:
         ax.set_xlim(0, total)
+        ticks = _scenario_xticks(total)
+        if ticks is not None:
+            ax.set_xticks(ticks)
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 0.95),
               ncol=2, frameon=False,
               handlelength=1.5, columnspacing=1.0)
@@ -231,6 +255,9 @@ def plot_latency_ts(runs, experiment, out_path, percentile="p50", log_y=True):
         ax.set_yscale("log")
     if total > 0:
         ax.set_xlim(0, total)
+        ticks = _scenario_xticks(total)
+        if ticks is not None:
+            ax.set_xticks(ticks)
     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 0.95),
               ncol=2, frameon=False,
               handlelength=1.5, columnspacing=1.0)
