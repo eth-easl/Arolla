@@ -148,6 +148,39 @@ plot_recovery_vs_failure_rate()  { plot_py --sweep-failure-rate "${1:?usage: plo
 plot_recovery_vs_fault_duration(){ plot_py --sweep-fault-duration --x-max 60 "${1:?usage: plot_recovery_vs_fault_duration <combined_dir>}"; }
 plot_overhead()                  { plot_py --overhead-boxplot --y-min 5 --x-max 1200 "${1:?usage: plot_overhead <rps_combined_dir>}"; }
 
+# Grid-sensitivity heatmap for a 2D/3D cartesian grid (rb-grid, arolla-grid).
+# Usage:
+#   plot_grid_sensitivity <grid-yaml-basename> <sweep-output-dir>
+# Example:
+#   ./paper.sh plot_grid_sensitivity rb-grid.yaml \
+#     outputs/nsdi/rb-grid/20260415_014914/post-cart-stress-open
+plot_grid_sensitivity() {
+  local yaml="${1:?usage: plot_grid_sensitivity <grid-yaml-basename> <sweep-output-dir>}"
+  local sweep_dir="${2:?usage: plot_grid_sensitivity <grid-yaml-basename> <sweep-output-dir>}"
+  exec_cmd python3 "${SCRIPT_DIR}/plot_grid_sensitivity.py" \
+    "${SCRIPT_DIR}/sweeps/${yaml}" "${sweep_dir}"
+}
+
+# Per-tenant fairness two-panel plot (same-rps vs diff-rps).
+# Usage:
+#   plot_fairness <same_rps_dir> <diff_rps_dir> [metric]
+# If metric omitted, renders all three (count, rate, sod). Output PDFs go
+# next to the input dirs (outputs/nsdi/fairness-{same,diff}-rps-<metric>.pdf).
+plot_fairness() {
+  local same="${1:?usage: plot_fairness <same_rps_dir> <diff_rps_dir> [metric]}"
+  local diff="${2:?usage: plot_fairness <same_rps_dir> <diff_rps_dir> [metric]}"
+  local metrics
+  if [[ $# -ge 3 && -n "$3" ]]; then metrics=("$3"); else metrics=(count rate sod); fi
+  local outroot="${OUTPUT_BASE:-${REPO_ROOT}/outputs/nsdi}"
+  for m in "${metrics[@]}"; do
+    exec_cmd python3 "${SCRIPT_DIR}/plot_fairness_two_panel.py" \
+      "$same" "$diff" \
+      --metric "$m" \
+      --same-output "${outroot}/fairness-same-rps-${m}.pdf" \
+      --diff-output "${outroot}/fairness-diff-rps-${m}.pdf"
+  done
+}
+
 # ==========================================================================
 # Dispatcher
 # ==========================================================================
@@ -184,9 +217,16 @@ main() {
       echo "run '$0 --list' for available targets" >&2
       exit 2
     fi
-    # plot_* targets consume the next positional arg (the dir to plot).
+    # plot_* targets may need multiple args (dirs, metric, etc.). Feed them
+    # all remaining positional args up to the next registered target name,
+    # so `plot_fairness A B count plot_overhead D` routes args correctly.
     if [[ "${target}" == plot_* ]]; then
-      "${target}" "${1:-}"; [[ $# -gt 0 ]] && shift || true
+      local plot_args=()
+      while [[ $# -gt 0 ]]; do
+        declare -F "$1" >/dev/null && break   # stop at next target
+        plot_args+=("$1"); shift
+      done
+      "${target}" "${plot_args[@]}"
     else
       "${target}"
     fi
