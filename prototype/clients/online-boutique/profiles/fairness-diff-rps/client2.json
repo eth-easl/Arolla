@@ -1,9 +1,9 @@
 {
-  "name": "client4",
-  "description": "Fairness §6.4: aggressive tenant — 10 retries, no backoff. 200 rps open-loop POST /cart.",
+  "name": "client2",
+  "description": "Fairness §6.4: conservative tenant — 1 retry, no backoff. 200 rps open-loop POST /cart.",
   "mode": "open-loop",
-  "rate_rps": 300,
-  "pool_size": 1000,
+  "rate_rps": 50,
+  "pool_size": 800,
   "max_inflight": 0,
   "timeout_s": 3.0,
   "sku_pool": [
@@ -27,10 +27,8 @@
       "content_type": "application/x-www-form-urlencoded"
     }
   ],
-  "retries": 10,
-  "backoff": {
-    "mode": "none"
-  },
+  "retries": 3,
+  "backoff": { "mode": "none" },
   "retry_on_status": [
     0,
     500,
