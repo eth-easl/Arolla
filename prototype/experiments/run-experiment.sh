@@ -304,7 +304,7 @@ fi
 # --------------------------------------------------------------------------- #
 
 IFS=',' read -r -a POLICIES <<< "${POLICIES_CSV}"
-VALID_POLICIES=("no-control" "circuit-breaker" "circuit-breaker-consecutive" "envoy-retry-budget" "arolla" "arolla-fairness" "arolla-fairness-record")
+VALID_POLICIES=("no-control" "circuit-breaker" "circuit-breaker-consecutive" "envoy-retry-budget" "arolla" "arolla-fairness")
 for p in "${POLICIES[@]}"; do
   found=false
   for v in "${VALID_POLICIES[@]}"; do
