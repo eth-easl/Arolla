@@ -9,13 +9,16 @@ spec:
   url: http://__MASTER_IP__:8000/arolla_filter_fairness.wasm
   failStrategy: FAIL_CLOSE
   pluginConfig:
+    # Attempt-aware cost:
+    #   attempt <= cheap_threshold: cost = 1 token
+    #   attempt >  cheap_threshold: cost = attempt tokens
+    # Admit only if B_agg >= cost.
     r: 0.1
     capacity: 20.0
     t: 1.0
     attempt_header: "x-envoy-attempt-count"
     attempt_header_secondary: "X-Attempt-Number"
     reject_status: 429
-    # Per-tenant fairness: use the client profile name as tenant key.
-    # traffic_gen.py sets this header on every request.
-    tenant_header: "X-Retry-Client-Type"
-    window_s: 10.0
+    cheap_threshold: 3
+    # cost_mode: linear | triangular | quadratic
+    cost_mode: "triangular"
