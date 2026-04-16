@@ -20,7 +20,7 @@ sweeps:
   # failure. Edits cartservice-100pct.yaml's abort percentage in place.
   - name: failure-rate
     description: "All policies at defaults, vary cart abort percentage"
-    policies: [no-control, circuit-breaker, envoy-retry-budget, arolla]
+    policies: [envoy-retry-budget, arolla]
     parameter:
       name: abort_pct
       location: fault_yaml
