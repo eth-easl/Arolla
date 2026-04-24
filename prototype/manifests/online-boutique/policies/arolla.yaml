@@ -7,7 +7,7 @@ spec:
   # No `selector` → attaches to every sidecar in the namespace. Add
   # `selector.matchLabels:` if you only want the filter on a subset of
   # services (e.g. matchLabels: {app: cartservice}).
-  phase: AUTHN      # early in the filter chain — reject retries before routing
+  phase: AUTHN # early in the filter chain — reject retries before routing
   # __MASTER_IP__ is substituted by deploy-policy.sh at apply time.
   url: http://__MASTER_IP__:8000/arolla_filter.wasm
   # Fail closed if the wasm binary can't be fetched — better to drop traffic

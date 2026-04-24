@@ -36,7 +36,7 @@ defaults: &defaults
   fault_manifest: cartservice-100pct
   warmup: 30
   prefault: 60
-  fault: 25
+  fault: 10
   recovery: 100
   cooldown: 10
 
@@ -48,12 +48,12 @@ sweeps:
   #   Default: r=0.1 (fixed: t=1.0, C=20)
   - name: arolla-r
     description: "Recovery time vs. event-refill rate r (t=1.0, C=20 fixed)"
-    policies: [arolla]
+    policies: [ arolla ]
     parameter:
       name: r
       location: policy_yaml
       field: pluginConfig.r
-      values: [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
+      values: [ 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0 ]
     base:
       <<: *defaults
 
@@ -63,12 +63,12 @@ sweeps:
   #   Default: t=1.0 (fixed: r=0.1, C=20)
   - name: arolla-t
     description: "Recovery time vs. time-refill rate t (r=0.1, C=20 fixed)"
-    policies: [arolla]
+    policies: [ arolla ]
     parameter:
       name: t
       location: policy_yaml
       field: pluginConfig.t
-      values: [0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+      values: [ 0.0, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0 ]
     base:
       <<: *defaults
 
@@ -78,11 +78,11 @@ sweeps:
   #   Default: C=20 (fixed: r=0.1, t=1.0)
   - name: arolla-c
     description: "Recovery time vs. bucket capacity C (r=0.1, t=1.0 fixed)"
-    policies: [arolla]
+    policies: [ arolla ]
     parameter:
       name: capacity
       location: policy_yaml
       field: pluginConfig.capacity
-      values: [1, 2, 5, 10, 20, 50, 100]
+      values: [ 1, 2, 5, 10, 20, 50, 100 ]
     base:
       <<: *defaults

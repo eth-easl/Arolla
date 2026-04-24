@@ -24,9 +24,9 @@ metadata:
   namespace: online-boutique
 spec:
   targetRefs:
-  - kind: Gateway
-    group: gateway.networking.k8s.io
-    name: boutique-gateway
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: boutique-gateway
   phase: AUTHN
   url: http://__MASTER_IP__:8000/arolla_filter.wasm
   failStrategy: FAIL_CLOSE
