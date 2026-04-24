@@ -22,7 +22,7 @@ export OUTPUT_BASE="${OUTPUT_BASE:-${REPO_ROOT}/outputs/nsdi}"
 # ---- shared knobs ---------------------------------------------------------
 export NUM_LOADERS="${NUM_LOADERS:-4}"
 PROFILE="post-cart-stress-open"
-FAULT_MANIFEST="cartservice-50pct"
+FAULT_MANIFEST="cartservice-100pct"
 WARMUP=30
 PREFAULT=60
 FAULT=10
@@ -120,7 +120,7 @@ fairness_experiment_diff_rps() {
 # Recovery time vs. workload / failure characteristics
 # load sweep with two policies takes about 1h30min
 # failure rate sweep with two policies takes about 2h40min
-# fault duration sweep with two policies takes about xx
+# fault duration sweep with two policies takes about 7h
 # ==========================================================================
 recovery_vs_load()            { run_sweep "rps_sweep.yaml"; }
 recovery_vs_failure_rate()    { run_sweep "failure_rate_sweep.yaml"; }
@@ -135,6 +135,7 @@ retry_budget_sensitivity()    { run_sweep "rb-sensitivity.yaml"; }
 
 # ==========================================================================
 # Parameter grids (cartesian product — multi-dimensional sensitivity)
+# retry budget grid takes about 4h
 # ==========================================================================
 retry_budget_grid()           { run_grid "rb-grid.yaml"; }
 arolla_grid()                 { run_grid "arolla-grid.yaml"; }
@@ -147,6 +148,34 @@ plot_recovery_vs_load()          { plot_py --sweep-rps "${1:?usage: plot_recover
 plot_recovery_vs_failure_rate()  { plot_py --sweep-failure-rate "${1:?usage: plot_recovery_vs_failure_rate <combined_dir>}"; }
 plot_recovery_vs_fault_duration(){ plot_py --sweep-fault-duration --x-max 60 "${1:?usage: plot_recovery_vs_fault_duration <combined_dir>}"; }
 plot_overhead()                  { plot_py --overhead-boxplot --y-min 5 --x-max 1200 "${1:?usage: plot_overhead <rps_combined_dir>}"; }
+
+# Multirun plots: aggregate multiple sweep runs and show min-max shaded
+# bands + "no recovery" markers for points where any run failed. <parent>
+# is the directory that contains per-run subdirs (e.g., outputs/nsdi/
+# rps_sweep). Optional <exclude_pattern> is a comma-separated list of
+# substrings; run-dir names containing any of these are skipped. Defaults
+# below match the conventions used in the NSDI runs and may need tweaking
+# as new variants are added.
+plot_recovery_vs_load_multirun() {
+  local parent="${1:?usage: plot_recovery_vs_load_multirun <parent_dir> [exclude_pattern]}"
+  local exclude="${2:-_rb_10%}"
+  plot_py --sweep-rps-multirun "${parent}" --x-max 1600 \
+    --include "${ALL_POLICIES}" --exclude-dir "${exclude}"
+}
+
+plot_recovery_vs_failure_rate_multirun() {
+  local parent="${1:?usage: plot_recovery_vs_failure_rate_multirun <parent_dir> [exclude_pattern]}"
+  local exclude="${2:-fairness,no_gateway}"
+  plot_py --sweep-failure-rate-multirun "${parent}" \
+    --include "${ALL_POLICIES}" --exclude-dir "${exclude}"
+}
+
+plot_recovery_vs_fault_duration_multirun() {
+  local parent="${1:?usage: plot_recovery_vs_fault_duration_multirun <parent_dir> [exclude_pattern]}"
+  local exclude="${2:-rps1000,rps1400,test}"
+  plot_py --sweep-fault-duration-multirun "${parent}" --x-max 60 \
+    --include "${ALL_POLICIES}" --exclude-dir "${exclude}"
+}
 
 # Grid-sensitivity heatmap for a 2D/3D cartesian grid (rb-grid, arolla-grid).
 # Usage:
@@ -234,3 +263,8 @@ main() {
 }
 
 main "$@"
+
+
+# python3 prototype/experiments/plot_arolla_sensitivity_multirun.py outputs/nsdi/arolla-sensitivity --fault 10 25 2>&1
+
+# python3 prototype/experiments/plot_rb_sensitivity_multirun.py outputs/nsdi/rb-sensitivity --fault 10 2>&1

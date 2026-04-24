@@ -53,15 +53,8 @@ PANELS = [
 ]
 
 # "No recovery" sentinel: points that never recovered are plotted here.
-NEVER_Y = 100
-PLOT_MAX = 130
-
-# Broken y-axis: bottom row shows the recovered range [0, BREAK_LOW];
-# top row shows the "no recovery" band [BREAK_HIGH, PLOT_MAX]. Collapses
-# the empty middle so the figure height can be reduced without losing
-# either region.
-BREAK_LOW = 70       # top of the lower axis
-BREAK_HIGH = 100      # bottom of the upper axis
+NEVER_Y = 200
+PLOT_MAX = 230
 
 
 def _paper_style():
@@ -140,18 +133,13 @@ def _fmt_val(v: float) -> str:
     return str(v)
 
 
-def _draw_break_marks(ax_top, ax_bot):
-    """Draw diagonal slash marks at the broken-axis seam on both axes."""
-    d = 0.015
-    kw = dict(color="k", clip_on=False, linewidth=0.8)
-    ax_top.plot((-d, +d), (-d, +d), transform=ax_top.transAxes, **kw)
-    ax_top.plot((1 - d, 1 + d), (-d, +d), transform=ax_top.transAxes, **kw)
-    ax_bot.plot((-d, +d), (1 - d, 1 + d), transform=ax_bot.transAxes, **kw)
-    ax_bot.plot((1 - d, 1 + d), (1 - d, 1 + d), transform=ax_bot.transAxes, **kw)
+def _plot_panel(ax, values, recovery_times, default_val, xlabel):
+    """Draw one panel on a single axis.
 
-
-def _plot_panel(ax_top, ax_bot, values, recovery_times, default_val, xlabel):
-    """Draw one panel across a (top, bottom) pair of axes with a broken y."""
+    Recovered points are plotted at their recovery-time values; runs that
+    never recovered are marked at the sentinel NEVER_Y inside a shaded
+    'no recovery' band at the top.
+    """
     x_pos = np.arange(len(values))
 
     rec_x, rec_y = [], []
@@ -163,122 +151,93 @@ def _plot_panel(ax_top, ax_bot, values, recovery_times, default_val, xlabel):
             rec_x.append(i)
             rec_y.append(rt)
 
-    # Recovered points live in the bottom axis.
+    # Shaded no-recovery band at the top of the axis.
+    ax.axhspan(NEVER_Y - 5, PLOT_MAX, color="#f5f5f5", zorder=0)
+    ax.axhline(y=NEVER_Y - 5, color="#cccccc",
+               linestyle="--", linewidth=0.8)
+
+    # Recovered line.
     if rec_x:
-        ax_bot.plot(rec_x, rec_y, color=AROLLA_COLOR, marker=AROLLA_MARKER,
-                    markersize=6, linewidth=1.8, zorder=4)
+        ax.plot(rec_x, rec_y, color=AROLLA_COLOR, marker=AROLLA_MARKER,
+                markersize=6, linewidth=1.8, zorder=4)
 
-    # Never-recovered points live in the top axis.
+    # No-recovery markers.
     if never_x:
-        ax_top.scatter(never_x, [NEVER_Y] * len(never_x),
-                       marker=AROLLA_MARKER, s=50, color=AROLLA_COLOR,
-                       zorder=5, edgecolors="white", linewidths=0.5)
+        ax.scatter(never_x, [NEVER_Y] * len(never_x),
+                   marker=AROLLA_MARKER, s=50, color=AROLLA_COLOR,
+                   zorder=5, edgecolors="white", linewidths=0.5)
 
-    # Default-value highlight.
+    # Default-value highlight (vertical dotted line + gold star).
     if default_val in values:
         di = values.index(default_val)
-        for a in (ax_top, ax_bot):
-            a.axvline(x=di, color="#cccccc", linestyle=":",
-                      linewidth=0.8, zorder=1)
+        ax.axvline(x=di, color="#cccccc", linestyle=":",
+                   linewidth=0.8, zorder=1)
         default_rt = recovery_times[di]
-        if default_rt is not None:
-            ax_bot.plot(di, default_rt, marker="*", markersize=14,
-                        color=AROLLA_COLOR, zorder=6,
-                        markeredgecolor="white", markeredgewidth=0.8)
-        else:
-            ax_top.plot(di, NEVER_Y, marker="*", markersize=14,
-                        color=AROLLA_COLOR, zorder=6,
-                        markeredgecolor="white", markeredgewidth=0.8)
+        y_star = default_rt if default_rt is not None else NEVER_Y
+        ax.plot(di, y_star, marker="*", markersize=14,
+                color=AROLLA_COLOR, zorder=6,
+                markeredgecolor="white", markeredgewidth=0.8)
 
-    for a in (ax_top, ax_bot):
-        a.set_xticks(x_pos)
-        a.set_xlim(-0.5, len(values) - 0.5)
-        a.grid(True, axis="y", alpha=0.2, linewidth=0.5)
-    ax_top.set_xticklabels([])
+    ax.set_xticks(x_pos)
     # Rotate 45° with ha="right": each label's right edge anchors at the tick,
     # giving clean diagonal placement. The steeper angle (vs 30°) minimizes
     # the perceived vertical offset between labels of different character widths.
-    ax_bot.set_xticklabels(
+    ax.set_xticklabels(
         [_fmt_val(v) for v in values],
         rotation=45, ha="right", rotation_mode="anchor",
     )
-    ax_bot.set_xlabel(xlabel)
+    ax.set_xlim(-0.5, len(values) - 0.5)
+    ax.set_ylim(-5, PLOT_MAX)
+    ax.grid(True, axis="y", alpha=0.2, linewidth=0.5)
+    ax.set_xlabel(xlabel)
 
 
 def plot_sensitivity(sweep_root: Path, out_path: Path):
-    """Generate the 3-panel sensitivity figure with a broken y-axis."""
+    """Generate the 3-panel sensitivity figure on a single continuous y-axis."""
     _paper_style()
 
-    # 2x3 grid: top row = "no recovery" band (short), bottom row = recovered
-    # region (tall). Height ratio 1:5 collapses the empty middle.
     fig, axes = plt.subplots(
-        2, 3,
+        1, 3,
         figsize=(6.6, 1.8),
-        gridspec_kw={"height_ratios": [1, 5], "hspace": 0.08, "wspace": 0.12},
-        sharex="col",
+        gridspec_kw={"wspace": 0.12},
+        sharey=True,
     )
 
     for col, (sweep_name, xlabel, default_val) in enumerate(PANELS):
-        ax_top = axes[0, col]
-        ax_bot = axes[1, col]
+        ax = axes[col]
 
         sweep_dir = sweep_root / sweep_name
         if not sweep_dir.is_dir():
             print(f"  [skip] {sweep_dir} not found", file=sys.stderr)
-            ax_top.set_visible(False)
-            ax_bot.set_visible(False)
+            ax.set_visible(False)
             continue
 
         values, recovery_times = load_sweep(sweep_dir)
         if not values:
             print(f"  [skip] no data in {sweep_dir}", file=sys.stderr)
-            ax_top.set_visible(False)
-            ax_bot.set_visible(False)
+            ax.set_visible(False)
             continue
 
-        # Shade the "no recovery" region in the top panel.
-        ax_top.axhspan(BREAK_HIGH, PLOT_MAX, color="#f5f5f5", zorder=0)
+        _plot_panel(ax, values, recovery_times, default_val, xlabel)
 
-        _plot_panel(ax_top, ax_bot, values, recovery_times,
-                    default_val, xlabel)
+    axes[0].set_ylabel("Recovery time (s)")
 
-        # Y-limits split across the break.
-        ax_top.set_ylim(BREAK_HIGH, PLOT_MAX)
-        ax_bot.set_ylim(-1, BREAK_LOW)
-
-        # Hide interior spines and the x-ticks on the top axis.
-        ax_top.spines["bottom"].set_visible(False)
-        ax_bot.spines["top"].set_visible(False)
-        ax_top.tick_params(bottom=False)
-
-        # Diagonal break marks at the seam.
-        _draw_break_marks(ax_top, ax_bot)
-
-        # Y-tick labels only on the leftmost column.
-        if col > 0:
-            ax_top.tick_params(labelleft=False)
-            ax_bot.tick_params(labelleft=False)
-
-    # Only show the sentinel tick in the top row.
+    # "No recovery" annotation inside the shaded band (leftmost panel only,
+    # since sharey means the band is visually continuous).
     for col in range(3):
-        axes[0, col].set_yticks([NEVER_Y])
-
-    axes[1, 0].set_ylabel("Recovery time (s)")
-
-    # "No recovery" annotation on every visible top panel.
-    for col in range(3):
-        if axes[0, col].get_visible():
-            axes[0, col].text(
-                0.02, NEVER_Y + 10, "no recovery",
-                va="center", fontsize=10, color="#999999", fontstyle="italic",
-                transform=axes[0, col].get_yaxis_transform(),
+        if axes[col].get_visible():
+            axes[col].text(
+                -0.45, NEVER_Y + (PLOT_MAX - NEVER_Y) / 2,
+                "no recovery",
+                va="center", fontsize=9, color="#999999", fontstyle="italic",
             )
+            break
 
     # Align x-labels across panels. With rotated tick labels of different
     # character widths, each panel's tick-label block has a different height,
     # which pushes xlabels to different y-positions. align_xlabels pins them
     # to a common y.
-    fig.align_xlabels(axes[1, :])
+    fig.align_xlabels(axes[:])
 
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
@@ -305,35 +264,15 @@ def plot_sensitivity_split(sweep_root: Path, out_dir: Path):
             print(f"  [skip] no data in {sweep_dir}", file=sys.stderr)
             continue
 
-        fig, (ax_top, ax_bot) = plt.subplots(
-            2, 1,
-            figsize=(2.6, 1.8),
-            gridspec_kw={"height_ratios": [1, 5], "hspace": 0.08},
-            sharex=True,
-        )
+        fig, ax = plt.subplots(figsize=(2.6, 1.8))
 
-        # Shade the "no recovery" region in the top panel.
-        ax_top.axhspan(BREAK_HIGH, PLOT_MAX, color="#f5f5f5", zorder=0)
+        _plot_panel(ax, values, recovery_times, default_val, xlabel)
 
-        _plot_panel(ax_top, ax_bot, values, recovery_times,
-                    default_val, xlabel)
-
-        ax_top.set_ylim(BREAK_HIGH, PLOT_MAX)
-        ax_bot.set_ylim(-1, BREAK_LOW)
-
-        ax_top.spines["bottom"].set_visible(False)
-        ax_bot.spines["top"].set_visible(False)
-        ax_top.tick_params(bottom=False)
-
-        _draw_break_marks(ax_top, ax_bot)
-
-        ax_top.set_yticks([NEVER_Y])
-        ax_bot.set_ylabel("Recovery time (s)")
-
-        ax_top.text(
-            0.02, NEVER_Y + 10, "no recovery",
-            va="center", fontsize=10, color="#999999", fontstyle="italic",
-            transform=ax_top.get_yaxis_transform(),
+        ax.set_ylabel("Recovery time (s)")
+        ax.text(
+            -0.45, NEVER_Y + (PLOT_MAX - NEVER_Y) / 2,
+            "no recovery",
+            va="center", fontsize=9, color="#999999", fontstyle="italic",
         )
 
         out_path = out_dir / f"{sweep_name}.pdf"
