@@ -126,7 +126,7 @@ def main():
         plotting.plot_generic(x, res_success, 'Server Failure Rate (%)', 'Successful Rate (%)',
                               'Client Count Effect (Success)', output_path, colors=colors_cc, linestyles=linestyles_cc, ylim=success_ylim, legend_loc='best', legend_order=legend_order)
         output_path = os.path.join(output_dir, filename + '_load' + filetype)
-        plotting.plot_generic(x, res_load, 'Server Failure Rate (%)', 'Load (%)',
+        plotting.plot_generic(x, res_load, 'Server Failure Rate (%)', 'Load amplification (%)',
                               'Client Count Effect (Load)', output_path, colors=colors_cc, linestyles=linestyles_cc, ylim=load_ylim, legend_loc='best', legend_order=legend_order)
     
     elif args.scenario == 3:
