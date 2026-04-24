@@ -263,15 +263,19 @@ impl HttpContext for ArollaHttp {
             let tokens_after = bucket.tokens;
             drop(bucket);
             let _ = proxy_wasm::hostcalls::increment_metric(self.metrics.admitted, 1);
-            let _ =
-                proxy_wasm::hostcalls::record_metric(self.metrics.tokens_gauge, tokens_after as u64);
+            let _ = proxy_wasm::hostcalls::record_metric(
+                self.metrics.tokens_gauge,
+                tokens_after as u64,
+            );
             Action::Continue
         } else {
             let tokens_after = bucket.tokens;
             drop(bucket);
             let _ = proxy_wasm::hostcalls::increment_metric(self.metrics.rejected, 1);
-            let _ =
-                proxy_wasm::hostcalls::record_metric(self.metrics.tokens_gauge, tokens_after as u64);
+            let _ = proxy_wasm::hostcalls::record_metric(
+                self.metrics.tokens_gauge,
+                tokens_after as u64,
+            );
             self.send_http_response(
                 self.config.reject_status,
                 vec![("x-arolla-rejected", "1")],
@@ -307,8 +311,10 @@ impl HttpContext for ArollaHttp {
             bucket.deposit(self.config.r, self.config.capacity);
             let tokens_after = bucket.tokens;
             drop(bucket);
-            let _ =
-                proxy_wasm::hostcalls::record_metric(self.metrics.tokens_gauge, tokens_after as u64);
+            let _ = proxy_wasm::hostcalls::record_metric(
+                self.metrics.tokens_gauge,
+                tokens_after as u64,
+            );
         }
         Action::Continue
     }
