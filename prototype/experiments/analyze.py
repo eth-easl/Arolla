@@ -72,6 +72,14 @@ POLICY_MARKERS = {
     "arolla-fairness":    "v",   # inverted triangle
 }
 
+POLICY_LINESTYLES = {
+    "no-control":         (0, (4, 2)),                # long dashes
+    "circuit-breaker":    (0, (1, 1.5)),              # dense dots
+    "envoy-retry-budget": (0, (2, 1.5)),              # short dashes
+    "arolla":             "-",                        # solid (hero)
+    "arolla-fairness":    (0, (5, 1.2, 1, 1.2, 1, 1.2)),  # dash-dot-dot
+}
+
 POLICY_ORDER = ["no-control", "circuit-breaker", "envoy-retry-budget", "arolla", "arolla-fairness"]
 
 
