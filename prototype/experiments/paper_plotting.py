@@ -18,7 +18,9 @@ Examples:
 """
 from __future__ import annotations
 
+import csv
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict
@@ -31,7 +33,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 from analyze import (
     POLICY_ORDER, POLICY_LABELS, POLICY_COLORS, POLICY_COLORS_FILL,
-    POLICY_MARKERS, _CHAIN_SERVICE_ORDER, _CHAIN_SERVICE_COLORS,
+    POLICY_MARKERS, POLICY_LINESTYLES,
+    _CHAIN_SERVICE_ORDER, _CHAIN_SERVICE_COLORS,
     process_policy, _fault_band_x,
 )
 
@@ -104,6 +107,7 @@ def plot_success_rate(runs, experiment, out_path):
             continue
         ax.plot(ts.index, ts.values,
                 color=POLICY_COLORS[policy],
+                linestyle=POLICY_LINESTYLES.get(policy, "-"),
                 label=POLICY_LABELS[policy],
                 linewidth=2.2)
 
@@ -214,6 +218,200 @@ def plot_chain_retry_log(runs, out_path):
 
 
 # ---------------------------------------------------------------------------
+# Retries received at each sidecar (attempt > 1)
+#
+# This complements plot_chain_retry_log, which shows Envoy's
+# upstream_rq_retry counter (mesh-initiated retries only). Under \sysname,
+# that counter is 0 at the frontend because the gateway absorbs client-level
+# retries by 429-rejecting them rather than letting Envoy's retry policy
+# re-dispatch. The metric below measures the full retry pressure arriving
+# at each sidecar — including external client retries — so the Arolla
+# layered-defense story is visible.
+# ---------------------------------------------------------------------------
+
+_AROLLA_ADM_RE = re.compile(r'^arolla_retries_admitted_total\S*\s+(\d+)')
+_AROLLA_REJ_RE = re.compile(r'^arolla_retries_rejected_total\S*\s+(\d+)')
+
+_SERVICE_UPSTREAM_CLUSTER = {
+    "cartservice":
+        "outbound|7070||cartservice.online-boutique.svc.cluster.local",
+    "productcatalogservice":
+        "outbound|3550||productcatalogservice.online-boutique.svc.cluster.local",
+}
+
+
+def _read_arolla_counters(prom_path: Path):
+    """Return (admitted, rejected) from a sidecar's .prom file. (0, 0) if missing."""
+    if not prom_path.exists():
+        return 0, 0
+    adm = rej = 0
+    with prom_path.open() as f:
+        for line in f:
+            m = _AROLLA_ADM_RE.match(line)
+            if m:
+                adm = int(m.group(1))
+                continue
+            m = _AROLLA_REJ_RE.match(line)
+            if m:
+                rej = int(m.group(1))
+    return adm, rej
+
+
+def _count_client_retries(policy_dir: Path) -> int:
+    """Count rows in client_attempts.shard*.csv where attempt > 1."""
+    n = 0
+    for csv_path in sorted(
+        policy_dir.glob("client-metrics/client_attempts.shard*.csv")
+    ):
+        with csv_path.open() as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    if int(row["attempt"]) > 1:
+                        n += 1
+                except (KeyError, ValueError):
+                    continue
+    return n
+
+
+def _read_upstream_rq_retry(prom_path: Path, cluster_name: str) -> int:
+    """Read envoy_cluster_upstream_rq_retry for a specific cluster."""
+    if not prom_path.exists():
+        return 0
+    pat = re.compile(
+        rf'^envoy_cluster_upstream_rq_retry\{{cluster_name="{re.escape(cluster_name)}"\}}\s+(\d+)'
+    )
+    with prom_path.open() as f:
+        for line in f:
+            m = pat.match(line)
+            if m:
+                return int(m.group(1))
+    return 0
+
+
+def compute_retries_received(run_dir: Path) -> Dict[str, Dict[str, int]]:
+    """
+    For each policy under run_dir, count retries (attempt > 1) arriving at
+    each of {frontend, cartservice, productcatalogservice}.
+
+    - For 'arolla' / 'arolla-fairness': use Arolla's own admitted+rejected
+      counters at each sidecar's inbound filter.
+    - For baselines: frontend receives every client-dispatched retry (gateway
+      does not gate); cartservice/productcatalogservice receive the mesh
+      retries dispatched from frontend's outbound (envoy_cluster_upstream_rq_retry).
+    """
+    services = ["frontend", "cartservice", "productcatalogservice"]
+    results: Dict[str, Dict[str, int]] = {}
+    for policy_dir in sorted(run_dir.iterdir()):
+        if not policy_dir.is_dir():
+            continue
+        policy = policy_dir.name
+        if policy not in POLICY_ORDER:
+            continue
+        stats = policy_dir / "sidecar-stats"
+        counts: Dict[str, int] = {}
+        if policy.startswith("arolla"):
+            for svc in services:
+                adm, rej = _read_arolla_counters(stats / f"{svc}.prom")
+                counts[svc] = adm + rej
+        else:
+            counts["frontend"] = _count_client_retries(policy_dir)
+            fe_prom = stats / "frontend.prom"
+            for svc in ["cartservice", "productcatalogservice"]:
+                counts[svc] = _read_upstream_rq_retry(
+                    fe_prom, _SERVICE_UPSTREAM_CLUSTER[svc]
+                )
+        results[policy] = counts
+    return results
+
+
+def write_retries_received_csv(run_dir: Path, out_path: Path):
+    """Dump retries-received counts as a small CSV for post-hoc inspection."""
+    data = compute_retries_received(run_dir)
+    ordered = [p for p in POLICY_ORDER if p in data]
+    with out_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["policy", "frontend", "cartservice", "productcatalogservice"])
+        for policy in ordered:
+            w.writerow([
+                policy,
+                data[policy].get("frontend", 0),
+                data[policy].get("cartservice", 0),
+                data[policy].get("productcatalogservice", 0),
+            ])
+    print(f"  wrote {out_path}")
+
+
+def plot_retries_received(run_dir: Path, out_path: Path):
+    """Bar chart of retries received per service per policy, log scale."""
+    _paper_style()
+    data = compute_retries_received(run_dir)
+    if not data:
+        return
+    ordered = [p for p in POLICY_ORDER if p in data]
+    services = ["frontend", "cartservice", "productcatalogservice"]
+    svc_short = {
+        "frontend": "Frontend",
+        "cartservice": "Cart",
+        "productcatalogservice": "ProductCatalog",
+    }
+
+    n_svc = len(services)
+    n_pol = len(ordered)
+    bar_width = 0.8 / n_pol
+    x = np.arange(n_svc)
+
+    def _fmt(v):
+        if v >= 1_000_000:
+            return f"{v/1e6:.1f}M"
+        if v >= 1_000:
+            return f"{v/1e3:.0f}K"
+        return f"{v:.0f}"
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.8))
+    for i, policy in enumerate(ordered):
+        heights = [max(data[policy].get(svc, 0), 0.1) for svc in services]
+        ax.bar(
+            x + i * bar_width - 0.4 + bar_width / 2,
+            heights,
+            width=bar_width,
+            color=POLICY_COLORS_FILL.get(policy, "lightgray"),
+            edgecolor="none",
+            label=POLICY_LABELS.get(policy, policy),
+        )
+        for j, h in enumerate(heights):
+            real_h = data[policy].get(services[j], 0)
+            if real_h > 0:
+                ax.text(
+                    x[j] + i * bar_width - 0.4 + bar_width / 2,
+                    real_h,
+                    _fmt(real_h),
+                    ha="center",
+                    va="bottom",
+                    fontsize=5,
+                )
+
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels([svc_short.get(s, s) for s in services])
+    ax.set_xlabel("Service")
+    ax.set_ylabel("Retries received")
+    ax.grid(True, axis="y", alpha=0.2, linewidth=0.5)
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.95),
+        ncol=2,
+        frameon=False,
+        handlelength=1.5,
+        columnspacing=1.0,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Latency timeseries (p50 or p99)
 # ---------------------------------------------------------------------------
 
@@ -238,6 +436,7 @@ def plot_latency_ts(runs, experiment, out_path, percentile="p50", log_y=True):
             continue
         ax.plot(ts.index, ts.values,
                 color=POLICY_COLORS[policy],
+                linestyle=POLICY_LINESTYLES.get(policy, "-"),
                 label=POLICY_LABELS[policy],
                 linewidth=2.0)
         any_plotted = True
@@ -400,6 +599,207 @@ def plot_recovery_vs_sweep_paper(
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Recovery-vs-sweep aggregated across multiple sweep runs (with error bars)
+# ---------------------------------------------------------------------------
+
+def plot_recovery_vs_sweep_multirun(
+    parent_dir: Path,
+    out_path: Path,
+    x_label: str = "Load (req/s)",
+    format_x: str = "auto",
+    x_max: float = None,
+    include_policies: list = None,
+    exclude_dir_patterns: list = None,
+):
+    """
+    Aggregate recovery_sec across multiple sweep runs under parent_dir.
+
+    Expected layout:
+      parent_dir/<run_id>/<profile>/<sweep_name>/<x_val>/summary.csv
+
+    For each (policy, x) cell, collects recovery_sec from every run, and
+    plots:
+      - mean (marker + line) across runs where the policy recovered;
+      - a shaded band showing the min-max range across those runs;
+      - a scatter point in the "no recovery" band whenever ANY run at
+        that x failed to recover (whether partial or full failure);
+      - a dashed bridge from the last recovered point to the first x
+        at which no run recovers (the cliff transition).
+
+    Parameters:
+      include_policies: if set, only these policy names are plotted.
+      exclude_dir_patterns: run_dir names containing any of these
+        substrings are skipped.
+    """
+    import pandas as pd
+    _paper_style()
+
+    NEVER_Y = 200
+    PLOT_MAX = 245
+    # Vertical offsets within the no-recovery band, spaced to avoid overlap.
+    arrow_offsets = {
+        "no-control":          1.0,
+        "circuit-breaker":     6.0,
+        "envoy-retry-budget": 11.0,
+        "arolla":             16.0,
+        "arolla-fairness":    21.0,
+    }
+    exclude_dir_patterns = exclude_dir_patterns or []
+
+    # Discover: parent/<run>/<profile>/<sweep>/<x>/summary.csv
+    # {policy: {x_val: [recovery_sec_or_None, ...]}}
+    runs_data: Dict[str, Dict[float, list]] = {}
+    n_runs_seen = 0
+
+    for run_dir in sorted(parent_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        if any(pat in run_dir.name for pat in exclude_dir_patterns):
+            continue
+        sweep_roots = list(run_dir.glob("*/*"))
+        any_rps = False
+        for sweep_root in sweep_roots:
+            if not sweep_root.is_dir():
+                continue
+            val_dirs = [d for d in sweep_root.iterdir()
+                        if d.is_dir() and d.name.replace(".", "", 1).isdigit()]
+            if not val_dirs:
+                continue
+            any_rps = True
+            for val_dir in sorted(val_dirs):
+                summary = val_dir / "summary.csv"
+                if not summary.exists():
+                    continue
+                try:
+                    x_val = float(val_dir.name)
+                except ValueError:
+                    continue
+                try:
+                    df = pd.read_csv(summary)
+                except Exception:
+                    continue
+                for row in df.to_dict("records"):
+                    pol = row.get("policy")
+                    if include_policies and pol not in include_policies:
+                        continue
+                    rec = row.get("recovery_sec")
+                    try:
+                        rec_val = float(rec)
+                        if np.isnan(rec_val):
+                            rec_val = None
+                    except (ValueError, TypeError):
+                        rec_val = None
+                    runs_data.setdefault(pol, {}).setdefault(x_val, []).append(rec_val)
+        if any_rps:
+            n_runs_seen += 1
+
+    if not runs_data:
+        print(f"[warn] no sweep data found under {parent_dir}")
+        return
+
+    x_values = sorted(set(x for pol_data in runs_data.values() for x in pol_data))
+    if x_max is not None:
+        x_values = [x for x in x_values if x <= x_max]
+    if not x_values:
+        return
+
+    ordered = [p for p in POLICY_ORDER if p in runs_data] + \
+              [p for p in runs_data if p not in POLICY_ORDER]
+
+    fig, ax = plt.subplots(figsize=(3.5, 2.8))
+
+    # "No recovery" band
+    ax.axhspan(NEVER_Y - 4, PLOT_MAX, color="#f5f5f5", zorder=0)
+    ax.axhline(y=NEVER_Y - 4, color="#cccccc", linestyle="--", linewidth=0.8)
+
+    for pol in ordered:
+        pol_data = runs_data[pol]
+        xs = [x for x in sorted(pol_data.keys()) if x in x_values]
+
+        line_xs, line_ys = [], []
+        y_min_per_x, y_max_per_x = [], []
+        band_xs = []      # any x where at least one run failed to recover
+        all_fail_xs = []  # x where ALL runs failed (cliff region)
+
+        for x in xs:
+            vals = pol_data[x]
+            recovered = [v for v in vals if v is not None]
+            total = len(vals)
+            n_rec = len(recovered)
+            if n_rec > 0:
+                mean_v = float(np.mean(recovered))
+                line_xs.append(x)
+                line_ys.append(mean_v)
+                y_min_per_x.append(float(np.min(recovered)))
+                y_max_per_x.append(float(np.max(recovered)))
+            else:
+                all_fail_xs.append(x)
+            if n_rec < total:
+                band_xs.append(x)
+
+        marker = POLICY_MARKERS.get(pol, "o")
+        color = POLICY_COLORS.get(pol, "gray")
+        label = POLICY_LABELS.get(pol, pol)
+
+        if line_xs:
+            # Shaded min-max envelope (only when we have >=2 points to interpolate)
+            if len(line_xs) >= 2:
+                ax.fill_between(
+                    line_xs, y_min_per_x, y_max_per_x,
+                    color=color, alpha=0.15, linewidth=0, zorder=2,
+                )
+            # Mean line with markers
+            ax.plot(line_xs, line_ys,
+                    color=color, label=label,
+                    marker=marker, markersize=5, linewidth=1.5, zorder=4)
+        else:
+            ax.plot([], [], color=color, label=label,
+                    marker=marker, markersize=5, linewidth=1.5)
+
+        # Non-recovery markers at NEVER_Y band (any x with >=1 failed run)
+        if band_xs:
+            offset = arrow_offsets.get(pol, 0)
+            band_ys = [NEVER_Y + offset] * len(band_xs)
+            ax.scatter(band_xs, band_ys,
+                       marker=marker, s=40, color=color, zorder=5)
+
+        # Dashed bridge from last recovered point to the cliff (first x
+        # where ALL runs fail) — shows the transition from "recovers" to
+        # "never recovers at all".
+        if line_xs and all_fail_xs:
+            last_rec_x = line_xs[-1]
+            later_cliff = [f for f in all_fail_xs if f > last_rec_x]
+            if later_cliff:
+                first_cliff = min(later_cliff)
+                offset = arrow_offsets.get(pol, 0)
+                ax.plot([last_rec_x, first_cliff],
+                        [line_ys[-1], NEVER_Y + offset],
+                        color=color, linestyle="--", linewidth=1.2,
+                        alpha=0.5, zorder=3)
+
+    ax.text(x_values[0], NEVER_Y + 25, "no recovery", va="center", fontsize=10,
+            color="#999999", fontstyle="italic")
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("Recovery time (s)")
+    ax.set_xticks(x_values)
+    if format_x == "auto":
+        ax.set_xticklabels(
+            [f"{v/1000:.1f}k" if v >= 1000 else str(int(v)) for v in x_values]
+        )
+    ax.set_ylim(-1, PLOT_MAX)
+    ax.grid(True, alpha=0.2, linewidth=0.5)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 0.95),
+              ncol=2, frameon=False,
+              handlelength=1.5, columnspacing=1.0)
+
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path} (aggregated across {n_runs_seen} runs)")
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +1125,41 @@ def main():
         plot_recovery_vs_sweep_paper(sweep_root, out_path, x_label=x_label, format_x=fmt, x_max=xmax)
         return
 
+    # --- Multirun sweep mode (aggregate across multiple sweep runs, with error bars) ---
+    multirun_modes = {
+        "--sweep-rps-multirun":            ("Load (req/s)", "auto", "recovery-vs-load-multirun.pdf"),
+        "--sweep-failure-rate-multirun":   ("Failure rate (%)", "raw", "recovery-vs-failure-rate-multirun.pdf"),
+        "--sweep-fault-duration-multirun": ("Fault duration (s)", "raw", "recovery-vs-fault-duration-multirun.pdf"),
+    }
+    if sys.argv[1] in multirun_modes:
+        x_label, fmt, default_name = multirun_modes[sys.argv[1]]
+        remaining = sys.argv[2:]
+        xmax = None
+        include = None
+        exclude_dirs = None
+        if "--x-max" in remaining:
+            idx = remaining.index("--x-max")
+            xmax = float(remaining[idx + 1])
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        if "--include" in remaining:
+            idx = remaining.index("--include")
+            include = remaining[idx + 1].split(",")
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        if "--exclude-dir" in remaining:
+            idx = remaining.index("--exclude-dir")
+            exclude_dirs = remaining[idx + 1].split(",")
+            remaining = remaining[:idx] + remaining[idx + 2:]
+        parent_dir = Path(remaining[0])
+        out_path = Path(remaining[1]) if len(remaining) > 1 else parent_dir / default_name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"multirun sweep figure → {out_path}")
+        plot_recovery_vs_sweep_multirun(
+            parent_dir, out_path, x_label=x_label, format_x=fmt,
+            x_max=xmax, include_policies=include,
+            exclude_dir_patterns=exclude_dirs,
+        )
+        return
+
     # --- Overhead mode ---
     if sys.argv[1] == "--overhead":
         remaining = sys.argv[2:]
@@ -819,6 +1254,8 @@ def main():
     print(f"paper figures → {out_dir}/")
     plot_success_rate(runs, experiment, out_dir / "success-rate.pdf")
     plot_chain_retry_log(runs, out_dir / "chain-retry-log.pdf")
+    plot_retries_received(run_dir, out_dir / "retries-received-log.pdf")
+    write_retries_received_csv(run_dir, out_dir / "retries-received.csv")
     plot_latency_ts(runs, experiment, out_dir / "latency-ts-p50-log.pdf", "p50", log_y=True)
     plot_latency_ts(runs, experiment, out_dir / "latency-ts-p50-linear.pdf", "p50", log_y=False)
     plot_latency_ts(runs, experiment, out_dir / "latency-ts-p99-log.pdf", "p99", log_y=True)
