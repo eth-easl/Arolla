@@ -18,25 +18,60 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from matplotlib_safe import configure_matplotlib
+
+configure_matplotlib()
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from simulator.config.loader import ConfigLoader
 from simulator.config.schema import ExperimentConfig
 from simulator.metrics.collector import Metrics
 from simulator.policies.server_retry_budget import GlobalRetryBudget
-from simulator.rl.random_scenario_env import token_bucket_indices_from_physical
+from simulator.rl.random_scenario_env import (
+    RandomScenarioSimEnv,
+    build_observation_vector,
+    stabilize_window_observation,
+    token_bucket_indices_from_physical,
+)
 from simulator.utils.time import s_to_ns
 
 REFILL_RATE_MAP = [5, 15, 30, 60, 90]
 BUCKET_CAPACITY_MAP = [5, 10, 20, 50, 80]
+# Tokens added per successful attempt for the hybrid (3-knob) env. Kept in sync
+# with EVENT_REWARD_MAP in simulator.rl.hybrid_metastable_env; duplicated here
+# so this plotting module stays independent of the RL env package.
+EVENT_REWARD_MAP = [0.0, 0.05, 0.15, 0.30, 0.60]
+
+
+def _load_obs_normalizer(model_path: str, yaml_path: str, decision_interval_s: float) -> VecNormalize:
+    """Load the saved VecNormalize stats so inference uses normalized observations."""
+    vecnorm_path = Path(model_path).resolve().parent / "vecnormalize_stats.pkl"
+    if not vecnorm_path.exists():
+        raise FileNotFoundError(
+            f"Missing VecNormalize stats at {vecnorm_path}. "
+            "This model was trained with normalized observations, so evaluation "
+            "must load the matching stats."
+        )
+
+    def make_env():
+        return RandomScenarioSimEnv(yaml_path, decision_interval_s=decision_interval_s)
+
+    venv = DummyVecEnv([make_env])
+    venv = VecNormalize.load(str(vecnorm_path), venv)
+    venv.training = False
+    venv.norm_reward = False
+    return venv
 
 
 # Scenario runners
@@ -49,7 +84,7 @@ def _build_and_drive(config: ExperimentConfig):
     for wl, client in zip(workloads, clients):
         wl.drive(sim, lambda s, c=client: c.start_request(s))
 
-    episode_end = s_to_ns(workloads[0].duration_s)
+    episode_end = max(s_to_ns(workload.duration_s) for workload in workloads)
     return sim, clients, service, workloads, episode_end
 
 
@@ -78,6 +113,110 @@ def run_static_budget(yaml_path: str, seed=42):
     return clients
 
 
+def run_static_budget_with_override(
+    yaml_path: str, refill_rate: int, bucket_capacity: int, seed: int = 42
+):
+    """Run the scenario with the bucket overridden to ``(refill_rate, bucket_capacity)``.
+
+    Used by ``run_best_static_budget`` to sweep the RL's action grid and find
+    the best single static setting a deployer could have picked. We deep-copy
+    the YAML config and replace ``global_retry_budget`` before building so the
+    override is active from the very first request (unlike a mid-episode call
+    to ``service.update_token_bucket``, which is what the RL agent does).
+    """
+    config = ConfigLoader.load_from_file(yaml_path)
+    service_template = config.services[0]
+    if service_template.global_retry_budget is None:
+        raise ValueError(
+            "Cannot sweep static budget for a scenario with no global_retry_budget "
+            "defined. Add a placeholder budget to the YAML first."
+        )
+    budget_cfg = service_template.global_retry_budget.model_copy(
+        update={"target_rps": int(refill_rate), "max_burst": int(bucket_capacity)}
+    )
+    new_service = service_template.model_copy(update={"global_retry_budget": budget_cfg})
+    config = config.model_copy(update={"services": [new_service], "seed": seed})
+
+    sim, clients, service, _, _ = _build_and_drive(config)
+    sim.run()
+    return clients
+
+
+def run_best_static_budget(
+    yaml_path: str,
+    fault_windows,
+    seed: int = 42,
+    refill_grid=None,
+    capacity_grid=None,
+    verbose: bool = False,
+):
+    """Sweep the RL's action grid and return clients for the best static setting.
+
+    Returns ``(best_clients, best_choice, all_results)`` where:
+
+    - ``best_clients`` is the list of simulated clients for the chosen setting,
+      ready to feed into ``compute_metrics``.
+    - ``best_choice`` is ``{"refill_rate": int, "bucket_capacity": int}``.
+    - ``all_results`` is a list of per-cell dicts for diagnostics/plotting.
+
+    The "best" cell is picked by success rate during the fault phase (primary),
+    with load amplification as a tiebreaker. Using the RL's *own* grid means
+    this is the tightest apples-to-apples static upper bound: any edge the RL
+    shows over this curve is attributable to being non-stationary, not to
+    picking a finer static value than the RL could have picked itself.
+    """
+    refill_grid = list(refill_grid if refill_grid is not None else REFILL_RATE_MAP)
+    capacity_grid = list(capacity_grid if capacity_grid is not None else BUCKET_CAPACITY_MAP)
+
+    all_results = []
+    best = None
+    for refill in refill_grid:
+        for capacity in capacity_grid:
+            clients = run_static_budget_with_override(
+                yaml_path, refill_rate=refill, bucket_capacity=capacity, seed=seed
+            )
+            metrics = compute_metrics(clients, fault_windows, label="__sweep__")
+            cell = {
+                "refill_rate": int(refill),
+                "bucket_capacity": int(capacity),
+                "sr_fault_agg": metrics["sr_fault_agg"],
+                "load_amp": metrics["load_amp"],
+                "retry_eff": metrics["retry_eff"],
+                "avg_recovery": metrics["avg_recovery"],
+                "p99": metrics["p99"],
+            }
+            all_results.append(cell)
+            if verbose:
+                sr = cell["sr_fault_agg"]
+                amp = cell["load_amp"]
+                print(
+                    f"  sweep (refill={refill:>2}, cap={capacity:>2}): "
+                    f"sr_fault={sr:.4f}, load_amp={amp:.3f}"
+                )
+
+            # Rank by (sr_fault_agg desc, load_amp asc). NaNs sort to the bottom.
+            sr_key = cell["sr_fault_agg"]
+            if np.isnan(sr_key):
+                sr_key = -np.inf
+            amp_key = cell["load_amp"]
+            if np.isnan(amp_key):
+                amp_key = np.inf
+            rank_key = (-sr_key, amp_key)
+
+            if best is None or rank_key < best["rank_key"]:
+                best = {
+                    "rank_key": rank_key,
+                    "clients": clients,
+                    "choice": {
+                        "refill_rate": int(refill),
+                        "bucket_capacity": int(capacity),
+                    },
+                }
+
+    assert best is not None, "Best static sweep produced no cells (empty grid?)"
+    return best["clients"], best["choice"], all_results
+
+
 def run_rl_agent(yaml_path: str, model_path: str,
                  decision_interval_s: float = 2.0, seed=42):
     """Run with the RL agent dynamically tuning the token bucket."""
@@ -86,17 +225,19 @@ def run_rl_agent(yaml_path: str, model_path: str,
 
     sim, clients, service, workloads, episode_end = _build_and_drive(config)
     decision_interval_ns = s_to_ns(decision_interval_s)
+    queue_capacity = service.cfg.queue_capacity or 1
 
     model = PPO.load(model_path)
+    obs_normalizer = _load_obs_normalizer(model_path, yaml_path, decision_interval_s)
 
     actions_history = []
 
     prev_success_rate = 1.0
-    prev_error_rate = 0.0
     prev_retry_ratio = 0.0
-
-    next_time = decision_interval_ns
-    sim.run(until=next_time)
+    prev_queue_util = 0.0
+    timeout_cfg = config.services[0].timeout
+    attempt_timeout_ms = float(timeout_cfg.attempt_ms) if timeout_cfg and timeout_cfg.attempt_ms else 50.0
+    next_time = 0
 
     limiter = service.cfg.load_limiter
     if isinstance(limiter, GlobalRetryBudget):
@@ -114,37 +255,34 @@ def run_rl_agent(yaml_path: str, model_path: str,
         obs_dict = service.live_buffer.get_observation(
             sim.timestep, decision_interval_ns
         )
+        obs_dict = stabilize_window_observation(
+            obs_dict,
+            fallback_success_rate=prev_success_rate,
+            fallback_retry_ratio=prev_retry_ratio,
+            fallback_queue_util=prev_queue_util,
+            queue_capacity=queue_capacity,
+        )
 
-        delta_success = obs_dict["success_rate"] - prev_success_rate
-        delta_error = obs_dict["error_rate"] - prev_error_rate
-        delta_retry = obs_dict["retry_ratio"] - prev_retry_ratio
-
+        obs = build_observation_vector(
+            obs_dict=obs_dict,
+            queue_capacity=queue_capacity,
+            attempt_timeout_ms=attempt_timeout_ms,
+            decision_interval_ns=decision_interval_ns,
+            prev_success_rate=prev_success_rate,
+            prev_retry_ratio=prev_retry_ratio,
+            prev_queue_util=prev_queue_util,
+            bucket_balance=float(limiter.balance) if isinstance(limiter, GlobalRetryBudget) else 0.0,
+            refill_rate=int(limiter.refill_rate) if isinstance(limiter, GlobalRetryBudget) else 1,
+            bucket_capacity=int(limiter.max_tokens) if isinstance(limiter, GlobalRetryBudget) else 1,
+            current_refill_idx=current_refill_idx,
+            current_capacity_idx=current_capacity_idx,
+        )
         prev_success_rate = obs_dict["success_rate"]
-        prev_error_rate = obs_dict["error_rate"]
         prev_retry_ratio = obs_dict["retry_ratio"]
+        prev_queue_util = obs_dict["queue_avg"] / queue_capacity
 
-        obs = np.array([
-            obs_dict["success_rate"],
-            obs_dict["error_rate"],
-            obs_dict["retry_ratio"],
-            obs_dict["p50"],
-            obs_dict["p99"],
-            obs_dict["queue_avg"],
-            obs_dict["total_requests"],
-            obs_dict["success"],
-            obs_dict["failure"],
-            obs_dict["retries"],
-            obs_dict["fail_queue_full"],
-            obs_dict["fail_deadline"],
-            obs_dict["fail_server"],
-            delta_success,
-            delta_error,
-            delta_retry,
-            float(current_refill_idx) / 4.0,
-            float(current_capacity_idx) / 4.0,
-        ], dtype=np.float32)
-
-        action, _ = model.predict(obs, deterministic=True)
+        normalized_obs = obs_normalizer.normalize_obs(obs[None, :])[0]
+        action, _ = model.predict(normalized_obs, deterministic=True)
 
         current_refill_idx = int(action[0])
         current_capacity_idx = int(action[1])
@@ -155,6 +293,7 @@ def run_rl_agent(yaml_path: str, model_path: str,
             refill_rate=refill_rate,
             bucket_capacity=bucket_capacity,
         )
+        limiter = service.cfg.load_limiter
 
         actions_history.append({
             "time_s": sim.timestep / 1e9,
@@ -162,10 +301,11 @@ def run_rl_agent(yaml_path: str, model_path: str,
             "bucket_capacity": bucket_capacity,
         })
 
-        next_time += decision_interval_ns
-        sim.run(until=min(next_time, episode_end))
+        next_time = min(next_time + decision_interval_ns, episode_end)
+        sim.run(until=next_time)
 
     sim.run()
+    obs_normalizer.close()
     return clients, pd.DataFrame(actions_history)
 
 # Fault-window helpers
@@ -348,15 +488,29 @@ def print_comparison(results, fault_windows):
 
 
 def plot_comparison(results, fault_windows, rl_actions_df=None,
-                    save_path="eval_comparison.png"):
+                    save_path="eval_comparison.png", show_plot=True):
     """Time-series comparison plot with 4 panels."""
 
-    n_panels = 5 if rl_actions_df is not None and not rl_actions_df.empty else 4
+    has_rl_actions = rl_actions_df is not None and not rl_actions_df.empty
+    # Hybrid (3-knob) agents emit an extra event_reward column; when present,
+    # we add a dedicated 6th panel for it instead of cramming a third axis
+    # onto panel 5 (which already twin-axes refill rate and bucket capacity).
+    has_event_reward = has_rl_actions and "event_reward" in rl_actions_df.columns
+    if has_event_reward:
+        n_panels = 6
+    elif has_rl_actions:
+        n_panels = 5
+    else:
+        n_panels = 4
     fig, axes = plt.subplots(n_panels, 1, figsize=(14, 4 * n_panels), sharex=True)
 
     styles = {
         "No Budget":     ("#d32f2f", "--", 1.8),
         "Static Budget": ("gray",    "-",  2.0),
+        # "Best Static" is the upper bound over the RL's own action grid.
+        # Drawn dotted to visually distinguish it from the YAML-static line
+        # while keeping it close in hue so the eye groups the two statics.
+        "Best Static":   ("#455A64", ":",  2.0),
         "RL Agent":      ("#2e7d32", "-",  2.5),
     }
 
@@ -414,8 +568,8 @@ def plot_comparison(results, fault_windows, rl_actions_df=None,
     axes[3].set_title("Retry Efficiency (successful retries / total retries)")
     axes[3].legend()
 
-    # -- Panel 5 (optional): RL Agent Actions --------------------------------
-    if n_panels == 5:
+    # -- Panel 5 (optional): RL Agent Actions (refill rate + bucket capacity) --
+    if has_rl_actions:
         ax_left = axes[4]
         ax_right = ax_left.twinx()
         ax_left.step(rl_actions_df["time_s"], rl_actions_df["refill_rate"],
@@ -431,6 +585,21 @@ def plot_comparison(results, fault_windows, rl_actions_df=None,
         ax_left.legend(lines_l + lines_r, labels_l + labels_r, loc="upper right")
         axes[4].set_title("RL Agent Actions")
 
+    # -- Panel 6 (hybrid only): event-reward knob ----------------------------
+    # The hybrid (3-knob) agent also controls how many tokens are added to the
+    # retry bucket per successful attempt. Plot it on its own axis so the y-scale
+    # (0.0–0.60) doesn't get compressed next to the ~90-rps refill rate.
+    if has_event_reward:
+        ax_event = axes[5]
+        ax_event.step(
+            rl_actions_df["time_s"], rl_actions_df["event_reward"],
+            where="post", color="#FF9800", linewidth=2, label="Event Reward",
+        )
+        ax_event.set_ylabel("Event Reward (tokens/success)", color="#FF9800")
+        ax_event.set_yticks(EVENT_REWARD_MAP)
+        ax_event.set_title("RL Agent Actions — Event-Based Refill")
+        ax_event.legend(loc="upper right")
+
     axes[-1].set_xlabel("Time (s)")
 
     for name, start, end, color in fault_windows:
@@ -443,7 +612,130 @@ def plot_comparison(results, fault_windows, rl_actions_df=None,
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     print(f"\nSaved plot to {save_path}")
-    plt.show()
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def _json_ready(value):
+    if isinstance(value, dict):
+        return {k: _json_ready(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, pd.DataFrame):
+        return value.to_dict(orient="records")
+    return value
+
+
+def save_metrics_artifacts(results, rl_actions_df, fault_windows, output_dir: Path) -> None:
+    """Save scenario metrics and time series under output_dir."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_rows = []
+    per_client_rows = []
+    details = {
+        "fault_windows": _json_ready(fault_windows),
+        "variants": [],
+    }
+
+    for result in results:
+        summary_rows.append({
+            "label": result["label"],
+            "sr_fault_agg": result["sr_fault_agg"],
+            "load_amp": result["load_amp"],
+            "retry_eff": result["retry_eff"],
+            "avg_recovery": result["avg_recovery"],
+            "p50": result["p50"],
+            "p95": result["p95"],
+            "p99": result["p99"],
+        })
+
+        for client_name, sr in result["sr_fault_per_client"].items():
+            per_client_rows.append({
+                "label": result["label"],
+                "client": client_name,
+                "sr_fault": sr,
+                "retry_share": result["retry_share"].get(client_name, 0.0),
+            })
+
+        details["variants"].append({
+            "label": result["label"],
+            "metrics": _json_ready({
+                "sr_fault_agg": result["sr_fault_agg"],
+                "sr_fault_per_client": result["sr_fault_per_client"],
+                "load_amp": result["load_amp"],
+                "retry_eff": result["retry_eff"],
+                "retry_share": result["retry_share"],
+                "recovery_times": result["recovery_times"],
+                "avg_recovery": result["avg_recovery"],
+                "p50": result["p50"],
+                "p95": result["p95"],
+                "p99": result["p99"],
+            }),
+        })
+
+        ts_path = output_dir / f"{result['label'].lower().replace(' ', '_')}_timeseries.csv"
+        result["ts_df"].to_csv(ts_path, index=False)
+
+    pd.DataFrame(summary_rows).to_csv(output_dir / "summary.csv", index=False)
+    pd.DataFrame(per_client_rows).to_csv(output_dir / "per_client_metrics.csv", index=False)
+    rl_actions_df.to_csv(output_dir / "rl_actions.csv", index=False)
+    (output_dir / "details.json").write_text(json.dumps(_json_ready(details), indent=2))
+
+
+def evaluate_scenario(
+    model_path: str,
+    yaml_path: str,
+    seed: int = 42,
+    plot_path: str | None = None,
+    artifacts_dir: str | None = None,
+    print_table: bool = True,
+    show_plot: bool = True,
+):
+    """Run no-budget/static/RL variants and optionally save outputs."""
+    fault_windows = detect_fault_windows(yaml_path)
+
+    print(f"Scenario : {yaml_path}")
+    print(f"Model    : {model_path}")
+    print(f"Seed     : {seed}")
+    print()
+
+    print("[1/3] Running scenario WITHOUT budget …")
+    nb_clients = run_no_budget(yaml_path, seed=seed)
+
+    print("[2/3] Running scenario with STATIC budget …")
+    st_clients = run_static_budget(yaml_path, seed=seed)
+
+    print("[3/3] Running scenario with RL AGENT …")
+    rl_clients, rl_actions = run_rl_agent(yaml_path, model_path, seed=seed)
+
+    results = [
+        compute_metrics(nb_clients, fault_windows, "No Budget"),
+        compute_metrics(st_clients, fault_windows, "Static Budget"),
+        compute_metrics(rl_clients, fault_windows, "RL Agent"),
+    ]
+
+    if print_table:
+        print_comparison(results, fault_windows)
+
+    if plot_path is not None:
+        plot_comparison(
+            results,
+            fault_windows,
+            rl_actions_df=rl_actions,
+            save_path=plot_path,
+            show_plot=show_plot,
+        )
+
+    if artifacts_dir is not None:
+        save_metrics_artifacts(results, rl_actions, fault_windows, Path(artifacts_dir))
+
+    return results, rl_actions, fault_windows
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -458,35 +750,11 @@ if __name__ == "__main__":
                         help="Output plot filename")
     args = parser.parse_args()
 
-    yaml_path = args.yaml
-    fault_windows = detect_fault_windows(yaml_path)
-
-    print(f"Scenario : {yaml_path}")
-    print(f"Model    : {args.model}")
-    print(f"Seed     : {args.seed}")
-    print()
-
-    # --- Run 1: No budget ---
-    print("[1/3] Running scenario WITHOUT budget …")
-    nb_clients = run_no_budget(yaml_path, seed=args.seed)
-
-    # --- Run 2: Static budget ---
-    print("[2/3] Running scenario with STATIC budget …")
-    st_clients = run_static_budget(yaml_path, seed=args.seed)
-
-    # --- Run 3: RL agent ---
-    print("[3/3] Running scenario with RL AGENT …")
-    rl_clients, rl_actions = run_rl_agent(yaml_path, args.model, seed=args.seed)
-
-    # --- Compute metrics ---
-    results = [
-        compute_metrics(nb_clients, fault_windows, "No Budget"),
-        compute_metrics(st_clients, fault_windows, "Static Budget"),
-        compute_metrics(rl_clients, fault_windows, "RL Agent"),
-    ]
-
-    # --- Output ---
-    print_comparison(results, fault_windows)
-    plot_comparison(results, fault_windows,
-                    rl_actions_df=rl_actions,
-                    save_path=args.output)
+    evaluate_scenario(
+        model_path=args.model,
+        yaml_path=args.yaml,
+        seed=args.seed,
+        plot_path=args.output,
+        print_table=True,
+        show_plot=True,
+    )
