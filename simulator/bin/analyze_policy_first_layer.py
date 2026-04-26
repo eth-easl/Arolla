@@ -27,27 +27,10 @@ import torch.nn as nn
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+from simulator.rl.random_scenario_env import RandomScenarioSimEnv
+
 # Must match observation space from simulator.rl.random_scenario_env.RandomScenarioSimEnv
-FEATURE_NAMES = [
-    "success_rate",
-    "error_rate",
-    "retry_ratio",
-    "p50",
-    "p99",
-    "queue_avg",
-    "total_requests",
-    "success",
-    "failure",
-    "retries",
-    "fail_queue_full",
-    "fail_deadline",
-    "fail_server",
-    "delta_success",
-    "delta_error",
-    "delta_retry",
-    "refill_idx_norm",
-    "capacity_idx_norm",
-]
+FEATURE_NAMES = RandomScenarioSimEnv.OBSERVATION_FEATURES
 
 
 def _find_first_linear(module: nn.Module) -> nn.Linear | None:

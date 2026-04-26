@@ -24,8 +24,9 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize, sync_envs_normalization
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, sync_envs_normalization
 
+from run_benchmarks import run_benchmark_suite
 from simulator.rl.random_scenario_env import RandomScenarioSimEnv
 
 
@@ -78,6 +79,34 @@ def make_env(rank: int):
     return _init
 
 
+def make_eval_vec_env(vecnorm_path: str):
+    """Load the saved normalization stats for deterministic evaluation."""
+    env = DummyVecEnv([make_env(999)])
+    env = VecNormalize.load(vecnorm_path, env)
+    env.training = False
+    env.norm_reward = False
+    return env
+
+
+def write_training_spec(run_dir: Path) -> None:
+    """Save the action/observation/reward setup used for this training run."""
+    spec_path = run_dir / "training_spec.txt"
+    lines = [
+        "RandomScenarioSimEnv training spec",
+        "",
+        f"YAML template: {YAML_PATH}",
+        f"Decision interval: 2.0s",
+        "",
+        RandomScenarioSimEnv.observation_space_description(),
+        "",
+        RandomScenarioSimEnv.action_space_description(),
+        "",
+        RandomScenarioSimEnv.reward_function_description(),
+        "",
+    ]
+    spec_path.write_text("\n".join(lines))
+
+
 def plot_episode(history: list, save_path: str = "random_agent_episode.png"):
     """Plot metrics and actions from one episode of the trained agent."""
     df = pd.DataFrame(history)
@@ -107,13 +136,13 @@ def plot_episode(history: list, save_path: str = "random_agent_episode.png"):
     # Panel 4: Agent action – refill rate
     axes[3].step(df["time_s"], df["action_refill_rate"], where="post", color="#2196F3", linewidth=2)
     axes[3].set_ylabel("Refill Rate (rps)")
-    axes[3].set_yticks([5, 15, 30, 60, 120])
+    axes[3].set_yticks([5, 15, 30, 60, 90])
     axes[3].set_title("Agent Action: Token Bucket Refill Rate")
 
     # Panel 5: Agent action – bucket capacity
     axes[4].step(df["time_s"], df["action_bucket_capacity"], where="post", color="#9C27B0", linewidth=2)
     axes[4].set_ylabel("Bucket Capacity")
-    axes[4].set_yticks([5, 10, 20, 50, 100])
+    axes[4].set_yticks([5, 10, 20, 50, 80])
     axes[4].set_xlabel("Time (s)")
     axes[4].set_title("Agent Action: Token Bucket Capacity")
 
@@ -209,6 +238,7 @@ def train(total_timesteps: int) -> Path:
 
     model.save(model_path)
     train_env.save(vecnorm_path)
+    write_training_spec(run_dir)
     print(f"\nModel saved to {model_path}.zip")
     print(f"Normalisation stats saved to {vecnorm_path}")
 
@@ -223,15 +253,18 @@ def evaluate_and_plot(run_dir: Path):
     """Load trained model from a run directory, run one episode, and plot results."""
 
     model_path = str(run_dir / "model")
+    vecnorm_path = str(run_dir / "vecnormalize_stats.pkl")
     eval_log_dir = str(run_dir / "eval_logs")
     plot_dir = run_dir / "plots"
     plot_dir.mkdir(exist_ok=True)
 
     print(f"\nLoading model from: {run_dir.name}")
 
-    # Single (non-vectorised) env for easy history access
+    # Step a raw env so episode history is preserved, and use VecNormalize
+    # only to transform observations before model.predict().
     env = RandomScenarioSimEnv(YAML_PATH, decision_interval_s=2.0)
-    model = PPO.load(model_path, env=env)
+    obs_normalizer = make_eval_vec_env(vecnorm_path)
+    model = PPO.load(model_path, env=obs_normalizer)
 
     print("Running evaluation episode …")
     obs, _ = env.reset(seed=12345)
@@ -239,9 +272,10 @@ def evaluate_and_plot(run_dir: Path):
     steps = 0
 
     while True:
-        action, _ = model.predict(obs, deterministic=True)
+        normalized_obs = obs_normalizer.normalize_obs(obs[None, :])[0]
+        action, _ = model.predict(normalized_obs, deterministic=True)
         obs, reward, done, _, info = env.step(action)
-        total_reward += reward
+        total_reward += float(reward)
         steps += 1
         if done:
             break
@@ -249,7 +283,8 @@ def evaluate_and_plot(run_dir: Path):
     print(f"Episode: {steps} steps, total reward: {total_reward:.2f}")
 
     # Summary table
-    df = pd.DataFrame(env.history)
+    history = env.history
+    df = pd.DataFrame(history)
     print("\n" + "=" * 50)
     print("EPISODE SUMMARY")
     print("=" * 50)
@@ -259,8 +294,10 @@ def evaluate_and_plot(run_dir: Path):
     print(f"  Mean P99 latency  : {df['p99'].mean():.1f} ns")
     print(f"  Total reward      : {total_reward:.2f}")
 
-    plot_episode(env.history, save_path=str(plot_dir / "episode.png"))
+    plot_episode(history, save_path=str(plot_dir / "episode.png"))
     plot_eval_results(log_dir=eval_log_dir, save_path=str(plot_dir / "eval_reward.png"))
+    env.close()
+    obs_normalizer.close()
 
 # CLI
 if __name__ == "__main__":
@@ -280,3 +317,5 @@ if __name__ == "__main__":
         print(f"Using latest run: {run_dir.name}")
 
     evaluate_and_plot(run_dir)
+    benchmark_dir = run_benchmark_suite(str(run_dir / "model"))
+    print(f"Saved benchmark suite to: {benchmark_dir}")

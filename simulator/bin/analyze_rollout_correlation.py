@@ -28,34 +28,35 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from simulator.rl.random_scenario_env import RandomScenarioSimEnv
 
 # Must match RandomScenarioSimEnv._get_obs() order
-FEATURE_NAMES = [
-    "success_rate",
-    "error_rate",
-    "retry_ratio",
-    "p50",
-    "p99",
-    "queue_avg",
-    "total_requests",
-    "success",
-    "failure",
-    "retries",
-    "fail_queue_full",
-    "fail_deadline",
-    "fail_server",
-    "delta_success",
-    "delta_error",
-    "delta_retry",
-    "refill_idx_norm",
-    "capacity_idx_norm",
-]
+FEATURE_NAMES = RandomScenarioSimEnv.OBSERVATION_FEATURES
 
 YAML_PATH = str(
     Path(__file__).parent.parent / "experiments" / "yaml" / "rl" / "token_bucket.yaml"
 )
+
+
+def _load_obs_normalizer(model_path: str, decision_interval_s: float) -> VecNormalize:
+    """Load saved VecNormalize stats so rollout analysis uses training-time scaling."""
+    vecnorm_path = Path(model_path).resolve().parent / "vecnormalize_stats.pkl"
+    if not vecnorm_path.exists():
+        raise FileNotFoundError(
+            f"Missing VecNormalize stats at {vecnorm_path}. "
+            "Rollout analysis for trained models must use the matching normalization."
+        )
+
+    def make_env():
+        return RandomScenarioSimEnv(YAML_PATH, decision_interval_s=decision_interval_s)
+
+    venv = DummyVecEnv([make_env])
+    venv = VecNormalize.load(str(vecnorm_path), venv)
+    venv.training = False
+    venv.norm_reward = False
+    return venv
 
 
 def _spearman_corr_with_reward(df: pd.DataFrame, feature_cols: list[str], reward_col: str) -> pd.Series:
@@ -101,8 +102,10 @@ def collect_rollouts(
     """
     env = RandomScenarioSimEnv(YAML_PATH, decision_interval_s=decision_interval_s)
     model = None
+    obs_normalizer = None
     if model_path:
         model = PPO.load(model_path, env=env)
+        obs_normalizer = _load_obs_normalizer(model_path, decision_interval_s)
 
     obs_list: list[np.ndarray] = []
     reward_list: list[float] = []
@@ -116,11 +119,15 @@ def collect_rollouts(
             if model is None:
                 action = env.action_space.sample()
             else:
-                action, _ = model.predict(obs, deterministic=deterministic)
+                normalized_obs = obs_normalizer.normalize_obs(obs[None, :])[0]
+                action, _ = model.predict(normalized_obs, deterministic=deterministic)
             obs, reward, done, _, _ = env.step(action)
             obs_list.append(obs_before)
             reward_list.append(float(reward))
             action_list.append(np.asarray(action, dtype=np.int64).copy())
+
+    if obs_normalizer is not None:
+        obs_normalizer.close()
 
     return (
         np.stack(obs_list, axis=0),

@@ -75,6 +75,7 @@ class LiveMetricsBuffer:
         lat_arr = np.array(latencies, dtype=np.float64) / MS_TO_NS if latencies else np.array([0.0])
 
         return {
+            "has_data": True,
             "total_requests": total,
             "success": success_count,
             "failure": failure_count,
@@ -93,10 +94,11 @@ class LiveMetricsBuffer:
     @staticmethod
     def _empty_observation() -> Dict:
         return {
+            "has_data": False,
             "total_requests": 0,
             "success": 0,
             "failure": 0,
-            "success_rate": 1.0,
+            "success_rate": 0.0,
             "error_rate": 0.0,
             "retries": 0,
             "retry_ratio": 0.0,

@@ -48,6 +48,12 @@ class LoadLimiterMiddleware(Middleware):
         if ctx.is_successful:
             next_fn(ctx)
             return
+
+        # Only consult the limiter when an earlier middleware already decided
+        # this failure should turn into a retry.
+        if not ctx.should_retry:
+            next_fn(ctx)
+            return
         
         # Check if limiter allows retry
         retry_ctx = RetryContext(attempt=ctx.attempt_number, now=ctx.end_time)

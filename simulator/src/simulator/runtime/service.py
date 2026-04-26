@@ -133,6 +133,39 @@ class ServiceRuntime:
         if self._live_buffer is None:
             self._live_buffer = LiveMetricsBuffer()
 
+    def _record_attempt_metrics(
+        self,
+        timestamp_ns: TimePoint,
+        latency_ns: TimeDuration,
+        success: bool,
+        drop_reason: DropReason,
+        queue_size: int,
+        attempt_num: int,
+        is_retry: bool,
+    ) -> None:
+        """Record a finished or admission-rejected attempt into service telemetry."""
+        if self._record_events:
+            self._events.append((
+                timestamp_ns,
+                latency_ns,
+                success,
+                drop_reason,
+                queue_size,
+                attempt_num,
+                is_retry,
+            ))
+
+        if self._live_buffer is not None:
+            self._live_buffer.record_event(
+                timestamp_ns,
+                latency_ns,
+                success,
+                drop_reason,
+                queue_size,
+                attempt_num,
+                is_retry,
+            )
+
     def submit_request(
         self,
         sim: Simulator,
@@ -143,8 +176,9 @@ class ServiceRuntime:
         global_deadline: Optional[TimePoint] = None,
         is_retry: bool = False,
     ):
-        # Admission Control: Check Load Limiters (Server-Side Shedding)
-        if self.cfg.load_limiter is not None:
+        # Admission control for client-managed retries only. Service-managed
+        # retries are already gated by the middleware chain after each attempt.
+        if self.cfg.load_limiter is not None and self.cfg.retry is None:
             should_check = False
             # Check if limiter applies to this request
             if is_retry:
@@ -161,6 +195,15 @@ class ServiceRuntime:
                 allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
                 
                 if not allowed:
+                    self._record_attempt_metrics(
+                        timestamp_ns=sim.timestep,
+                        latency_ns=0,
+                        success=False,
+                        drop_reason=DropReason.SERVER_FAILURE,
+                        queue_size=len(self.queue),
+                        attempt_num=2 if is_retry else 1,
+                        is_retry=is_retry,
+                    )
                     # Reject admission
                     on_attempt_done(
                         False, 0, DropReason.SERVER_FAILURE, len(self.queue), sim.timestep, None
@@ -503,29 +546,15 @@ class ServiceRuntime:
         """
         end_time = sim.timestep
         
-        # Record event for per-service metrics
-        if self._record_events:
-            self._events.append((
-                end_time,       # timestamp_ns
-                svc_time,       # latency_ns
-                success,        # success
-                drop_reason,    # drop_reason
-                queue_size,     # queue_size
-                ctx.attempt,    # attempt_num
-                ctx.attempt > 1,  # is_retry
-            ))
-
-        # Record event to live metrics buffer
-        if self._live_buffer is not None:
-            self._live_buffer.record_event(
-                end_time, 
-                svc_time, 
-                success, 
-                drop_reason,
-                queue_size, 
-                ctx.attempt, 
-                ctx.attempt > 1,
-            )
+        self._record_attempt_metrics(
+            timestamp_ns=end_time,
+            latency_ns=svc_time,
+            success=success,
+            drop_reason=drop_reason,
+            queue_size=queue_size,
+            attempt_num=ctx.attempt,
+            is_retry=ctx.attempt > 1,
+        )
         
         # Notify caller about attempt completion
         ctx.on_attempt_done(
@@ -624,3 +653,4 @@ class ServiceRuntime:
                 limiter.refill_rate = refill_rate
             if bucket_capacity is not None:
                 limiter.max_tokens = bucket_capacity
+                limiter._tokens = min(limiter._tokens, float(bucket_capacity))
