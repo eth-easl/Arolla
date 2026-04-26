@@ -227,3 +227,5 @@ simulator/vecnormalize_stats.pkl
 simulator/eval_logs/
 best_model/
 eval_logs/
+model-dashboard/
+*.pdf
