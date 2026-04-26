@@ -1,0 +1,88 @@
+name: benchmark_metastable_switchback_adversarial_fairness
+seed: 42
+
+# Hard adaptive-control benchmark:
+# - early, severe partial failure -> best action is a tight bucket
+# - explicit recovery gap         -> best action relaxes somewhat
+# - later heavy load spike        -> best action becomes looser again
+#
+# The queue is intentionally small and timeouts are tighter than the default
+# fairness benchmarks, so a single fixed budget must make a visible trade-off
+# between suppressing retry storms during the fault and admitting useful work
+# during the later spike.
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 65
+      lognorm_sigma: 0.55
+    workers: 16
+    queue_capacity: 600
+    timeout:
+      attempt_ms: 144
+    # Deliberately moderate default static: lives on the RL action grid but is
+    # not expected to be optimal for both the fault and spike phases.
+    global_retry_budget:
+      target_rps: 25
+      max_burst: 20
+    partial_failures:
+      - type: partial_failure
+        start_s: 18
+        end_s: 40
+        p_fail: 0.72
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 144
+    workload:
+      base_rps: 95
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 52
+          end_s: 72
+          rps_multiplier: 3.6
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 144
+    workload:
+      base_rps: 62
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 52
+          end_s: 72
+          rps_multiplier: 3.1
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 144
+    workload:
+      base_rps: 40
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 52
+          end_s: 72
+          rps_multiplier: 2.7
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

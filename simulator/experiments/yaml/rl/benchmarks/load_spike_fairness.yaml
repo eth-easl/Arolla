@@ -1,0 +1,71 @@
+name: benchmark_load_spike_fairness
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 10000
+    timeout:
+      attempt_ms: 192
+    global_retry_budget:
+      target_rps: 30
+      max_burst: 10
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 90
+      duration_s: 90
+      load_spikes:
+        - type: load_spike
+          start_s: 20
+          end_s: 30
+          rps_multiplier: 3.0
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 60
+      duration_s: 90
+      load_spikes:
+        - type: load_spike
+          start_s: 20
+          end_s: 30
+          rps_multiplier: 3.0
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 38
+      duration_s: 90
+      load_spikes:
+        - type: load_spike
+          start_s: 20
+          end_s: 30
+          rps_multiplier: 3.0
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
