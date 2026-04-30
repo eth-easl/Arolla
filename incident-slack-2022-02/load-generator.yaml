@@ -2,12 +2,22 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: load-generator
+  annotations:
+    sidecar.istio.io/inject: "true"
+    sidecar.istio.io/statsInclusionRegexps: ".*upstream_rq_retry.*,.*upstream_rq_total.*"
 spec:
   containers:
-    - name: hey
+    - name: load-generator
       image: ricoli/hey
       command: ["/bin/sh", "-c"]
       # -c Number of workers to run concurrently.
       # -z Duration of application to send requests.
-      args: ["hey -c 5000 -z 1m http://slack-clone-app-svc:8080/api/message/42"]
+      args:
+        - |
+          # 50 total concurrent requests (< 100 gunicorn workers)
+          # so retry amplification can create additional DB connections
+          for i in $(seq 1 50); do
+            hey -c 1 -z 20m -t 3 "http://slack-clone-app-svc:8080/api/message/$i" &
+          done
+          wait
   restartPolicy: Never

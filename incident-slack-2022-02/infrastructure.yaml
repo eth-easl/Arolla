@@ -1,3 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-data-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,10 +37,19 @@ spec:
             - name: mysql-config
               mountPath: /etc/mysql/conf.d/custom.cnf
               subPath: custom.cnf # Defined in configs.yaml
+            - name: mysql-persistent-storage
+              mountPath: /var/lib/mysql
+          resources:
+            limits:
+              memory: "450Mi"
+              cpu: "500m"
       volumes:
         - name: mysql-config
           configMap:
             name: mysql-config
+        - name: mysql-persistent-storage
+          persistentVolumeClaim:
+            claimName: mysql-data-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -109,7 +129,7 @@ spec:
         role: app # Co-located on the same node as Mcrouter
       containers:
         - name: app
-          image: justeddocker/incident-simulation-slack-clone:v2
+          image: justeddocker/incident-simulation-slack-clone:v0.20
           ports:
             - containerPort: 8080
           env:
@@ -121,6 +141,8 @@ spec:
               value: "thisisarandompassword"
             - name: CACHE_HOST
               value: "mcrouter-svc:5000"
+            - name: QUERY_WEIGHT
+              value: "10"
 ---
 apiVersion: v1
 kind: Service
@@ -130,7 +152,8 @@ spec:
   selector:
     app: slack-clone
   ports:
-    - port: 8080
+    - name: http-api
+      port: 8080
       targetPort: 8080
 
 
@@ -141,7 +164,7 @@ kind: Deployment
 metadata:
   name: memcached
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: memcached

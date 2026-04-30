@@ -6,7 +6,6 @@ metadata:
 data:
   custom.cnf: |
     [mysqld]
-    max_connections = 20
     innodb_buffer_pool_size = 128M
 ---
 apiVersion: v1
