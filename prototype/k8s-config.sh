@@ -7,12 +7,12 @@
 # ============================================================================
 
 # ---------- SSH settings ----------
-SSH_USER="yazhuoz"
+SSH_USER="lcresci"
 SSH_KEY=""                          # e.g. "~/.ssh/id_rsa" (leave empty to use default)
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 
 # ---------- Node definitions ----------
-# Current CloudLab/Emulab allocation (UBUNTU24-64-STD, d430 hardware).
+# Current CloudLab/Emulab allocation (d430 hardware).
 #
 # Logical  | Emulab host         | Role
 # ---------+---------------------+---------------------------------------

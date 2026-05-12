@@ -223,3 +223,7 @@ simulator/experiments/yaml/aimd_vs_sysname/
 simulator/experiments/yaml/sysname/
 .vscode/
 *.sweep-backup
+
+graphify-out/
+plot-viewer
+.trash

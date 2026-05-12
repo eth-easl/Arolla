@@ -90,8 +90,11 @@ step1_install_istioctl() {
     "
     ok "istioctl installed on master"
 
-    # Also install istioctl locally so you can run istioctl commands from your machine
+    # Also install istioctl locally so you can run istioctl commands from your machine.
+    # Install to ~/.local/bin/ to avoid requiring sudo on macOS/Linux.
     banner "Step 1b: Install istioctl ${ISTIO_VERSION} locally"
+    LOCAL_BIN="${HOME}/.local/bin"
+    mkdir -p "${LOCAL_BIN}"
     if command -v istioctl &>/dev/null; then
         CURRENT=$(istioctl version --remote=false 2>/dev/null || echo 'unknown')
         if [[ "$CURRENT" == "${ISTIO_VERSION}" ]]; then
@@ -99,18 +102,19 @@ step1_install_istioctl() {
         else
             info "Upgrading local istioctl from $CURRENT to ${ISTIO_VERSION}…"
             curl -sL https://istio.io/downloadIstio | ISTIO_VERSION=${ISTIO_VERSION} sh -
-            sudo cp "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
-            sudo chmod +x /usr/local/bin/istioctl
+            cp "istio-${ISTIO_VERSION}/bin/istioctl" "${LOCAL_BIN}/istioctl"
+            chmod +x "${LOCAL_BIN}/istioctl"
             rm -rf "istio-${ISTIO_VERSION}"
-            ok "istioctl ${ISTIO_VERSION} installed locally"
+            ok "istioctl ${ISTIO_VERSION} installed to ${LOCAL_BIN}/istioctl"
         fi
     else
         info "Downloading istioctl ${ISTIO_VERSION} for local use…"
         curl -sL https://istio.io/downloadIstio | ISTIO_VERSION=${ISTIO_VERSION} sh -
-        sudo cp "istio-${ISTIO_VERSION}/bin/istioctl" /usr/local/bin/istioctl
-        sudo chmod +x /usr/local/bin/istioctl
+        cp "istio-${ISTIO_VERSION}/bin/istioctl" "${LOCAL_BIN}/istioctl"
+        chmod +x "${LOCAL_BIN}/istioctl"
         rm -rf "istio-${ISTIO_VERSION}"
-        ok "istioctl ${ISTIO_VERSION} installed locally"
+        ok "istioctl ${ISTIO_VERSION} installed to ${LOCAL_BIN}/istioctl"
+        info "Make sure ${LOCAL_BIN} is in your PATH: export PATH=\"\$PATH:${LOCAL_BIN}\""
     fi
 }
 
