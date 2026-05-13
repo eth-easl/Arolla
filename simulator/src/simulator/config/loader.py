@@ -24,6 +24,7 @@ from simulator.policies.load_limiter import (
     BurstyRateLimiterPolicy, FixedWindowBurstyLimiterPolicy
 )
 from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.istio_retry_budget import IstioRetryBudget
 from simulator.policies.aimd_retry_budget import AIMDGlobalRetryBudget
 from simulator.faults.injection import LatencyInjection, PartialFailure, LoadSpike
 from simulator.runtime.service import ServiceConfig, ServiceRuntime
@@ -259,6 +260,17 @@ class ConfigLoader:
             refill_rate=cfg.target_rps,
             period=s_to_ns(1)  # 1 second period
         )
+
+    @staticmethod
+    def build_istio_retry_budget(cfg: Optional[IstioRetryBudgetConfig]) -> Optional[LoadLimiter]:
+        """Build server-side Istio/Envoy retry budget from configuration"""
+        if cfg is None:
+            return None
+
+        return IstioRetryBudget(
+            percent=cfg.percent,
+            min_retry_concurrency=cfg.min_retry_concurrency,
+        )
     
     @staticmethod
     def build_aimd_global_retry_budget(cfg: Optional[AIMDGlobalRetryBudgetConfig]) -> Optional[LoadLimiter]:
@@ -283,17 +295,20 @@ class ConfigLoader:
         rate_limiter: Optional[RateLimiterConfig],
         retry_budget: Optional[RetryBudgetConfig],
         global_retry_budget: Optional[GlobalRetryBudgetConfig],
+        istio_retry_budget: Optional[IstioRetryBudgetConfig],
         aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig]
     ) -> Optional[LoadLimiter]:
         """
         Build load limiter from configuration.
         
-        Priority: circuit_breaker > aimd > global > retry_budget > rate_limiter
+        Priority: circuit_breaker > aimd > istio > global > retry_budget > rate_limiter
         """
         if circuit_breaker is not None:
             return ConfigLoader.build_circuit_breaker(circuit_breaker)
         elif aimd_global_retry_budget is not None:
             return ConfigLoader.build_aimd_global_retry_budget(aimd_global_retry_budget)
+        elif istio_retry_budget is not None:
+            return ConfigLoader.build_istio_retry_budget(istio_retry_budget)
         elif global_retry_budget is not None:
             return ConfigLoader.build_global_retry_budget(global_retry_budget)
         elif retry_budget is not None:
@@ -377,6 +392,7 @@ class ConfigLoader:
             cfg.rate_limiter,
             retry_budget=cfg.retry_budget,
             global_retry_budget=cfg.global_retry_budget,
+            istio_retry_budget=cfg.istio_retry_budget,
             aimd_global_retry_budget=cfg.aimd_global_retry_budget,
         )
         

@@ -21,6 +21,7 @@ from simulator.middleware.load_limiter import LoadLimiterMiddleware
 from simulator.policies.aimd_retry_budget import AIMDGlobalRetryBudget
 from simulator.policies.retry import RetryBudgetPolicy
 from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.istio_retry_budget import IstioRetryBudget
 
 # RL
 from simulator.metrics.live_buffer import LiveMetricsBuffer
@@ -65,11 +66,13 @@ class QItem:
     enqueued_at: TimePoint
     seq: int
     start: Callable[[], None] = field(compare=False)
+    is_retry: bool = field(default=False, compare=False)
 
 
 @dataclass
 class _SrvRetryCtx:
     attempt: int
+    external_is_retry: bool
     global_deadline: Optional[TimePoint]
     on_attempt_done: Callable[
         [bool, TimeDuration, DropReason, int, TimePoint, Optional[TimePoint]], None
@@ -81,6 +84,8 @@ class _SrvRetryCtx:
 class ServiceRuntime:
     cfg: ServiceConfig
     in_flight: int = 0
+    in_flight_retries: int = 0
+    queued_retries: int = 0
     queue: List[QItem] = field(default_factory=list)
     _seq: int = 0
 
@@ -106,6 +111,8 @@ class ServiceRuntime:
 
     def bind(self, seed: Optional[int] = None, record_events: bool = False, enable_live_buffer: bool = False):
         self.in_flight = 0
+        self.in_flight_retries = 0
+        self.queued_retries = 0
         self.queue.clear()
         self._seq = 0
         self._middleware_chain = self._build_middleware_chain()
@@ -118,6 +125,16 @@ class ServiceRuntime:
         self._rng = random.Random(initial_seed)
         
         return self
+
+    def _refresh_retry_budget_runtime_state(self) -> None:
+        """Expose current service concurrency to Istio-style retry budgets."""
+        limiter = self.cfg.load_limiter
+        if isinstance(limiter, IstioRetryBudget):
+            limiter.update_runtime_state(
+                active_requests=self.in_flight,
+                pending_requests=len(self.queue),
+                active_retries=self.in_flight_retries + self.queued_retries,
+            )
     
     @property
     def events(self) -> List[tuple]:
@@ -183,7 +200,7 @@ class ServiceRuntime:
             # Check if limiter applies to this request
             if is_retry:
                 # Retry budgets always check retries
-                if isinstance(self.cfg.load_limiter, (AIMDGlobalRetryBudget, GlobalRetryBudget, RetryBudgetPolicy)):
+                if isinstance(self.cfg.load_limiter, (AIMDGlobalRetryBudget, GlobalRetryBudget, RetryBudgetPolicy, IstioRetryBudget)):
                     should_check = True
             
             # Rate limiters check EVERYTHING (not just retries) - assuming generic RateLimiter logic if needed
@@ -191,6 +208,7 @@ class ServiceRuntime:
             
             if should_check:
                 # Create context for check (attempt 1 is fine as placeholder, budget policies ignore it usually)
+                self._refresh_retry_budget_runtime_state()
                 check_ctx = RetryContext(attempt=1, now=sim.timestep)
                 allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
                 
@@ -215,6 +233,7 @@ class ServiceRuntime:
 
         ctx = _SrvRetryCtx(
             attempt=0,
+            external_is_retry=is_retry,
             global_deadline=global_deadline,
             on_attempt_done=on_attempt_done,
             on_root_done=on_root_done,
@@ -252,8 +271,9 @@ class ServiceRuntime:
         on_done = partial(
             self._on_single_attempt_done, sim, ctx, begin_time, attempt_deadline
         )
-        # Verify if this internal attempt is a retry (attempt > 1)
-        is_retry = ctx.attempt > 1
+        # A retry can be generated inside the service middleware, or arrive as a
+        # client-managed retry submitted as a new service request.
+        is_retry = ctx.external_is_retry or ctx.attempt > 1
         self.submit_attempt(sim, on_done, attempt_deadline=attempt_deadline, is_retry=is_retry)
 
     def _adjust_latency(self, t: TimePoint, base: TimeDuration) -> TimeDuration:
@@ -293,6 +313,8 @@ class ServiceRuntime:
     def _start_next(self, sim: Simulator):
         while self.in_flight < self.cfg.workers and self.queue:
             item = heapq.heappop(self.queue)
+            if item.is_retry:
+                self.queued_retries = max(0, self.queued_retries - 1)
             item.start()
 
     def submit_attempt(
@@ -338,8 +360,11 @@ class ServiceRuntime:
                 enqueued_at=sim.timestep,
                 seq=seq,
                 start=start_cb,
+                is_retry=is_retry,
             ),
         )
+        if is_retry:
+            self.queued_retries += 1
 
     # begin_service can be called either immediately or pass request
     def _begin_service(
@@ -356,6 +381,8 @@ class ServiceRuntime:
             return
 
         self.in_flight += 1
+        if is_retry:
+            self.in_flight_retries += 1
 
         if self.dependencies:
             # Multi-dependency fan-out
@@ -367,6 +394,8 @@ class ServiceRuntime:
                     # Dependencies failed — report failure immediately, no own processing
                     total_time = sim.timestep - start_t
                     self.in_flight -= 1
+                    if is_retry:
+                        self.in_flight_retries = max(0, self.in_flight_retries - 1)
                     on_done(False, total_time, worst_reason, len(self.queue))
                     self._start_next(sim)
                     return
@@ -388,12 +417,18 @@ class ServiceRuntime:
 
                     if timed_out:
                         self.in_flight -= 1
+                        if is_retry:
+                            self.in_flight_retries = max(0, self.in_flight_retries - 1)
                         on_done(False, total_time, DropReason.DEADLINE, len(self.queue))
                     elif local_failed:
                         self.in_flight -= 1
+                        if is_retry:
+                            self.in_flight_retries = max(0, self.in_flight_retries - 1)
                         on_done(False, total_time, DropReason.SERVER_FAILURE, len(self.queue))
                     else:
                         self.in_flight -= 1
+                        if is_retry:
+                            self.in_flight_retries = max(0, self.in_flight_retries - 1)
                         on_done(True, total_time, DropReason.NONE, len(self.queue))
                     self._start_next(sim)
 
@@ -423,7 +458,7 @@ class ServiceRuntime:
         )
 
         finish_cb = partial(
-            self._finish_service, sim, on_done, service_time, attempt_deadline
+            self._finish_service, sim, on_done, service_time, attempt_deadline, is_retry
         )
         sim.schedule(expiry, finish_cb)
 
@@ -515,8 +550,11 @@ class ServiceRuntime:
         on_done: Callable[[bool, TimeDuration, DropReason, int], None],
         service_time: TimeDuration,  # Time spent handling the request, excluding any queuing
         attempt_deadline: Optional[TimePoint],
+        is_retry: bool,
     ):
         self.in_flight -= 1
+        if is_retry:
+            self.in_flight_retries = max(0, self.in_flight_retries - 1)
 
         if attempt_deadline is not None and sim.timestep >= attempt_deadline:
             on_done(False, service_time, DropReason.DEADLINE, len(self.queue))
@@ -553,7 +591,7 @@ class ServiceRuntime:
             drop_reason=drop_reason,
             queue_size=queue_size,
             attempt_num=ctx.attempt,
-            is_retry=ctx.attempt > 1,
+            is_retry=ctx.external_is_retry or ctx.attempt > 1,
         )
         
         # Notify caller about attempt completion
@@ -586,6 +624,7 @@ class ServiceRuntime:
 
         # Execute middleware chain for ALL outcomes (success and failure).
         # The chain handles load limiter state tracking and retry decisions.
+        self._refresh_retry_budget_runtime_state()
         chain = self._middleware_chain
 
         def final_handler(attempt_ctx: AttemptContext):
@@ -654,3 +693,12 @@ class ServiceRuntime:
             if bucket_capacity is not None:
                 limiter.max_tokens = bucket_capacity
                 limiter._tokens = min(limiter._tokens, float(bucket_capacity))
+
+    def update_istio_retry_budget(self, percent=None, min_retry_concurrency=None):
+        """Update Istio-style retry budget parameters at runtime."""
+        limiter = self.cfg.load_limiter
+        if isinstance(limiter, IstioRetryBudget):
+            limiter.update_params(
+                percent=percent,
+                min_retry_concurrency=min_retry_concurrency,
+            )
