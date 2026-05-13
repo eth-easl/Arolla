@@ -36,6 +36,11 @@ WORKER_HOSTS=("pc822.emulab.net" "pc832.emulab.net" "pc830.emulab.net" "pc829.em
 WORKER_HOSTNAMES=("worker01" "worker02" "worker03" "worker04")
 WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
 
+# Calico autodetection: which host interface BGP should peer over.
+# enp6s0f3 is the experimental fabric NIC on this d430 allocation; verified
+# bidirectional ICMP between all nodes before deploying.
+CALICO_AUTODETECT_INTERFACE="enp6s0f3"
+
 # Client node (external load generator — not part of K8s cluster)
 CLIENT_HOST="pc827.emulab.net"      # SSH-reachable address
 
