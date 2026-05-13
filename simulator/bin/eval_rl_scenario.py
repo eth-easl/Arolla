@@ -505,81 +505,106 @@ def plot_comparison(results, fault_windows, rl_actions_df=None,
     fig, axes = plt.subplots(n_panels, 1, figsize=(14, 4 * n_panels), sharex=True)
 
     styles = {
-        "No Budget":     ("#d32f2f", "--", 1.8),
-        "Static Budget": ("gray",    "-",  2.0),
+        # Draw adaptive lines first and static/no-budget baselines above them.
+        # In several retry-budget benchmarks the curves can be nearly identical;
+        # markers plus z-order keep the baselines visible instead of hiding them
+        # underneath the final RL line.
+        "No Budget":     ("#d32f2f", "--", 2.0, "o", 5, 0.95),
+        "Static Budget": ("#212121", "-.", 2.0, "s", 4, 0.90),
         # "Best Static" is the upper bound over the RL's own action grid.
         # Drawn dotted to visually distinguish it from the YAML-static line
         # while keeping it close in hue so the eye groups the two statics.
-        "Best Static":   ("#455A64", ":",  2.0),
-        "RL Agent":      ("#2e7d32", "-",  2.5),
+        "Best Static":   ("#455A64", ":",  2.0, "^", 4, 0.90),
+        "RL Agent":      ("#2e7d32", "-",  2.2, None, 2, 0.85),
     }
 
+    def _ordered_results():
+        return sorted(results, key=lambda r: styles[r["label"]][4])
+
+    def _plot_series(ax, x, y, result):
+        color, ls, lw, marker, zorder, alpha = styles[result["label"]]
+        ax.plot(
+            x,
+            y,
+            label=result["label"],
+            color=color,
+            linestyle=ls,
+            linewidth=lw,
+            marker=marker,
+            markersize=3.5 if marker else 0,
+            markevery=8 if marker else None,
+            alpha=alpha,
+            zorder=zorder,
+        )
+
     # -- Panel 1: Success Rate -----------------------------------------------
-    for r in results:
-        color, ls, lw = styles[r["label"]]
+    for r in _ordered_results():
         df = r["ts_df"]
         if df.empty:
             continue
         completed = df["success_root"] + df["failure_root"]
         sr = df["success_root"] / completed.replace(0, np.nan)
-        axes[0].plot(df["timepoint"], sr,
-                     label=r["label"], color=color, linestyle=ls, linewidth=lw)
+        _plot_series(axes[0], df["timepoint"], sr, r)
     axes[0].set_ylabel("Success Rate")
     axes[0].set_ylim(-0.05, 1.05)
     axes[0].set_title("Success Rate Over Time")
     axes[0].legend(loc="lower left")
 
     # -- Panel 2: Load Amplification -----------------------------------------
-    for r in results:
-        color, ls, lw = styles[r["label"]]
+    for r in _ordered_results():
         df = r["ts_df"]
         if df.empty:
             continue
         total_attempts = df["root_requests"] + df["retries"]
         amp = total_attempts / df["root_requests"].replace(0, np.nan)
-        axes[1].plot(df["timepoint"], amp,
-                     label=r["label"], color=color, linestyle=ls, linewidth=lw)
+        _plot_series(axes[1], df["timepoint"], amp, r)
     axes[1].set_ylabel("Load Amplification")
     axes[1].set_title("Load Amplification (total attempts / root requests)")
     axes[1].legend()
 
     # -- Panel 3: P99 Latency ------------------------------------------------
-    for r in results:
-        color, ls, lw = styles[r["label"]]
+    for r in _ordered_results():
         df = r["ts_df"]
         if df.empty:
             continue
-        axes[2].plot(df["timepoint"], df["p99"],
-                     label=r["label"], color=color, linestyle=ls, linewidth=lw)
+        _plot_series(axes[2], df["timepoint"], df["p99"], r)
     axes[2].set_ylabel("P99 Latency (ms)")
     axes[2].set_title("Tail Latency (P99)")
     axes[2].legend()
 
     # -- Panel 4: Retry Efficiency -------------------------------------------
-    for r in results:
-        color, ls, lw = styles[r["label"]]
+    for r in _ordered_results():
         df = r["ts_df"]
         if df.empty:
             continue
         eff = (df["retries"] - df["failure_retry"]) / df["retries"].replace(0, np.nan) * 100
-        axes[3].plot(df["timepoint"], eff,
-                     label=r["label"], color=color, linestyle=ls, linewidth=lw)
+        _plot_series(axes[3], df["timepoint"], eff, r)
     axes[3].set_ylabel("Retry Efficiency (%)")
     axes[3].set_title("Retry Efficiency (successful retries / total retries)")
     axes[3].legend()
 
-    # -- Panel 5 (optional): RL Agent Actions (refill rate + bucket capacity) --
+    # -- Panel 5 (optional): RL Agent Actions ---------------------------------
     if has_rl_actions:
         ax_left = axes[4]
         ax_right = ax_left.twinx()
-        ax_left.step(rl_actions_df["time_s"], rl_actions_df["refill_rate"],
-                     where="post", color="#2196F3", linewidth=2, label="Refill Rate")
-        ax_right.step(rl_actions_df["time_s"], rl_actions_df["bucket_capacity"],
-                      where="post", color="#9C27B0", linewidth=2, label="Bucket Cap.")
-        ax_left.set_ylabel("Refill Rate (rps)", color="#2196F3")
-        ax_right.set_ylabel("Bucket Capacity", color="#9C27B0")
-        ax_left.set_yticks(REFILL_RATE_MAP)
-        ax_right.set_yticks(BUCKET_CAPACITY_MAP)
+        if {"percent", "min_retry_concurrency"}.issubset(rl_actions_df.columns):
+            ax_left.step(rl_actions_df["time_s"], rl_actions_df["percent"],
+                         where="post", color="#2196F3", linewidth=2, label="Percent")
+            ax_right.step(rl_actions_df["time_s"], rl_actions_df["min_retry_concurrency"],
+                          where="post", color="#9C27B0", linewidth=2, label="Min Retry Concurrency")
+            ax_left.set_ylabel("Retry Budget Percent", color="#2196F3")
+            ax_right.set_ylabel("Min Retry Concurrency", color="#9C27B0")
+            ax_left.set_yticks([5, 10, 20, 30, 50])
+            ax_right.set_yticks([1, 2, 3, 5, 8])
+        else:
+            ax_left.step(rl_actions_df["time_s"], rl_actions_df["refill_rate"],
+                         where="post", color="#2196F3", linewidth=2, label="Refill Rate")
+            ax_right.step(rl_actions_df["time_s"], rl_actions_df["bucket_capacity"],
+                          where="post", color="#9C27B0", linewidth=2, label="Bucket Cap.")
+            ax_left.set_ylabel("Refill Rate (rps)", color="#2196F3")
+            ax_right.set_ylabel("Bucket Capacity", color="#9C27B0")
+            ax_left.set_yticks(REFILL_RATE_MAP)
+            ax_right.set_yticks(BUCKET_CAPACITY_MAP)
         lines_l, labels_l = ax_left.get_legend_handles_labels()
         lines_r, labels_r = ax_right.get_legend_handles_labels()
         ax_left.legend(lines_l + lines_r, labels_l + labels_r, loc="upper right")
