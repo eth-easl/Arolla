@@ -1,0 +1,78 @@
+name: benchmark_istio_switchback_adversarial
+seed: 42
+
+# Static keeps percent=20 and minRetryConcurrency=3 for both phases. The first
+# phase prefers a tight budget; the later spike often needs a looser budget.
+services:
+  - name: svc-A
+    latency:
+      median_ms: 70
+      lognorm_sigma: 0.65
+    workers: 16
+    queue_capacity: 80
+    timeout:
+      attempt_ms: 112
+    istio_retry_budget:
+      percent: 20.0
+      min_retry_concurrency: 3
+    partial_failures:
+      - type: partial_failure
+        start_s: 16
+        end_s: 44
+        p_fail: 0.82
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 6
+      delay_ms: 0
+    timeout:
+      attempt_ms: 112
+    workload:
+      base_rps: 115
+      duration_s: 105
+      load_spikes:
+        - type: load_spike
+          start_s: 58
+          end_s: 88
+          rps_multiplier: 4.2
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 6
+      delay_ms: 0
+    timeout:
+      attempt_ms: 112
+    workload:
+      base_rps: 78
+      duration_s: 105
+      load_spikes:
+        - type: load_spike
+          start_s: 58
+          end_s: 88
+          rps_multiplier: 3.5
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 6
+      delay_ms: 0
+    timeout:
+      attempt_ms: 112
+    workload:
+      base_rps: 50
+      duration_s: 105
+      load_spikes:
+        - type: load_spike
+          start_s: 58
+          end_s: 88
+          rps_multiplier: 2.9
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

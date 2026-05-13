@@ -1,0 +1,76 @@
+name: benchmark_istio_compound_failure
+seed: 42
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 65
+      lognorm_sigma: 0.6
+    workers: 16
+    queue_capacity: 120
+    timeout:
+      attempt_ms: 128
+    istio_retry_budget:
+      percent: 20.0
+      min_retry_concurrency: 3
+    partial_failures:
+      - type: partial_failure
+        start_s: 18
+        end_s: 42
+        p_fail: 0.75
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 5
+      delay_ms: 0
+    timeout:
+      attempt_ms: 128
+    workload:
+      base_rps: 105
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 40
+          end_s: 70
+          rps_multiplier: 3.8
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 5
+      delay_ms: 0
+    timeout:
+      attempt_ms: 128
+    workload:
+      base_rps: 72
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 40
+          end_s: 70
+          rps_multiplier: 3.1
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 5
+      delay_ms: 0
+    timeout:
+      attempt_ms: 128
+    workload:
+      base_rps: 45
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 40
+          end_s: 70
+          rps_multiplier: 2.6
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
