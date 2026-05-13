@@ -21,6 +21,7 @@
 # Usage:
 #
 #   prototype/experiments/run-experiment.sh \
+#       --name <name> (optional) \
 #       --scenario sustained-failure \
 #       --policies no-control,circuit-breaker,envoy-retry-budget,arolla \
 #       --warmup 60 --prefault 30 --fault 60 --recovery 60 --cooldown 30
@@ -75,6 +76,7 @@ CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 # everything under outputs/nsdi/<profile>/… instead of outputs/prototype/.
 OUTPUT_ROOT="${OUTPUT_BASE:-${REPO_ROOT}/outputs/prototype}"
 OUTPUT_EXPLICIT=false
+OUTPUT_NAME=""          # --name: use outputs/prototype/<name>/<timestamp>/ instead of profile slug
 DRY_RUN=false
 SKIP_ANALYZE=false
 POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
@@ -175,8 +177,11 @@ Options:
                                 Default: ${CPU_STRESS_LOAD}
       --cpu-stress-workers <n>    Number of concurrent stress-ng workers.
                                 Default: ${CPU_STRESS_WORKERS}
-  -o, --output <dir>            Output root directory.
-                                Default: ${OUTPUT_ROOT}/<profile>/<profile>_<timestamp>
+  -N, --name <name>             Output folder name under outputs/prototype/.
+                                Result lands at outputs/prototype/<name>/<timestamp>/
+                                Default: derived from client-profile slug
+  -o, --output <dir>            Explicit output directory (full path, no timestamp appended).
+                                Default: ${OUTPUT_ROOT}/<profile>/<timestamp>
       --warmup <sec>            Override warmup duration
       --prefault <sec>          Override pre-fault baseline duration
       --fault <sec>             Override fault duration
@@ -217,6 +222,7 @@ while (( $# > 0 )); do
     --cpu-stress-target)  CPU_STRESS_TARGET="$2"; shift 2 ;;
     --cpu-stress-load)    CPU_STRESS_LOAD="$2"; shift 2 ;;
     --cpu-stress-workers) CPU_STRESS_WORKERS="$2"; shift 2 ;;
+    -N|--name)            OUTPUT_NAME="$2"; shift 2 ;;
     -o|--output)          OUTPUT_ROOT="$2"; OUTPUT_EXPLICIT=true; shift 2 ;;
     --warmup)        WARMUP_SEC="$2"; shift 2 ;;
     --prefault)      PREFAULT_SEC="$2"; shift 2 ;;
@@ -433,8 +439,11 @@ else
   _profile_slug="${_joined_names}"
 fi
 if "${OUTPUT_EXPLICIT}"; then
-  # -o was passed (e.g. from run_sweep.sh) — use it directly.
+  # -o was passed (e.g. from run_sweep.sh) — use it directly, no timestamp appended.
   RUN_DIR="${OUTPUT_ROOT}"
+elif [[ -n "${OUTPUT_NAME}" ]]; then
+  # --name was passed — use outputs/prototype/<name>/<timestamp>/
+  RUN_DIR="${OUTPUT_ROOT}/${OUTPUT_NAME}/${RUN_TS}"
 else
   if [[ -n "${_common_dir}" ]]; then
     RUN_DIR="${OUTPUT_ROOT}/${_common_dir}/${RUN_TS}"

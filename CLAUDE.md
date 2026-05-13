@@ -51,6 +51,7 @@ cd prototype
 ./deploy-k8s.sh                        # install K8s on all nodes (~10-15 min)
 ./deploy-istio.sh                      # install Istio + Gateway API CRDs
 ./deploy-app.sh online-boutique        # deploy Online Boutique
+./deploy-cluster-profile.sh 2-replica  # deploy 2 replicas of cartservice
 ```
 
 Verify the cluster is healthy before running experiments:
@@ -63,6 +64,7 @@ All nodes should be `Ready` and all pods `Running` (~11 pods). Once healthy, run
 
 ```bash
 prototype/experiments/run-experiment.sh \
+    --name <name> \
     --scenario sustained-failure \
     --policies envoy-retry-budget \
     --warmup 30 --prefault 15 --fault 30 --recovery 30 --cooldown 15
