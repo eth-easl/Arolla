@@ -1,0 +1,60 @@
+name: rl_istio_retry_budget_metastable
+seed: 42
+
+# Server-side Istio/Envoy-style retry budget.
+# The RL agent changes only these two fields at runtime:
+#   - percent
+#   - min_retry_concurrency
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 250
+    timeout:
+      attempt_ms: 160
+    istio_retry_budget:
+      percent: 20.0
+      min_retry_concurrency: 3
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 160
+    workload:
+      base_rps: 90
+      duration_s: 90
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 160
+    workload:
+      base_rps: 60
+      duration_s: 90
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 160
+    workload:
+      base_rps: 38
+      duration_s: 90
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
