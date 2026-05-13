@@ -21,7 +21,6 @@
 # Usage:
 #
 #   prototype/experiments/run-experiment.sh \
-#       --name <name> (optional) \
 #       --scenario sustained-failure \
 #       --policies no-control,circuit-breaker,envoy-retry-budget,arolla \
 #       --warmup 60 --prefault 30 --fault 60 --recovery 60 --cooldown 30
@@ -76,7 +75,6 @@ CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 # everything under outputs/nsdi/<profile>/… instead of outputs/prototype/.
 OUTPUT_ROOT="${OUTPUT_BASE:-${REPO_ROOT}/outputs/prototype}"
 OUTPUT_EXPLICIT=false
-OUTPUT_NAME=""          # --name: use outputs/prototype/<name>/<timestamp>/ instead of profile slug
 DRY_RUN=false
 SKIP_ANALYZE=false
 POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
@@ -91,6 +89,15 @@ POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
 # depends on) are taken regardless.
 PHASE_SNAPSHOTS=false
 
+# Optional RL/shadow-controller integration. When --rl-controller-config is
+# set the controller defaults to closed-loop apply mode; --rl-shadow flips it
+# back to observation-only (no DestinationRule patches).
+RL_CONTROLLER_CONFIG=""
+RL_SHADOW=false
+RESOURCE_SAMPLING=false
+RESOURCE_SAMPLE_INTERVAL_SEC=2
+HELPER_PIDS=()
+
 # Phase durations (seconds). The scenario config can override these; CLI
 # flags override both.
 WARMUP_SEC=60
@@ -98,6 +105,12 @@ PREFAULT_SEC=30
 FAULT_SEC=60
 RECOVERY_SEC=60
 COOLDOWN_SEC=30
+
+# Multi-spike support. NUM_SPIKES > 1 injects the fault manifest N times in
+# a row, separated by a gap of INTER_SPIKE_GAP_SEC between clearance and the
+# next injection. These can be set by scenario .conf files or CLI flags.
+NUM_SPIKES=1
+INTER_SPIKE_GAP_SEC=30
 
 # Scenario-provided
 SCENARIO_TITLE=""
@@ -177,11 +190,8 @@ Options:
                                 Default: ${CPU_STRESS_LOAD}
       --cpu-stress-workers <n>    Number of concurrent stress-ng workers.
                                 Default: ${CPU_STRESS_WORKERS}
-  -N, --name <name>             Output folder name under outputs/prototype/.
-                                Result lands at outputs/prototype/<name>/<timestamp>/
-                                Default: derived from client-profile slug
-  -o, --output <dir>            Explicit output directory (full path, no timestamp appended).
-                                Default: ${OUTPUT_ROOT}/<profile>/<timestamp>
+  -o, --output <dir>            Output root directory.
+                                Default: ${OUTPUT_ROOT}/<profile>/<profile>_<timestamp>
       --warmup <sec>            Override warmup duration
       --prefault <sec>          Override pre-fault baseline duration
       --fault <sec>             Override fault duration
@@ -199,6 +209,26 @@ Options:
                                 deliberate fault is applied. Enable only
                                 when you need the per-phase retry data.
                                 .pre and post snapshots are always taken.
+      --rl-controller-config <yaml>
+                              Start prototype RL controller for each policy
+                              run, writing rl-observations.jsonl and
+                              rl-decisions.csv under the policy output dir.
+                              Defaults to closed-loop apply mode.
+      --rl-shadow             Run the controller in shadow mode: observe and
+                              log decisions but do NOT patch the retry-budget
+                              DestinationRule.
+      --resource-sampling     Sample cart/Istio pod and node CPU/memory during
+                              each policy run.
+      --resource-sample-interval <sec>
+                              Resource sampler interval. Default:
+                              ${RESOURCE_SAMPLE_INTERVAL_SEC}
+      --num-spikes <n>        Inject the fault manifest N times in a row,
+                              separated by --inter-spike-gap seconds between
+                              clearance and re-injection. Default: ${NUM_SPIKES}
+                              (1 = classic single-fault behaviour)
+      --inter-spike-gap <sec> Gap between end of one spike and start of the
+                              next. Only used when --num-spikes > 1.
+                              Default: ${INTER_SPIKE_GAP_SEC}
   -n, --dry-run                 Print the timeline, don't touch the cluster
       --skip-analyze            Don't invoke analyze.py at the end
   -h, --help                    Show this message
@@ -213,6 +243,19 @@ EOF
   exit "${1:-0}"
 }
 
+# Track explicit CLI phase overrides so sourcing scenarios/*.conf can change
+# durations when flags are omitted.
+CLI_WARMUP_SET=false
+CLI_PREFAULT_SET=false
+CLI_FAULT_SET=false
+CLI_RECOVERY_SET=false
+CLI_COOLDOWN_SET=false
+CLI_WARMUP_VAL=""
+CLI_PREFAULT_VAL=""
+CLI_FAULT_VAL=""
+CLI_RECOVERY_VAL=""
+CLI_COOLDOWN_VAL=""
+
 while (( $# > 0 )); do
   case "$1" in
     -s|--scenario)        SCENARIO="$2"; shift 2 ;;
@@ -222,28 +265,26 @@ while (( $# > 0 )); do
     --cpu-stress-target)  CPU_STRESS_TARGET="$2"; shift 2 ;;
     --cpu-stress-load)    CPU_STRESS_LOAD="$2"; shift 2 ;;
     --cpu-stress-workers) CPU_STRESS_WORKERS="$2"; shift 2 ;;
-    -N|--name)            OUTPUT_NAME="$2"; shift 2 ;;
     -o|--output)          OUTPUT_ROOT="$2"; OUTPUT_EXPLICIT=true; shift 2 ;;
-    --warmup)        WARMUP_SEC="$2"; shift 2 ;;
-    --prefault)      PREFAULT_SEC="$2"; shift 2 ;;
-    --fault)         FAULT_SEC="$2"; shift 2 ;;
-    --recovery)      RECOVERY_SEC="$2"; shift 2 ;;
-    --cooldown)      COOLDOWN_SEC="$2"; shift 2 ;;
+    --warmup)        WARMUP_SEC="$2"; CLI_WARMUP_SET=true; CLI_WARMUP_VAL="$2"; shift 2 ;;
+    --prefault)      PREFAULT_SEC="$2"; CLI_PREFAULT_SET=true; CLI_PREFAULT_VAL="$2"; shift 2 ;;
+    --fault)         FAULT_SEC="$2"; CLI_FAULT_SET=true; CLI_FAULT_VAL="$2"; shift 2 ;;
+    --recovery)      RECOVERY_SEC="$2"; CLI_RECOVERY_SET=true; CLI_RECOVERY_VAL="$2"; shift 2 ;;
+    --cooldown)      COOLDOWN_SEC="$2"; CLI_COOLDOWN_SET=true; CLI_COOLDOWN_VAL="$2"; shift 2 ;;
     --settle)        POST_POLICY_SETTLE_SEC="$2"; shift 2 ;;
     --phase-snapshots) PHASE_SNAPSHOTS=true; shift ;;
+    --rl-controller-config) RL_CONTROLLER_CONFIG="$2"; shift 2 ;;
+    --rl-shadow)     RL_SHADOW=true; shift ;;
+    --resource-sampling) RESOURCE_SAMPLING=true; shift ;;
+    --resource-sample-interval) RESOURCE_SAMPLE_INTERVAL_SEC="$2"; shift 2 ;;
+    --num-spikes)    NUM_SPIKES="$2"; shift 2 ;;
+    --inter-spike-gap) INTER_SPIKE_GAP_SEC="$2"; shift 2 ;;
     -n|--dry-run)    DRY_RUN=true; shift ;;
     --skip-analyze)  SKIP_ANALYZE=true; shift ;;
     -h|--help)       usage 0 ;;
     *) err "unknown argument: $1 (see --help)" ;;
   esac
 done
-
-# Capture CLI-set durations so they can override the scenario config.
-CLI_WARMUP="${WARMUP_SEC}"
-CLI_PREFAULT="${PREFAULT_SEC}"
-CLI_FAULT="${FAULT_SEC}"
-CLI_RECOVERY="${RECOVERY_SEC}"
-CLI_COOLDOWN="${COOLDOWN_SEC}"
 
 # --------------------------------------------------------------------------- #
 # Load scenario config
@@ -254,12 +295,12 @@ SCENARIO_FILE="${SCRIPT_DIR}/scenarios/${SCENARIO}.conf"
 # shellcheck source=/dev/null
 source "${SCENARIO_FILE}"
 
-# Re-apply CLI overrides (they win over scenario defaults).
-WARMUP_SEC="${CLI_WARMUP}"
-PREFAULT_SEC="${CLI_PREFAULT}"
-FAULT_SEC="${CLI_FAULT}"
-RECOVERY_SEC="${CLI_RECOVERY}"
-COOLDOWN_SEC="${CLI_COOLDOWN}"
+# Re-apply CLI overrides only when those flags were passed (they win).
+[[ "${CLI_WARMUP_SET}" == true ]] && WARMUP_SEC="${CLI_WARMUP_VAL}"
+[[ "${CLI_PREFAULT_SET}" == true ]] && PREFAULT_SEC="${CLI_PREFAULT_VAL}"
+[[ "${CLI_FAULT_SET}" == true ]] && FAULT_SEC="${CLI_FAULT_VAL}"
+[[ "${CLI_RECOVERY_SET}" == true ]] && RECOVERY_SEC="${CLI_RECOVERY_VAL}"
+[[ "${CLI_COOLDOWN_SET}" == true ]] && COOLDOWN_SEC="${CLI_COOLDOWN_VAL}"
 
 [[ -n "${SCENARIO_FAULT_MANIFEST}" ]] || err "scenario ${SCENARIO} did not set SCENARIO_FAULT_MANIFEST"
 
@@ -284,6 +325,9 @@ else
   FAULT_MANIFEST_PATH="${PROTO_DIR}/${FAULT_DIR_REL}/${SCENARIO_FAULT_MANIFEST}"
 fi
 [[ -f "${FAULT_MANIFEST_PATH}" ]] || err "fault manifest not found: ${FAULT_MANIFEST_PATH}"
+if [[ -n "${RL_CONTROLLER_CONFIG}" && ! -f "${RL_CONTROLLER_CONFIG}" ]]; then
+  err "RL controller config not found: ${RL_CONTROLLER_CONFIG}"
+fi
 
 # Base routing config (mesh-wide retries, no fault). Re-applied to "remove"
 # the fault — see service-retries.yaml header for the rationale.
@@ -334,7 +378,9 @@ RUN_TS="$(date +%Y%m%d_%H%M%S)"
 # RUN_DIR is computed after RESOLVED_PROFILES is known (see below).
 
 # Total duration per policy
-TOTAL_SEC=$((WARMUP_SEC + PREFAULT_SEC + FAULT_SEC + RECOVERY_SEC + COOLDOWN_SEC))
+# Total fault-window duration expands with multiple spikes.
+FAULT_WINDOW_SEC=$(( NUM_SPIKES * FAULT_SEC + (NUM_SPIKES > 1 ? (NUM_SPIKES - 1) * INTER_SPIKE_GAP_SEC : 0) ))
+TOTAL_SEC=$((WARMUP_SEC + PREFAULT_SEC + FAULT_WINDOW_SEC + RECOVERY_SEC + COOLDOWN_SEC))
 TOTAL_POLICIES=${#POLICIES[@]}
 GRAND_TOTAL_SEC=$((TOTAL_SEC * TOTAL_POLICIES + POST_POLICY_SETTLE_SEC * TOTAL_POLICIES))
 
@@ -439,11 +485,8 @@ else
   _profile_slug="${_joined_names}"
 fi
 if "${OUTPUT_EXPLICIT}"; then
-  # -o was passed (e.g. from run_sweep.sh) — use it directly, no timestamp appended.
+  # -o was passed (e.g. from run_sweep.sh) — use it directly.
   RUN_DIR="${OUTPUT_ROOT}"
-elif [[ -n "${OUTPUT_NAME}" ]]; then
-  # --name was passed — use outputs/prototype/<name>/<timestamp>/
-  RUN_DIR="${OUTPUT_ROOT}/${OUTPUT_NAME}/${RUN_TS}"
 else
   if [[ -n "${_common_dir}" ]]; then
     RUN_DIR="${OUTPUT_ROOT}/${_common_dir}/${RUN_TS}"
@@ -480,6 +523,10 @@ export _COOLDOWN_SEC="${COOLDOWN_SEC}"
 export _CPU_STRESS_TARGET="${CPU_STRESS_TARGET}"
 export _CPU_STRESS_LOAD="${CPU_STRESS_LOAD}"
 export _CPU_STRESS_WORKERS="${CPU_STRESS_WORKERS}"
+export _RL_CONTROLLER_CONFIG="${RL_CONTROLLER_CONFIG}"
+export _RL_SHADOW="${RL_SHADOW}"
+export _RESOURCE_SAMPLING="${RESOURCE_SAMPLING}"
+export _RESOURCE_SAMPLE_INTERVAL_SEC="${RESOURCE_SAMPLE_INTERVAL_SEC}"
 export _POLICIES_CSV
 _POLICIES_CSV="$(IFS=,; echo "${POLICIES[*]}")"
 export _RESOLVED_PROFILES_CSV
@@ -575,6 +622,12 @@ doc = {
         "workers": worker_hosts,
         "client": os.environ["_CLIENT_HOST"],
     },
+    "rl_controller": {
+        "config": os.environ["_RL_CONTROLLER_CONFIG"],
+        "shadow": os.environ["_RL_SHADOW"].lower() == "true",
+        "resource_sampling": os.environ["_RESOURCE_SAMPLING"].lower() == "true",
+        "resource_sample_interval_sec": float(os.environ["_RESOURCE_SAMPLE_INTERVAL_SEC"]),
+    },
 }
 
 # Only emit scenario_fault_manifest at the top level when an istio_fault
@@ -596,8 +649,11 @@ log "wrote ${RUN_DIR}/experiment.json"
 cleanup() {
   local code=$?
   warn "cleanup: restoring base routing + stopping clients"
+  for pid in "${HELPER_PIDS[@]:-}"; do
+    [[ -n "${pid}" ]] && kill "${pid}" >/dev/null 2>&1 || true
+  done
   if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-    kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
+    kubectl apply --validate=false -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
   else
     kubectl delete --ignore-not-found -f "${FAULT_MANIFEST_PATH}" >/dev/null 2>&1 || true
   fi
@@ -624,6 +680,14 @@ wait_until() {
 }
 
 now() { date +%s; }
+
+stop_helper_pid() {
+  local pid="${1:-}"
+  [[ -z "${pid}" ]] && return 0
+  if kill "${pid}" >/dev/null 2>&1; then
+    wait "${pid}" 2>/dev/null || true
+  fi
+}
 
 # Services whose sidecar stats we dump each run. Declared at file scope so
 # both the pre-run snapshot and the post-run dump share the same list.
@@ -719,6 +783,9 @@ run_single() {
   local out_dir="${RUN_DIR}/${policy}"
   local client_metrics_dir="${out_dir}/client-metrics"
   local sidecar_stats_dir="${out_dir}/sidecar-stats"
+  local rl_controller_dir="${out_dir}/rl-controller"
+  local rl_controller_pid=""
+  local resource_sampler_pid=""
 
   mkdir -p "${client_metrics_dir}" "${sidecar_stats_dir}"
 
@@ -727,7 +794,7 @@ run_single() {
   # ---- Pre-run cleanup (make the run reproducible) ----
   log "pre-run: restoring base routing, clearing remote metrics"
   if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-    kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
+    kubectl apply --validate=false -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
   else
     kubectl delete --ignore-not-found -f "${FAULT_MANIFEST_PATH}" >/dev/null 2>&1 || true
   fi
@@ -777,6 +844,36 @@ run_single() {
   log "[${policy}] snapshotting sidecar bucket state (pre.prom)"
   dump_sidecar_stats "${sidecar_stats_dir}" ".pre"
 
+  if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
+    mkdir -p "${rl_controller_dir}"
+    phase "[${policy}] start RL controller ($(basename "${RL_CONTROLLER_CONFIG}"))"
+    controller_args=(
+      python3 "${SCRIPT_DIR}/rl_controller.py"
+      --config "${RL_CONTROLLER_CONFIG}"
+      --out-dir "${rl_controller_dir}"
+      --namespace "${NAMESPACE}"
+      --client-host "${CLIENT_HOST}"
+      --ssh-user "${SSH_USER}"
+      --ssh-opts "${SSH_OPTS}"
+      --remote-metrics-dir "${REMOTE_METRICS_DIR}"
+    )
+    [[ "${RL_SHADOW}" == true ]] && controller_args+=(--shadow)
+    "${controller_args[@]}" > "${rl_controller_dir}/rl-controller.log" 2>&1 &
+    rl_controller_pid="$!"
+    HELPER_PIDS+=("${rl_controller_pid}")
+  fi
+
+  if "${RESOURCE_SAMPLING}"; then
+    phase "[${policy}] start resource sampler (${RESOURCE_SAMPLE_INTERVAL_SEC}s)"
+    python3 "${SCRIPT_DIR}/resource_sampler.py" \
+      --out "${out_dir}/resource-usage.csv" \
+      --namespace "${NAMESPACE}" \
+      --interval "${RESOURCE_SAMPLE_INTERVAL_SEC}" \
+      > "${out_dir}/resource-sampler.log" 2>&1 &
+    resource_sampler_pid="$!"
+    HELPER_PIDS+=("${resource_sampler_pid}")
+  fi
+
   # ---- Define absolute phase boundaries (drift-free scheduling) ----
   # These are the *intended* phase boundaries the runner schedules against.
   # The *physical* fault boundaries (when the chaos object is actually
@@ -790,7 +887,7 @@ run_single() {
   t_warmup_end=$((t0 + WARMUP_SEC))
   t_prefault_end=$((t_warmup_end + PREFAULT_SEC))
   t_fault_start="${t_prefault_end}"
-  t_fault_end=$((t_fault_start + FAULT_SEC))
+  t_fault_end=$((t_fault_start + FAULT_WINDOW_SEC))
   t_recovery_end=$((t_fault_end + RECOVERY_SEC))
   t_cooldown_end=$((t_recovery_end + COOLDOWN_SEC))
 
@@ -842,6 +939,12 @@ run_single() {
   # applied to one pod of that workload, INSTEAD OF the Istio fault manifest.
   # This is the OSDI '22 metastability methodology — a transient CPU
   # restriction on a stateful component, applied for FAULT_SEC seconds.
+  #
+  # _spike_starts / _spike_ends are populated by the multi-spike Istio-trigger
+  # loop (Trigger B) and embedded in timeline.json. Initialise here so they
+  # are always defined regardless of which branch is taken.
+  _spike_starts=()
+  _spike_ends=()
   if (( FAULT_SEC > 0 )); then
     if [[ -n "${CPU_STRESS_TARGET}" ]]; then
       # ---- Trigger A: chaos-mesh CPU stress ----
@@ -851,7 +954,7 @@ run_single() {
           -e "s|__WORKERS__|${CPU_STRESS_WORKERS}|g" \
           -e "s|__DURATION__|${FAULT_SEC}|g" \
           "${CHAOS_CPU_STRESS_TEMPLATE}" \
-        | kubectl apply -f -
+        | kubectl apply --validate=false -f -
       # Stamp the actual fault start *after* the apply call returns. This
       # is closer to (but not equal to) the moment cart's CPU is actually
       # restricted; chaos-mesh's controller still needs to reconcile the
@@ -864,25 +967,53 @@ run_single() {
       kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null
       t_fault_actual_end="$(now)"
     else
-      # ---- Trigger B: Istio fault manifest ----
-      phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
-      kubectl apply -f "${FAULT_MANIFEST_PATH}" >/dev/null
-      t_fault_actual_start="$(now)"
-      wait_until "${t_fault_end}"
+      # ---- Trigger B: Istio fault manifest (supports NUM_SPIKES > 1) ----
+      # With NUM_SPIKES=1 this is identical to the original single-spike
+      # behaviour. With NUM_SPIKES>1 the fault is injected and cleared N times,
+      # with INTER_SPIKE_GAP_SEC of clean traffic between consecutive spikes.
+      #
+      # Per-spike actual timestamps are recorded for timeline.json and
+      # can be used by draw_spike_bands() in the plotting scripts.
+      _spike_starts=()
+      _spike_ends=()
 
-      # ---- Remove fault ----
-      # Apply the base routing config (chain retries, no abort/timeout)
-      # which has the same VirtualService names as the fault manifest, so
-      # kubectl apply replaces the faulted entries in-place. Falling back
-      # to `delete` would also remove the chain-retry config and produce
-      # an unrealistic recovery.
-      phase "[${policy}] remove fault (restore base routing)"
-      if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-        kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null
-      else
-        kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
-      fi
-      t_fault_actual_end="$(now)"
+      for (( _spike=1; _spike<=NUM_SPIKES; _spike++ )); do
+        if (( NUM_SPIKES > 1 )); then
+          phase "[${policy}] inject fault spike ${_spike}/${NUM_SPIKES} ($(basename "${FAULT_MANIFEST_PATH}"))"
+        else
+          phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
+        fi
+        kubectl apply --validate=false -f "${FAULT_MANIFEST_PATH}" >/dev/null
+        _spike_now="$(now)"
+        _spike_starts+=("${_spike_now}")
+        [[ ${_spike} -eq 1 ]] && t_fault_actual_start="${_spike_now}"
+
+        sleep "${FAULT_SEC}"
+
+        # Apply the base routing config to restore clean traffic.
+        # kubectl apply replaces the faulted VirtualService entries in-place
+        # so chain-retry config is preserved (falling back to delete would
+        # strip it and produce an unrealistic recovery).
+        if (( NUM_SPIKES > 1 )); then
+          phase "[${policy}] remove fault spike ${_spike}/${NUM_SPIKES} (restore base routing)"
+        else
+          phase "[${policy}] remove fault (restore base routing)"
+        fi
+        if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
+          kubectl apply --validate=false -f "${SERVICE_RETRIES_PATH}" >/dev/null
+        else
+          kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
+        fi
+        _spike_now="$(now)"
+        _spike_ends+=("${_spike_now}")
+        t_fault_actual_end="${_spike_now}"
+
+        # Inter-spike gap: let the system breathe before the next injection.
+        if (( _spike < NUM_SPIKES )); then
+          phase "[${policy}] inter-spike gap ${_spike}/${NUM_SPIKES-1}: ${INTER_SPIKE_GAP_SEC}s"
+          sleep "${INTER_SPIKE_GAP_SEC}"
+        fi
+      done
     fi
   else
     log "[${policy}] fault window = 0s, skipping trigger (clean baseline run)"
@@ -913,6 +1044,9 @@ run_single() {
   log "[${policy}] cooldown → t+${TOTAL_SEC}s"
   wait_until "${t_cooldown_end}"
 
+  stop_helper_pid "${rl_controller_pid}"
+  stop_helper_pid "${resource_sampler_pid}"
+
   # ---- Write timeline ----
   # `t_fault_*` are the *intended* boundaries the runner scheduled against;
   # `t_fault_actual_*` are stamped at the moment the chaos object's apply
@@ -921,6 +1055,28 @@ run_single() {
   # `t_fault_actual_*` when available and falls back to `t_fault_*`
   # otherwise. For runs with FAULT_SEC=0 the actual fields are 0 and the
   # analyzer falls back.
+  # Build per-spike timestamp fragment to embed in timeline.json.
+  # Python emits a trailing comma followed by the extra keys so the fragment
+  # can be spliced directly between "t_cooldown_end" and the closing '}'.
+  _spike_json_fragment="$(python3 - "${NUM_SPIKES}" \
+      "${_spike_starts[*]:- }" "${_spike_ends[*]:- }" <<'PYEOF'
+import json, sys
+num    = int(sys.argv[1])
+starts = [int(x) for x in sys.argv[2].split() if x.strip()]
+ends   = [int(x) for x in sys.argv[3].split() if x.strip()]
+d = {"num_spikes": num}
+for i, (s, e) in enumerate(zip(starts, ends), 1):
+    d[f"t_spike_{i}_actual_start"] = s
+    d[f"t_spike_{i}_actual_end"]   = e
+# Emit as a fragment that follows the last comma-separated field.
+# Each line is indented 2 spaces to match the surrounding JSON.
+lines = []
+for k, v in d.items():
+    lines.append(f'  "{k}": {json.dumps(v)}')
+print(",\n".join([""] + lines))
+PYEOF
+  )"
+
   cat > "${out_dir}/timeline.json" <<EOF
 {
   "policy": "${policy}",
@@ -932,7 +1088,7 @@ run_single() {
   "t_fault_actual_start": ${t_fault_actual_start},
   "t_fault_actual_end": ${t_fault_actual_end},
   "t_recovery_end": ${t_recovery_end},
-  "t_cooldown_end": ${t_cooldown_end}
+  "t_cooldown_end": ${t_cooldown_end}${_spike_json_fragment}
 }
 EOF
 
