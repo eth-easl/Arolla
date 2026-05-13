@@ -110,6 +110,19 @@ ssh ${SSH_USER}@${MASTER_HOST} \
 
 The server must be restarted any time the master node reboots. If you don't intend to run `arolla`, you can skip this entirely — the other three policies don't depend on it.
 
+## Kubeconfig Isolation
+
+The Emulab cluster kubeconfig lives at `~/.kube/config-emulab` and is **never merged into `~/.kube/config`**. The context is named `emulab` (not the default `kubernetes-admin@kubernetes`) to prevent collisions with other clusters on the same machine.
+
+All prototype scripts source `prototype/k8s-config.sh`, which sets `export KUBECONFIG=~/.kube/config-emulab`. For ad-hoc `kubectl` commands outside of those scripts, do the same:
+
+```bash
+source prototype/k8s-config.sh
+kubectl get nodes   # hits Emulab, not any other local cluster
+```
+
+Never run `kubectl config use-context` or `kubectl config merge` without explicitly passing `--kubeconfig ~/.kube/config-emulab`, or you risk cross-contaminating the configs.
+
 ## Important Context
 
 - This is active research: multiple experiment branches exist (dev/*, prototype/*, simulator/*)

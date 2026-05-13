@@ -63,7 +63,10 @@ ISTIO_NAMESPACE="istio-system"     # Namespace for Istio control plane
 ISTIO_TEST_NS="istio-test"         # Namespace for demo app + Gateway (with sidecar injection)
 
 # ---------- Kubeconfig ----------
-KUBECONFIG_PATH="$HOME/.kube/config-primary"   # Cluster-specific kubeconfig file
+# Intentionally isolated from ~/.kube/config (which may contain other clusters).
+# The context is named "emulab" to avoid collisions with any default context name.
+# To use kubectl manually: export KUBECONFIG=~/.kube/config-emulab
+KUBECONFIG_PATH="$HOME/.kube/config-emulab"    # Cluster-specific kubeconfig file
 export KUBECONFIG="$KUBECONFIG_PATH"
 
 # ---------- Misc ----------
