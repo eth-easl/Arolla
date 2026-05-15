@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,29 @@ signal.signal(signal.SIGINT, handle_signal)
 class RetryBudget:
     percent: float
     min_retry_concurrency: int
+
+
+@dataclass
+class TickTiming:
+    """Per-tick latency breakdown written to rl-timings.jsonl.
+
+    All ms fields are wall-clock deltas measured with time.perf_counter().
+    `t_loop_start` is `time.time()` at the top of the iteration so a tick
+    can be cross-referenced to the rl-observations.jsonl `timestamp`
+    field. One record per tick — the tally script in bench_summarize.py
+    aggregates p50/p95/p99 across runs."""
+
+    tick_index: int
+    t_loop_start: float
+    obs_fetch_ms: float = 0.0
+    obs_parse_ms: float = 0.0
+    obs_build_ms: float = 0.0
+    inference_ms: float = 0.0
+    patch_ms: float = 0.0
+    patch_attempted: bool = False
+    patch_succeeded: bool = False
+    total_ms: float = 0.0
+    rows: int = 0
 
 
 @dataclass
@@ -489,35 +512,54 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     observations_path = out_dir / "rl-observations.jsonl"
     decisions_path = out_dir / "rl-decisions.csv"
+    timings_path = out_dir / "rl-timings.jsonl"
     write_decision_header(decisions_path)
 
     current = cfg.default_budget
     previous_budget = cfg.default_budget
     previous_metrics: dict[str, Any] | None = None
     start_ts = time.time()
+    tick_index = 0
 
-    with observations_path.open("a") as obs_f, decisions_path.open("a", newline="") as dec_f:
+    with observations_path.open("a") as obs_f, \
+            decisions_path.open("a", newline="") as dec_f, \
+            timings_path.open("a") as tim_f:
         writer = csv.writer(dec_f)
         while not STOP:
-            now = time.time()
+            tick_index += 1
+            timing = TickTiming(tick_index=tick_index, t_loop_start=time.time())
+            tick_t0 = time.perf_counter()
+            now = timing.t_loop_start
+
+            t = time.perf_counter()
             raw = ssh_cat_metrics(
                 args.client_host, args.ssh_user, args.ssh_opts, args.remote_metrics_dir,
             )
+            timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
+
+            t = time.perf_counter()
             rows = parse_client_rows(raw, since_ts=now - cfg.observation_window_sec)
+            timing.obs_parse_ms = (time.perf_counter() - t) * 1000.0
+            timing.rows = len(rows)
+
+            t = time.perf_counter()
             metrics = build_metrics(rows, cfg.observation_window_sec)
             observation, sources = build_observation(
                 metrics, current, previous_budget, previous_metrics,
             )
+            timing.obs_build_ms = (time.perf_counter() - t) * 1000.0
 
             # Policy: real RL inference or stub depending on what is available.
             pct_idx: int | None = None
             mrc_idx: int | None = None
+            t = time.perf_counter()
             if model is not None:
                 selected, (pct_idx, mrc_idx) = rl_policy(observation, model, cfg)
                 decision_label = "rl_ppo"
             else:
                 selected = stub_policy(current, cfg)
                 decision_label = "shadow_stub"
+            timing.inference_ms = (time.perf_counter() - t) * 1000.0
 
             unchanged = (
                 float(selected.percent) == float(current.percent)
@@ -536,14 +578,21 @@ def main() -> int:
                 reason = "pending_patch"
 
             if patch_allowed:
+                t = time.perf_counter()
                 patched = patch_retry_budget(args.namespace, selected)
+                timing.patch_ms = (time.perf_counter() - t) * 1000.0
+                timing.patch_attempted = True
+                timing.patch_succeeded = patched
                 reason = "patched" if patched else "patch_failed"
                 if patched:
                     previous_budget = current
                     current = selected
 
+            timing.total_ms = (time.perf_counter() - tick_t0) * 1000.0
+
             obs_doc = {
                 "timestamp": now,
+                "tick_index": tick_index,
                 "mode": effective_mode,
                 "observation_fields": OBSERVATION_FIELDS,
                 "observation": observation,
@@ -581,6 +630,8 @@ def main() -> int:
                 reason,
             ])
             dec_f.flush()
+            tim_f.write(json.dumps(asdict(timing), sort_keys=True) + "\n")
+            tim_f.flush()
             previous_metrics = metrics
 
             deadline = time.time() + cfg.decision_interval_sec
