@@ -23,6 +23,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -78,10 +79,11 @@ class TickTiming:
     """Per-tick latency breakdown written to rl-timings.jsonl.
 
     All ms fields are wall-clock deltas measured with time.perf_counter().
-    `t_loop_start` is `time.time()` at the top of the iteration so a tick
-    can be cross-referenced to the rl-observations.jsonl `timestamp`
-    field. One record per tick — the tally script in bench_summarize.py
-    aggregates p50/p95/p99 across runs."""
+    `t_loop_start` is `time.time()` at the top of the iteration so a tick can
+    be cross-referenced to the rl-observations.jsonl `timestamp` field.
+
+    `xds_apply_ms` is populated only when --xds-probe is on; in normal runs
+    it stays None (the field is still emitted for schema stability)."""
 
     tick_index: int
     t_loop_start: float
@@ -94,6 +96,7 @@ class TickTiming:
     patch_succeeded: bool = False
     total_ms: float = 0.0
     rows: int = 0
+    xds_apply_ms: float | None = None
 
 
 @dataclass
@@ -121,16 +124,33 @@ def load_config(path: Path) -> ControllerConfig:
     model_path: Path | None = None
     if raw_model:
         candidate = Path(raw_model)
-        # Resolve relative to the script directory (where run-experiment.sh lives).
+        config_dir = path.parent
+        # Resolve relative to the script directory (where run-experiment.sh
+        # lives) — the original laptop-side path. The in-cluster Job also
+        # has to handle the ConfigMap layout (`/etc/rl/{model.zip,config.yaml}`),
+        # where the model sits next to the config under a fixed name. Try
+        # several locations in order before giving up.
         script_dir = Path(__file__).parent
-        model_path = (script_dir / candidate).resolve()
-        if not model_path.exists():
+        search = []
+        if candidate.is_absolute():
+            search.append(candidate)
+        else:
+            search.append((script_dir / candidate).resolve())
+            search.append((config_dir / candidate).resolve())
+            # In-cluster ConfigMap: model lands at <config_dir>/model.zip
+            # because `--from-file=model.zip=<path>` rewrites the key.
+            search.append(config_dir / "model.zip")
+        for resolved in search:
+            if resolved.exists():
+                model_path = resolved
+                break
+        if model_path is None:
+            tried = ", ".join(str(p) for p in search)
             print(
-                f"[rl_controller] WARNING: model_path '{model_path}' not found, "
-                "falling back to shadow_stub",
+                f"[rl_controller] WARNING: model_path '{raw_model}' not found "
+                f"(tried: {tried}); falling back to shadow_stub",
                 file=sys.stderr,
             )
-            model_path = None
 
     obs_window = float(ctl.get("observation_window_sec", 10))
     return ControllerConfig(
@@ -229,6 +249,76 @@ def ssh_cat_metrics(
     if proc.returncode != 0:
         return ""
     return proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Observation fetch — HTTP path (in-cluster) and SSH-cat path (legacy laptop)
+#
+# The HTTP path fans out across `loader_ports` (one per loader shard), reuses
+# a single requests.Session so HTTP keep-alive + connection pooling apply,
+# and feeds the same `parse_client_rows` consumer as the SSH path. That
+# keeps the `build_metrics → build_observation` chain identical regardless
+# of which transport is in use, which is what makes the decision-drift
+# acceptance criterion in plan-12 §1 enforceable.
+# ---------------------------------------------------------------------------
+
+_HTTP_SESSION: Any = None
+
+
+def _get_http_session() -> Any:
+    """Cached requests.Session — one TCP/TLS pool reused across all ticks."""
+    global _HTTP_SESSION
+    if _HTTP_SESSION is not None:
+        return _HTTP_SESSION
+    try:
+        import requests  # noqa: PLC0415
+    except ImportError:
+        return None
+    _HTTP_SESSION = requests.Session()
+    return _HTTP_SESSION
+
+
+def http_fetch_window(
+    url_template: str,
+    ports: list[int],
+    since_ts: float,
+    timeout: float = 4.0,
+) -> str:
+    """Pull recent attempt rows from every loader shard and re-serialise as
+    CSV-ish text so `parse_client_rows` doesn't change.
+
+    Returns "" on transport failure. The caller treats that the same way as
+    a stale SSH read (degenerate metrics → controller's startup hold-off
+    keeps it from acting on garbage)."""
+    session = _get_http_session()
+    if session is None:
+        return ""
+    out_lines: list[str] = []
+    for port in ports:
+        url = url_template.format(port=port) + f"?since={since_ts:.6f}"
+        try:
+            resp = session.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            doc = resp.json()
+        except Exception:
+            continue
+        for row in doc.get("rows", []):
+            out_lines.append(
+                f"{row.get('timestamp', 0):.6f},"
+                f"{row.get('profile', '')},"
+                f"{row.get('worker', '')},"
+                f"{row.get('request_id', '')},"
+                f"{row.get('request_type', '')},"
+                f"{row.get('method', '')},"
+                f"{row.get('path', '')},"
+                f"{row.get('attempt', 0)},"
+                f"{row.get('is_retry', 0)},"
+                f"{row.get('status', 0)},"
+                f"{row.get('ok', 0)},"
+                f"{row.get('latency_s', 0):.6f}"
+            )
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
 
 
 def parse_client_rows(raw: str, since_ts: float) -> list[dict[str, Any]]:
@@ -439,13 +529,15 @@ def stub_policy(current: RetryBudget, cfg: ControllerConfig) -> RetryBudget:
 
 
 # ---------------------------------------------------------------------------
-# Kubernetes client (Phase 1.1: persistent CustomObjectsApi -> no per-tick
-# kubectl subprocess). Lazy singleton — the TLS handshake and config load
-# happen the first time we need to patch, then the HTTP/2 PATCH stream is
-# reused for every later tick. The Mac-side controller uses a kubeconfig
-# file (KUBECONFIG=~/.kube/config-emulab); falling back to the kubectl
-# subprocess keeps the script runnable on hosts without the python
-# kubernetes client installed.
+# Kubernetes client — persistent CustomObjectsApi (no per-tick kubectl
+# subprocess), with in-cluster service-account tokens picked up via
+# load_incluster_config() when the controller runs as a Job.
+#
+# Lazy singleton — the TLS handshake and config load happen the first time
+# we need to patch, then the HTTP/2 PATCH stream is reused for every later
+# tick. We try in-cluster config first so the same controller binary runs
+# unmodified inside a Job; falling back to a kubeconfig file is the
+# laptop-side path (KUBECONFIG=~/.kube/config-emulab).
 # ---------------------------------------------------------------------------
 
 _K8S_API: Any = None
@@ -457,7 +549,7 @@ def _get_k8s_custom_objects_api() -> Any:
     unavailable / no usable kubeconfig is in scope. The first call initialises
     config; subsequent calls return the same client."""
     global _K8S_API, _K8S_API_BACKEND
-    if _K8S_API is not None or _K8S_API_BACKEND == "kube_config":
+    if _K8S_API is not None or _K8S_API_BACKEND in {"in_cluster", "kube_config"}:
         return _K8S_API
     try:
         from kubernetes import client, config  # noqa: PLC0415
@@ -471,16 +563,20 @@ def _get_k8s_custom_objects_api() -> Any:
         return None
 
     try:
-        config.load_kube_config()
-        _K8S_API_BACKEND = "kube_config"
-    except Exception as exc:
-        print(
-            f"[rl_controller] could not load kube config "
-            f"({exc.__class__.__name__}: {exc}); falling back to kubectl",
-            file=sys.stderr,
-        )
-        _K8S_API_BACKEND = "kubectl_subprocess"
-        return None
+        config.load_incluster_config()
+        _K8S_API_BACKEND = "in_cluster"
+    except Exception:
+        try:
+            config.load_kube_config()
+            _K8S_API_BACKEND = "kube_config"
+        except Exception as exc:
+            print(
+                f"[rl_controller] could not load kube config "
+                f"({exc.__class__.__name__}: {exc}); falling back to kubectl",
+                file=sys.stderr,
+            )
+            _K8S_API_BACKEND = "kubectl_subprocess"
+            return None
 
     _K8S_API = client.CustomObjectsApi()
     print(
@@ -492,8 +588,7 @@ def _get_k8s_custom_objects_api() -> Any:
 
 def _patch_retry_budget_via_kubectl(namespace: str, budget: RetryBudget) -> bool:
     """Last-resort fallback: shell out to kubectl. Used only when the python
-    kubernetes client is unavailable (legacy hosts without the dependency),
-    or when --legacy-patch-kubectl forces it for the Phase-0 baseline."""
+    kubernetes client is unavailable (legacy hosts without the dependency)."""
     payload = {
         "spec": {
             "trafficPolicy": {
@@ -550,6 +645,92 @@ def patch_retry_budget(
         return False
 
 
+# ---------------------------------------------------------------------------
+# xDS apply probe (optional one-off characterisation only)
+#
+# Polls one istio-proxy's /clusters?format=json every 100 ms after a patch
+# and records the wall-clock time at which retry_budget.budget_percent
+# first matches the just-patched value. Background thread; off by default.
+# Don't run measurement sweeps with this on — the 100 ms kubectl-exec poll
+# itself perturbs the patch latency we're trying to measure.
+# ---------------------------------------------------------------------------
+
+
+def kubectl_exec_clusters(namespace: str, pod: str) -> str | None:
+    cmd = [
+        "kubectl", "-n", namespace, "exec", pod, "-c", "istio-proxy", "--",
+        "curl", "-s", "localhost:15000/clusters?format=json",
+    ]
+    try:
+        proc = run_cmd(cmd, timeout=4.0)
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def find_proxy_pod(namespace: str) -> str | None:
+    cmd = [
+        "kubectl", "-n", namespace, "get", "pod",
+        "-l", "app=cartservice",
+        "-o", "jsonpath={.items[0].metadata.name}",
+    ]
+    try:
+        proc = run_cmd(cmd, timeout=4.0)
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return proc.stdout.strip()
+
+
+def extract_budget_percent(clusters_json: str) -> float | None:
+    """Pluck the first cluster's retry_budget.budget_percent (Envoy schema).
+
+    Envoy reports `retry_budget` per cluster under `cluster_statuses`. The
+    field name varies slightly across versions; try a couple of shapes."""
+    try:
+        doc = json.loads(clusters_json)
+    except (ValueError, TypeError):
+        return None
+    statuses = doc.get("cluster_statuses") or []
+    for status in statuses:
+        cfg = status.get("circuit_breakers") or status.get("retry_budget")
+        if isinstance(cfg, dict):
+            pct = cfg.get("budget_percent") or cfg.get("percent")
+            if isinstance(pct, (int, float)):
+                return float(pct)
+    return None
+
+
+def probe_xds_apply(
+    namespace: str,
+    target_percent: float,
+    timeout_s: float = 5.0,
+    poll_ms: int = 100,
+) -> float | None:
+    """Block (in a worker thread) until the proxy reports `target_percent`.
+
+    Returns the elapsed milliseconds, or None on timeout / lookup failure.
+    Caller is expected to invoke this from a daemon thread; there is no
+    cancellation channel by design — the timeout is the bound."""
+    pod = find_proxy_pod(namespace)
+    if pod is None:
+        return None
+    deadline = time.perf_counter() + timeout_s
+    started = time.perf_counter()
+    poll_s = max(poll_ms, 1) / 1000.0
+    while time.perf_counter() < deadline:
+        raw = kubectl_exec_clusters(namespace, pod)
+        if raw is not None:
+            current = extract_budget_percent(raw)
+            if current is not None and abs(current - target_percent) < 0.001:
+                return (time.perf_counter() - started) * 1000.0
+        time.sleep(poll_s)
+    return None
+
+
 def write_decision_header(path: Path) -> None:
     if path.exists():
         return
@@ -576,33 +757,100 @@ def main() -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--namespace", default="online-boutique")
-    parser.add_argument("--client-host", required=True)
-    parser.add_argument("--ssh-user", required=True)
+    # Laptop-side SSH path: client-host + ssh-user are required.
+    # In-cluster Job: pass --loader-url-template + --loader-ports and skip
+    # the SSH args. We can't mark either set as required at parse time
+    # because both paths share this script; we validate after parsing.
+    parser.add_argument("--client-host", default="")
+    parser.add_argument("--ssh-user", default="")
     parser.add_argument("--ssh-opts", default="")
     parser.add_argument("--remote-metrics-dir", default="/tmp/online-boutique-clients/metrics")
+    parser.add_argument(
+        "--loader-url-template", default="",
+        help=(
+            "In-cluster obs path. e.g. 'http://10.10.1.6:{port}/window'. "
+            "Combined with --loader-ports, the controller fans out across "
+            "shards per tick and assembles a single observation window."
+        ),
+    )
+    parser.add_argument(
+        "--loader-ports", default="",
+        help=(
+            "Comma-separated shard ports for --loader-url-template (e.g. "
+            "8765,8766,8767,8768). Required when the URL template is set."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-ssh-obs", action="store_true",
+        help=(
+            "Force the SSH-cat observation path even when --loader-url-template "
+            "is provided. Used for side-by-side decision-drift checks against "
+            "the in-cluster path."
+        ),
+    )
     parser.add_argument(
         "--shadow",
         action="store_true",
         help="Observe and log decisions but do not patch the DestinationRule.",
     )
-    # Phase-separation flags. Phase 0 baseline runs with both set so the
-    # tick-latency table is comparable to the pre-plan-12 controller. The
-    # Phase 1 sweep leaves them off (= use the new fast paths).
+    parser.add_argument(
+        "--xds-probe",
+        action="store_true",
+        help=(
+            "After each successful patch, spawn a background thread that "
+            "polls one istio-proxy's /clusters every 100 ms and records the "
+            "wall-clock time at which the new budget_percent becomes visible. "
+            "Off by default — the polling itself perturbs kubectl-exec cost."
+        ),
+    )
+    # Legacy controller fallbacks. Both are off by default so production
+    # sweeps get the persistent kube client and the awk pre-filter; flip
+    # them on only when reproducing the pre-optimisation baseline row.
     parser.add_argument(
         "--legacy-patch-kubectl", action="store_true",
         help=(
             "Bypass the persistent kubernetes Python client and shell out "
-            "to `kubectl patch` per tick (Phase 0 measurement baseline)."
+            "to `kubectl patch` per tick (legacy measurement baseline)."
         ),
     )
     parser.add_argument(
         "--legacy-full-cat", action="store_true",
         help=(
             "Skip the server-side awk pre-filter in ssh_cat_metrics and "
-            "transfer every CSV byte each tick (Phase 0 measurement baseline)."
+            "transfer every CSV byte each tick (legacy measurement baseline)."
         ),
     )
     args = parser.parse_args()
+
+    # Resolve the observation transport. The HTTP path is the in-cluster
+    # default; the SSH path is the laptop-side fallback. We pick exactly
+    # one so the per-tick code is uniform.
+    use_http_obs = bool(args.loader_url_template) and not args.legacy_ssh_obs
+    loader_ports: list[int] = []
+    if use_http_obs:
+        if not args.loader_ports:
+            print(
+                "[rl_controller] --loader-url-template requires --loader-ports",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            loader_ports = [int(p) for p in args.loader_ports.split(",") if p.strip()]
+        except ValueError:
+            print(
+                f"[rl_controller] bad --loader-ports={args.loader_ports!r}",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        # SSH path (laptop-side, or in-cluster with --legacy-ssh-obs).
+        if not args.client_host or not args.ssh_user:
+            print(
+                "[rl_controller] SSH-obs path requires --client-host and --ssh-user "
+                "(or pass --loader-url-template + --loader-ports for HTTP)",
+                file=sys.stderr,
+            )
+            return 2
 
     cfg = load_config(Path(args.config))
     apply_enabled = not args.shadow
@@ -629,12 +877,16 @@ def main() -> int:
         effective_mode = "shadow_stub"
         apply_enabled = False
 
+    obs_path_label = (
+        f"http({len(loader_ports)} shards)" if use_http_obs else "ssh_cat"
+    )
     print(
         f"[rl_controller] mode={effective_mode}  apply={apply_enabled}  "
         f"model={'loaded' if model else 'none'}  "
         f"obs_window={cfg.observation_window_sec}s  "
         f"startup_hold_off={cfg.startup_hold_off_sec}s  "
-        f"obs_dim={len(OBSERVATION_FIELDS)}",
+        f"obs_dim={len(OBSERVATION_FIELDS)}  "
+        f"obs_transport={obs_path_label}",
         file=sys.stderr,
     )
 
@@ -650,6 +902,16 @@ def main() -> int:
     previous_metrics: dict[str, Any] | None = None
     start_ts = time.time()
     tick_index = 0
+    # Pending xDS-probe results land here keyed by the tick that triggered
+    # the patch; they are flushed onto the *next* tick's timing record so
+    # the apply-time is colocated with the patch event in the timeline.
+    pending_xds_apply: dict[str, Any] = {"ms": None}
+    pending_lock = threading.Lock()
+
+    def _xds_probe_async(target_percent: float) -> None:
+        ms = probe_xds_apply(args.namespace, target_percent)
+        with pending_lock:
+            pending_xds_apply["ms"] = ms
 
     with observations_path.open("a") as obs_f, \
             decisions_path.open("a", newline="") as dec_f, \
@@ -661,15 +923,27 @@ def main() -> int:
             tick_t0 = time.perf_counter()
             now = timing.t_loop_start
 
+            # Drain any xDS-probe result from the previous patch onto this
+            # tick's record. The probe runs in a background thread so the
+            # main loop never blocks on it.
+            with pending_lock:
+                timing.xds_apply_ms = pending_xds_apply["ms"]
+                pending_xds_apply["ms"] = None
+
             since_ts = now - cfg.observation_window_sec
             t = time.perf_counter()
-            raw = ssh_cat_metrics(
-                args.client_host, args.ssh_user, args.ssh_opts,
-                args.remote_metrics_dir,
-                # Phase 0 baseline: --legacy-full-cat disables the awk
-                # pre-filter so every byte is shipped each tick.
-                since_ts=None if args.legacy_full_cat else since_ts,
-            )
+            if use_http_obs:
+                raw = http_fetch_window(
+                    args.loader_url_template, loader_ports, since_ts,
+                )
+            else:
+                raw = ssh_cat_metrics(
+                    args.client_host, args.ssh_user, args.ssh_opts,
+                    args.remote_metrics_dir,
+                    # Legacy baseline: --legacy-full-cat disables the awk
+                    # pre-filter so every byte is shipped each tick.
+                    since_ts=None if args.legacy_full_cat else since_ts,
+                )
             timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
 
             t = time.perf_counter()
@@ -725,6 +999,12 @@ def main() -> int:
                 if patched:
                     previous_budget = current
                     current = selected
+                    if args.xds_probe:
+                        threading.Thread(
+                            target=_xds_probe_async,
+                            args=(selected.percent,),
+                            daemon=True,
+                        ).start()
 
             timing.total_ms = (time.perf_counter() - tick_t0) * 1000.0
 

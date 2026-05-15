@@ -12,29 +12,29 @@ SSH_KEY=""                          # e.g. "~/.ssh/id_rsa" (leave empty to use d
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 
 # ---------- Node definitions ----------
-# Current CloudLab/Emulab allocation (d430 hardware).
+# Current CloudLab/Emulab allocation (d430 hardware, UBUNTU24-64-STD,
+# experiment latencymodel/lcresci-305577). Private fabric verified healthy
+# (every node can ping every other on 10.10.1.x), so we use the canonical
+# private LAN routing path that matches the May-1 baseline.
 #
-# Logical  | Emulab host         | Role
-# ---------+---------------------+---------------------------------------
-# node0    | pc835.emulab.net    | Kubernetes master
-# node1    | pc822.emulab.net    | Worker 1
-# node2    | pc832.emulab.net    | Worker 2
-# node3    | pc830.emulab.net    | Worker 3
-# node4    | pc829.emulab.net    | Worker 4
-# node5    | pc827.emulab.net    | External load-gen / client host
-#
-# Note: nodes are running Ubuntu 24.04 (the older allocation used 22.04).
-# If kubeadm / containerd steps fail, verify deploy-k8s.sh package pins.
+# Logical  | Emulab host         | Public IP        | Private IP   | Role
+# ---------+---------------------+------------------+--------------+-------------
+# node0    | pc810.emulab.net    | 155.98.36.110    | 10.10.1.1    | K8s master
+# node1    | pc817.emulab.net    | 155.98.36.117    | 10.10.1.2    | Worker 1
+# node2    | pc820.emulab.net    | 155.98.36.120    | 10.10.1.3    | Worker 2
+# node3    | pc809.emulab.net    | 155.98.36.109    | 10.10.1.4    | Worker 3
+# node4    | pc801.emulab.net    | 155.98.36.101    | 10.10.1.5    | Worker 4
+# node5    | pc808.emulab.net    | 155.98.36.108    | 10.10.1.6    | Load-gen client
 
 # Master node
-MASTER_HOST="pc835.emulab.net"      # SSH-reachable address
+MASTER_HOST="pc810.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
-MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
+MASTER_IP="10.10.1.1"               # Private Emulab fabric IP (canonical path)
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc822.emulab.net" "pc832.emulab.net" "pc830.emulab.net" "pc829.emulab.net")
+WORKER_HOSTS=("pc817.emulab.net" "pc820.emulab.net" "pc809.emulab.net" "pc801.emulab.net")
 WORKER_HOSTNAMES=("worker01" "worker02" "worker03" "worker04")
-WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or leave empty
+WORKER_IPS=("10.10.1.2" "10.10.1.3" "10.10.1.4" "10.10.1.5")                       # (optional) same length as WORKER_HOSTS, or leave empty
 
 # Calico autodetection: which host interface BGP should peer over.
 # enp6s0f3 is the experimental fabric NIC on this d430 allocation; verified
@@ -42,7 +42,13 @@ WORKER_IPS=()                       # (optional) same length as WORKER_HOSTS, or
 CALICO_AUTODETECT_INTERFACE="enp6s0f3"
 
 # Client node (external load generator — not part of K8s cluster)
-CLIENT_HOST="pc827.emulab.net"      # SSH-reachable address
+CLIENT_HOST="pc808.emulab.net"      # SSH-reachable address
+CLIENT_IP="10.10.1.6"               # Private fabric IP — used by the
+                                    # in-cluster RL controller to reach
+                                    # traffic_gen.py's /window endpoint.
+                                    # Pods on the worker network can hit
+                                    # this directly via the same 10.10.1.x
+                                    # fabric the workers are on.
 
 # ---------- Kubernetes settings ----------
 K8S_VERSION="v1.30"                 # Kubernetes APT repo channel

@@ -16,6 +16,12 @@ DRY_RUN=false
 SKIP_PLOTS=false
 SHADOW_MODE=false
 NUM_LOADERS_OVERRIDE=""
+
+RL_IN_CLUSTER=false
+RL_IMAGE_TAG=""
+RL_CONFIGMAP=""
+RL_LOADER_PORT_BASE=""
+RL_LOADER_HOST=""
 RL_LEGACY_PATCH=false
 RL_LEGACY_FETCH=false
 
@@ -31,6 +37,11 @@ Options:
   --num-loaders <n>      Override experiment.num_loaders
   --shadow               Run the controller in shadow mode (no DestinationRule patches)
   --skip-plots           Skip final RL-vs-default comparison plotting
+  --rl-in-cluster        Run the RL controller as an in-cluster Job
+  --rl-image-tag <tag>   Image tag for in-cluster mode (default: v3)
+  --rl-configmap <name>  ConfigMap name (default: rl-controller-v3)
+  --rl-loader-port-base <n>  /window port base on the loader (default: 8765)
+  --rl-loader-host <ip>  Address pods use to reach the loader (default: \$CLIENT_IP)
   -n, --dry-run          Print run commands  without executing
   -h, --help             Show this message
 EOF
@@ -45,6 +56,11 @@ while (( $# > 0 )); do
     --num-loaders) NUM_LOADERS_OVERRIDE="$2"; shift 2 ;;
     --shadow) SHADOW_MODE=true; shift ;;
     --skip-plots) SKIP_PLOTS=true; shift ;;
+    --rl-in-cluster) RL_IN_CLUSTER=true; shift ;;
+    --rl-image-tag) RL_IMAGE_TAG="$2"; shift 2 ;;
+    --rl-configmap) RL_CONFIGMAP="$2"; shift 2 ;;
+    --rl-loader-port-base) RL_LOADER_PORT_BASE="$2"; shift 2 ;;
+    --rl-loader-host) RL_LOADER_HOST="$2"; shift 2 ;;
     --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
     --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
     -n|--dry-run) DRY_RUN=true; shift ;;
@@ -67,6 +83,7 @@ if [[ ! -d "${RL_VENV}" ]]; then
   curl -sS https://bootstrap.pypa.io/get-pip.py | "${RL_VENV}/bin/python3" >/dev/null 2>&1 || \
     python3 -m ensurepip --root "${RL_VENV}" 2>/dev/null || true
 fi
+
 # Ensure required packages are in the venv.
 # `kubernetes` is required for the persistent CustomObjectsApi client.
 if ! "${RL_VENV}/bin/python3" -c "import stable_baselines3, kubernetes" >/dev/null 2>&1; then
@@ -78,6 +95,7 @@ if ! "${RL_VENV}/bin/python3" -c "import stable_baselines3, kubernetes" >/dev/nu
     "numpy>=2.0" matplotlib pandas gymnasium pyyaml psutil \
     "kubernetes>=29" requests
 fi
+
 # Prepend venv to PATH so every python3 call in subprocesses uses the venv.
 export PATH="${RL_VENV}/bin:${PATH}"
 echo "[rl-v1] python: $(which python3)  numpy: $(python3 -c 'import numpy; print(numpy.__version__)')" >&2
@@ -256,6 +274,13 @@ PY
   )
   [[ "${RESOURCE_ENABLED}" == "true" ]] && cmd+=(--resource-sampling)
   [[ "${SHADOW_MODE}" == "true" ]] && cmd+=(--rl-shadow)
+  if [[ "${RL_IN_CLUSTER}" == "true" ]]; then
+    cmd+=(--rl-in-cluster)
+    [[ -n "${RL_IMAGE_TAG}" ]] && cmd+=(--rl-image-tag "${RL_IMAGE_TAG}")
+    [[ -n "${RL_CONFIGMAP}" ]] && cmd+=(--rl-configmap "${RL_CONFIGMAP}")
+    [[ -n "${RL_LOADER_PORT_BASE}" ]] && cmd+=(--rl-loader-port-base "${RL_LOADER_PORT_BASE}")
+    [[ -n "${RL_LOADER_HOST}" ]] && cmd+=(--rl-loader-host "${RL_LOADER_HOST}")
+  fi
   [[ "${RL_LEGACY_PATCH}" == "true" ]] && cmd+=(--rl-legacy-patch)
   [[ "${RL_LEGACY_FETCH}" == "true" ]] && cmd+=(--rl-legacy-fetch)
   [[ "${DRY_RUN}" == "true" ]] && cmd+=(--dry-run)

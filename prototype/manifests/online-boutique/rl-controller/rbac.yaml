@@ -1,0 +1,40 @@
+# RBAC for the in-cluster RL controller.
+#
+# Scope is intentionally narrow: get + patch on the single DestinationRule
+# `arolla-baseline-retry-budget` in `online-boutique`. The controller cannot
+# create new resources, mutate any other DR, or touch any other namespace.
+# That keeps the blast radius bounded if the controller misbehaves.
+#
+# Apply once per cluster lifecycle:
+#   kubectl apply -f prototype/manifests/online-boutique/rl-controller/rbac.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rl-controller
+  namespace: online-boutique
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rl-controller-patch-dr
+  namespace: online-boutique
+rules:
+  - apiGroups: ["networking.istio.io"]
+    resources: ["destinationrules"]
+    resourceNames: ["arolla-baseline-retry-budget"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rl-controller-patch-dr
+  namespace: online-boutique
+subjects:
+  - kind: ServiceAccount
+    name: rl-controller
+    namespace: online-boutique
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rl-controller-patch-dr

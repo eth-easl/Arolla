@@ -19,6 +19,14 @@ REMOTE_METRICS_DIR="${REMOTE_BASE}/metrics"
 # GIL ceiling that caps a single Python loader at ~1000 rps.
 NUM_LOADERS="${NUM_LOADERS:-1}"
 
+# When RL_WINDOW_PORT_BASE > 0, each shard exposes an aiohttp /window
+# endpoint on port_base + shard_id so the in-cluster RL controller can
+# pull recent attempt rows over HTTP instead of SSH-cat. 0 (default)
+# leaves the legacy SSH-cat path in charge — safe to set on every run,
+# traffic_gen.py no-ops the server when the value is 0.
+RL_WINDOW_PORT_BASE="${RL_WINDOW_PORT_BASE:-0}"
+RL_WINDOW_KEEP_SEC="${RL_WINDOW_KEEP_SEC:-60}"
+
 SSH="ssh ${SSH_OPTS} ${SSH_USER}@${CLIENT_HOST}"
 MASTER_SSH="ssh ${SSH_OPTS} ${SSH_USER}@${MASTER_HOST}"
 
@@ -110,6 +118,8 @@ start_clients() {
         --output-dir \"${REMOTE_METRICS_DIR}\" \
         --shard-id \$i \
         --num-shards ${NUM_LOADERS} \
+        --rl-window-port-base ${RL_WINDOW_PORT_BASE} \
+        --rl-window-keep-sec ${RL_WINDOW_KEEP_SEC} \
         > \"\$log_i\" 2>&1 < /dev/null &
       echo \$! >> \"${REMOTE_PID_FILE}\"
     done

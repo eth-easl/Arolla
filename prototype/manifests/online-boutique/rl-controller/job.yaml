@@ -1,0 +1,79 @@
+# Per-run Job for the in-cluster RL controller.
+#
+# Templated; run-experiment.sh substitutes:
+#   __RUN_ID__         unique short id ((scenario, policy)-derived)
+#   __NAMESPACE__      online-boutique
+#   __IMAGE__          rl-controller:vN  (matches build.sh tag)
+#   __CONFIGMAP__      rl-controller-v3   (matches model+config-map)
+#   __LOADER_HOST__    pc808.emulab.net   (CLIENT_HOST private IP)
+#   __LOADER_PORTS__   8765,8766,8767,8768
+#
+# A `Job` (not `Deployment`) is used so the controller's state — including
+# the SB3 model's warm caches and the persistent kubernetes client — is
+# fresh for every (scenario × policy) cell. This matches the rolling-restart
+# invariant in `CLAUDE.md`.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rl-controller-__RUN_ID__
+  namespace: __NAMESPACE__
+  labels:
+    app: rl-controller
+    run-id: __RUN_ID__
+spec:
+  # 0 retries — if the controller pod crashes mid-run, we want the run to
+  # fail loudly, not silently restart from a stale state.
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: rl-controller
+        run-id: __RUN_ID__
+      annotations:
+        # Keep the controller pod out of the mesh entirely. It talks to the
+        # loader's plain-text :8765/window endpoint over the worker network
+        # and to the kube-apiserver over the in-cluster service IP; both
+        # paths are bypassed by the absence of a sidecar.
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: rl-controller
+      restartPolicy: Never
+      containers:
+        - name: rl-controller
+          image: __IMAGE__
+          # Image is preloaded onto every worker via distribute.sh; never
+          # try to pull from a registry (there isn't one in-cluster).
+          imagePullPolicy: Never
+          args:
+            - "--config=/etc/rl/config.yaml"
+            - "--out-dir=/var/log/rl"
+            - "--namespace=__NAMESPACE__"
+            - "--loader-url-template=http://__LOADER_HOST__:{port}/window"
+            - "--loader-ports=__LOADER_PORTS__"
+          # 1 cpu / 1 GiB is comfortable for the SB3 forward pass and
+          # decision-rate computations at 2s cadence; bump if profiling
+          # ever shows CPU contention.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1500m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: rl-config
+              mountPath: /etc/rl
+              readOnly: true
+            - name: rl-logs
+              mountPath: /var/log/rl
+      volumes:
+        - name: rl-config
+          configMap:
+            # Mounted as files: model.zip + config.yaml.
+            name: __CONFIGMAP__
+        - name: rl-logs
+          # Logs are collected via `kubectl cp` before the pod is deleted.
+          # An emptyDir is enough — nothing else reads them in-flight.
+          emptyDir: {}

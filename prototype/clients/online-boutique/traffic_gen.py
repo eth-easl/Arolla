@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import concurrent.futures
 import http.client
 import json
@@ -80,6 +81,27 @@ DEFAULT_HTTP_THREAD_POOL_SIZE = 1024
 _CSV_FILE: "Optional[Any]" = None
 _LOG_ATTEMPTS: bool = False
 
+# ---------------------------------------------------------------------------
+# RL controller observation window (in-memory ring buffer + HTTP)
+# ---------------------------------------------------------------------------
+#
+# When --rl-window-port-base is non-zero, every CSV row is also appended to a
+# bounded deque, and a tiny aiohttp server on `port_base + shard_id` exposes
+# `/window?since=<unix_ts>` returning the rows newer than `since`. This
+# replaces the controller's SSH-cat loop: bytes per tick drop from
+# O(file_size) to O(rps × decision_interval), and the loader pays at most
+# one extra deque-append per HTTP attempt.
+#
+# `_WINDOW_KEEP_SEC` bounds memory: rows older than that are dropped on
+# every append (lazy GC). A 60 s ceiling fits the longest configured
+# observation window plus margin without growing unbounded. The
+# `_WINDOW_RING` is per-process (one shard), so the controller fans out
+# across ports per tick.
+
+_WINDOW_RING: "Optional[collections.deque[dict[str, Any]]]" = None
+_WINDOW_KEEP_SEC: float = 60.0
+_WINDOW_SHARD_ID: int = 0
+
 
 def write_csv_row(line: str) -> None:
     """Append one row to the run's CSV. Single-threaded by construction:
@@ -87,6 +109,24 @@ def write_csv_row(line: str) -> None:
     holds the GIL until it returns, so two writes can never interleave."""
     if _CSV_FILE is not None:
         _CSV_FILE.write(line)
+
+
+def enqueue_window_row(row: dict[str, Any]) -> None:
+    """Push one structured attempt row onto the in-memory ring (if enabled).
+
+    The row schema mirrors the CSV columns so `/window` consumers see
+    exactly the same fields the on-disk file has. Pruning happens on every
+    enqueue: cheaper than a separate housekeeping task, and matches the
+    deque's natural growth rate."""
+    if _WINDOW_RING is None:
+        return
+    _WINDOW_RING.append(row)
+    cutoff = row["timestamp"] - _WINDOW_KEEP_SEC
+    # The deque is naturally ordered by enqueue time → drop from the left
+    # while it's older than the cutoff. Two-pop bound = the worst lag a
+    # single tick can introduce; in practice we drop 0-2 rows per call.
+    while _WINDOW_RING and _WINDOW_RING[0]["timestamp"] < cutoff:
+        _WINDOW_RING.popleft()
 
 
 # ---------------------------------------------------------------------------
@@ -469,11 +509,29 @@ async def execute_step(
 
         # One CSV row per attempt. Synchronous write to a long-held file
         # handle — see write_csv_row for why this is safe.
+        attempt_ts = time.time()
         write_csv_row(
-            f"{time.time():.6f},{name},{worker_idx},{req_id},{step_name},"
+            f"{attempt_ts:.6f},{name},{worker_idx},{req_id},{step_name},"
             f"{method},{path},{attempt_number},{int(is_retry)},{status},"
             f"{int(ok)},{latency:.6f}\n"
         )
+
+        # Also enqueue the structured row for /window consumers.
+        # No-op when --rl-window-port-base is 0. Schema matches the CSV.
+        enqueue_window_row({
+            "timestamp": attempt_ts,
+            "profile": name,
+            "worker": worker_idx,
+            "request_id": req_id,
+            "request_type": step_name,
+            "method": method,
+            "path": path,
+            "attempt": attempt_number,
+            "is_retry": int(is_retry),
+            "status": status,
+            "ok": int(ok),
+            "latency_s": latency,
+        })
 
         # Per-attempt structured log line. Off by default — at high RPS the
         # json.dumps + flushed print is one of the dominant per-fire costs.
@@ -658,10 +716,26 @@ async def _open_loop_one(
     if inflight_sem is not None:
         if inflight_sem.locked():
             # Client itself is overloaded — drop this request and log it.
+            drop_ts = time.time()
+            drop_profile = profile.get("name", "client")
             write_csv_row(
-                f"{time.time():.6f},{profile.get('name','client')},{fire_idx},"
+                f"{drop_ts:.6f},{drop_profile},{fire_idx},"
                 f"client-overload,client-overload,DROP,/,1,0,-1,0,0.000000\n"
             )
+            enqueue_window_row({
+                "timestamp": drop_ts,
+                "profile": drop_profile,
+                "worker": fire_idx,
+                "request_id": "client-overload",
+                "request_type": "client-overload",
+                "method": "DROP",
+                "path": "/",
+                "attempt": 1,
+                "is_retry": 0,
+                "status": -1,
+                "ok": 0,
+                "latency_s": 0.0,
+            })
             return
         await inflight_sem.acquire()
     try:
@@ -783,6 +857,89 @@ async def open_loop_firer(
 
 
 # ---------------------------------------------------------------------------
+# RL controller observation server (aiohttp /window endpoint)
+# ---------------------------------------------------------------------------
+#
+# Tiny HTTP server that exposes the in-memory ring buffer to the in-cluster
+# RL controller. One server per shard, on `port_base + shard_id`, so the
+# controller can fan-out across all 4 shard ports per tick.
+#
+# aiohttp is imported lazily because:
+#   * the loader machine doesn't always have it installed (opt-in per
+#     cluster bootstrap; legacy SSH-cat path still works without it),
+#   * even on machines with it, this module is sometimes imported by the
+#     test harness which doesn't need the server.
+# If the import fails the server is silently disabled and a warning is
+# printed; the controller's --legacy-ssh-obs flag is the fallback.
+
+
+async def _handle_window(request: "Any") -> "Any":
+    """`GET /window?since=<unix_ts>` → JSON of rows with timestamp ≥ since.
+
+    Lazily imports aiohttp inside this handler is wrong (handlers are
+    already running on aiohttp); this body only runs when aiohttp is in
+    scope, so the bare `web.json_response(...)` reference is safe."""
+    from aiohttp import web  # noqa: PLC0415
+
+    since_raw = request.query.get("since", "0")
+    try:
+        since = float(since_raw)
+    except (TypeError, ValueError):
+        return web.json_response({"error": f"bad since={since_raw!r}"}, status=400)
+
+    # Snapshot the deque first so we don't iterate concurrently with new
+    # appends. `list()` on a deque is O(n) and safe under the GIL — we
+    # don't need a lock as long as the snapshot is one statement.
+    if _WINDOW_RING is None:
+        rows: list[dict[str, Any]] = []
+    else:
+        rows = [r for r in list(_WINDOW_RING) if r["timestamp"] >= since]
+    return web.json_response({
+        "rows": rows,
+        "now": time.time(),
+        "shard": _WINDOW_SHARD_ID,
+    })
+
+
+async def _start_window_server(port: int) -> "Any":
+    """Start the aiohttp server. Returns the AppRunner so main_async can
+    cleanly stop it on shutdown. Returns None on import failure."""
+    try:
+        from aiohttp import web  # noqa: PLC0415
+    except ImportError:
+        print(
+            "[traffic_gen] aiohttp is not installed; /window server "
+            "disabled (controller falls back to --legacy-ssh-obs).",
+            file=sys.stderr,
+        )
+        return None
+
+    app = web.Application()
+    app.router.add_get("/window", _handle_window)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    try:
+        await site.start()
+    except OSError as exc:
+        print(
+            f"[traffic_gen] /window server bind failed on :{port}: {exc}; "
+            "the controller will fall back to --legacy-ssh-obs.",
+            file=sys.stderr,
+        )
+        await runner.cleanup()
+        return None
+
+    print(json.dumps({
+        "event": "window_server_started",
+        "ts": time.time(),
+        "port": port,
+        "shard_id": _WINDOW_SHARD_ID,
+    }), flush=True)
+    return runner
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -793,7 +950,7 @@ CSV_HEADER = (
 
 
 async def main_async(args) -> int:
-    global _CSV_FILE, _LOG_ATTEMPTS
+    global _CSV_FILE, _LOG_ATTEMPTS, _WINDOW_RING, _WINDOW_KEEP_SEC, _WINDOW_SHARD_ID
 
     profile_dir = Path(args.profile_dir)
     profiles = load_profiles(profile_dir)
@@ -844,6 +1001,19 @@ async def main_async(args) -> int:
     # this halves the syscalls and removes the asyncio.Lock entirely.
     _CSV_FILE = open(out_csv, "a", buffering=1)
     _LOG_ATTEMPTS = bool(args.log_attempts)
+
+    # Enable the in-memory ring + /window server when a port base is
+    # configured. The ring is enabled even if aiohttp is missing — it's
+    # cheap and lets us see in the log what the server *would* have
+    # exposed. The server start is best-effort: failure prints a warning
+    # and the controller transparently falls back to --legacy-ssh-obs.
+    window_runner = None
+    if args.rl_window_port_base > 0:
+        _WINDOW_SHARD_ID = shard_id
+        _WINDOW_KEEP_SEC = float(args.rl_window_keep_sec)
+        _WINDOW_RING = collections.deque()
+        port = args.rl_window_port_base + shard_id
+        window_runner = await _start_window_server(port)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -932,6 +1102,11 @@ async def main_async(args) -> int:
             except Exception:
                 pass
             _CSV_FILE = None
+        if window_runner is not None:
+            try:
+                await window_runner.cleanup()
+            except Exception:
+                pass
     return 0
 
 
@@ -955,6 +1130,23 @@ def parse_args():
     # default; turn on for debugging.
     p.add_argument("--log-attempts", action="store_true",
                    help="Log a JSON line per HTTP attempt to stdout (slow)")
+    # In-memory ring + aiohttp /window endpoint on
+    # `port_base + shard_id`. 0 = disabled (legacy SSH-cat path).
+    p.add_argument(
+        "--rl-window-port-base", type=int, default=0,
+        help=(
+            "If > 0, expose a /window?since=<ts> aiohttp endpoint on "
+            "port_base + shard_id and keep an in-memory ring of recent "
+            "attempt rows. Used by the in-cluster RL controller."
+        ),
+    )
+    p.add_argument(
+        "--rl-window-keep-sec", type=float, default=60.0,
+        help=(
+            "How many seconds of attempt rows to keep in the ring. Default "
+            "60 s (longest configured observation_window_sec + margin)."
+        ),
+    )
     return p.parse_args()
 
 
