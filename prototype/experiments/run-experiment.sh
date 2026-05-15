@@ -94,6 +94,12 @@ PHASE_SNAPSHOTS=false
 # back to observation-only (no DestinationRule patches).
 RL_CONTROLLER_CONFIG=""
 RL_SHADOW=false
+
+# Measurement baselines: when true, the controller falls back to
+# its patch / fetch paths (kubectl subprocess, full-CSV cat).
+# Used only for the baseline row
+RL_LEGACY_PATCH=false
+RL_LEGACY_FETCH=false
 RESOURCE_SAMPLING=false
 RESOURCE_SAMPLE_INTERVAL_SEC=2
 HELPER_PIDS=()
@@ -275,6 +281,8 @@ while (( $# > 0 )); do
     --phase-snapshots) PHASE_SNAPSHOTS=true; shift ;;
     --rl-controller-config) RL_CONTROLLER_CONFIG="$2"; shift 2 ;;
     --rl-shadow)     RL_SHADOW=true; shift ;;
+    --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
+    --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
     --resource-sampling) RESOURCE_SAMPLING=true; shift ;;
     --resource-sample-interval) RESOURCE_SAMPLE_INTERVAL_SEC="$2"; shift 2 ;;
     --num-spikes)    NUM_SPIKES="$2"; shift 2 ;;
@@ -858,6 +866,8 @@ run_single() {
       --remote-metrics-dir "${REMOTE_METRICS_DIR}"
     )
     [[ "${RL_SHADOW}" == true ]] && controller_args+=(--shadow)
+    [[ "${RL_LEGACY_PATCH}" == true ]] && controller_args+=(--legacy-patch-kubectl)
+    [[ "${RL_LEGACY_FETCH}" == true ]] && controller_args+=(--legacy-full-cat)
     "${controller_args[@]}" > "${rl_controller_dir}/rl-controller.log" 2>&1 &
     rl_controller_pid="$!"
     HELPER_PIDS+=("${rl_controller_pid}")
@@ -865,11 +875,15 @@ run_single() {
 
   if "${RESOURCE_SAMPLING}"; then
     phase "[${policy}] start resource sampler (${RESOURCE_SAMPLE_INTERVAL_SEC}s)"
-    python3 "${SCRIPT_DIR}/resource_sampler.py" \
-      --out "${out_dir}/resource-usage.csv" \
-      --namespace "${NAMESPACE}" \
-      --interval "${RESOURCE_SAMPLE_INTERVAL_SEC}" \
-      > "${out_dir}/resource-sampler.log" 2>&1 &
+    local sampler_args=(
+      python3 "${SCRIPT_DIR}/resource_sampler.py"
+      --out "${out_dir}/resource-usage.csv"
+      --namespace "${NAMESPACE}"
+      --interval "${RESOURCE_SAMPLE_INTERVAL_SEC}"
+    )
+    # Also sample the RL controller process when it's running.
+    [[ -n "${rl_controller_pid}" ]] && sampler_args+=(--pid "${rl_controller_pid}")
+    "${sampler_args[@]}" > "${out_dir}/resource-sampler.log" 2>&1 &
     resource_sampler_pid="$!"
     HELPER_PIDS+=("${resource_sampler_pid}")
   fi

@@ -195,12 +195,33 @@ def ssh_cat_metrics(
     ssh_opts: str,
     remote_metrics_dir: str,
     timeout: float = 8.0,
+    since_ts: float | None = None,
 ) -> str:
+    """Fetch client_attempts*.csv rows newer than `since_ts` from CLIENT_HOST.
+
+    Phase 1.2: when `since_ts` is provided, the remote shell now runs an awk
+    pre-filter so only rows whose timestamp (column 1) is ≥ since_ts are sent
+    over the wire. At 1.6k RPS × 2 s decision interval that is ~3 KB per tick
+    instead of multiple MB, which both shrinks the SCP-style copy and keeps
+    parse_client_rows from re-doing the timestamp filter on millions of stale
+    rows. Falls back to a full cat when since_ts is None (legacy callers)."""
     target = f"{ssh_user}@{client_host}"
     cmd = ["ssh"]
     if ssh_opts:
         cmd.extend(ssh_opts.split())
-    cmd.extend([target, f"cat {remote_metrics_dir}/client_attempts*.csv 2>/dev/null || true"])
+    if since_ts is None:
+        remote = f"cat {remote_metrics_dir}/client_attempts*.csv 2>/dev/null || true"
+    else:
+        # `awk -F,` with `$1+0 >= s` does a numeric compare on the timestamp
+        # column. The header line is dropped because parse_client_rows
+        # already skips it; the `2>/dev/null || true` keeps the call quiet
+        # when no shard files exist yet (e.g. first tick after start).
+        # Pass since_ts via -v to avoid quoting headaches in the SSH command.
+        remote = (
+            f"awk -F, -v s={since_ts:.6f} '$1+0 >= s' "
+            f"{remote_metrics_dir}/client_attempts*.csv 2>/dev/null || true"
+        )
+    cmd.extend([target, remote])
     try:
         proc = run_cmd(cmd, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -417,7 +438,62 @@ def stub_policy(current: RetryBudget, cfg: ControllerConfig) -> RetryBudget:
     )
 
 
-def patch_retry_budget(namespace: str, budget: RetryBudget) -> bool:
+# ---------------------------------------------------------------------------
+# Kubernetes client (Phase 1.1: persistent CustomObjectsApi -> no per-tick
+# kubectl subprocess). Lazy singleton — the TLS handshake and config load
+# happen the first time we need to patch, then the HTTP/2 PATCH stream is
+# reused for every later tick. The Mac-side controller uses a kubeconfig
+# file (KUBECONFIG=~/.kube/config-emulab); falling back to the kubectl
+# subprocess keeps the script runnable on hosts without the python
+# kubernetes client installed.
+# ---------------------------------------------------------------------------
+
+_K8S_API: Any = None
+_K8S_API_BACKEND: str = "uninitialised"
+
+
+def _get_k8s_custom_objects_api() -> Any:
+    """Return a cached CustomObjectsApi or None if the python client is
+    unavailable / no usable kubeconfig is in scope. The first call initialises
+    config; subsequent calls return the same client."""
+    global _K8S_API, _K8S_API_BACKEND
+    if _K8S_API is not None or _K8S_API_BACKEND == "kube_config":
+        return _K8S_API
+    try:
+        from kubernetes import client, config  # noqa: PLC0415
+    except ImportError:
+        print(
+            "[rl_controller] python kubernetes client not installed; "
+            "falling back to kubectl subprocess for patches",
+            file=sys.stderr,
+        )
+        _K8S_API_BACKEND = "kubectl_subprocess"
+        return None
+
+    try:
+        config.load_kube_config()
+        _K8S_API_BACKEND = "kube_config"
+    except Exception as exc:
+        print(
+            f"[rl_controller] could not load kube config "
+            f"({exc.__class__.__name__}: {exc}); falling back to kubectl",
+            file=sys.stderr,
+        )
+        _K8S_API_BACKEND = "kubectl_subprocess"
+        return None
+
+    _K8S_API = client.CustomObjectsApi()
+    print(
+        f"[rl_controller] kubernetes client ready (backend={_K8S_API_BACKEND})",
+        file=sys.stderr,
+    )
+    return _K8S_API
+
+
+def _patch_retry_budget_via_kubectl(namespace: str, budget: RetryBudget) -> bool:
+    """Last-resort fallback: shell out to kubectl. Used only when the python
+    kubernetes client is unavailable (legacy hosts without the dependency),
+    or when --legacy-patch-kubectl forces it for the Phase-0 baseline."""
     payload = {
         "spec": {
             "trafficPolicy": {
@@ -435,6 +511,43 @@ def patch_retry_budget(namespace: str, budget: RetryBudget) -> bool:
     ]
     proc = run_cmd(cmd, timeout=10)
     return proc.returncode == 0
+
+
+def patch_retry_budget(
+    namespace: str, budget: RetryBudget, *, force_kubectl: bool = False,
+) -> bool:
+    if force_kubectl:
+        return _patch_retry_budget_via_kubectl(namespace, budget)
+    api = _get_k8s_custom_objects_api()
+    if api is None:
+        return _patch_retry_budget_via_kubectl(namespace, budget)
+    body = {
+        "spec": {
+            "trafficPolicy": {
+                "retryBudget": {
+                    "percent": budget.percent,
+                    "minRetryConcurrency": budget.min_retry_concurrency,
+                }
+            }
+        }
+    }
+    try:
+        api.patch_namespaced_custom_object(
+            group="networking.istio.io",
+            version="v1",
+            namespace=namespace,
+            plural="destinationrules",
+            name="arolla-baseline-retry-budget",
+            body=body,
+        )
+        return True
+    except Exception as exc:
+        print(
+            f"[rl_controller] patch_namespaced_custom_object failed: "
+            f"{exc.__class__.__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def write_decision_header(path: Path) -> None:
@@ -471,6 +584,23 @@ def main() -> int:
         "--shadow",
         action="store_true",
         help="Observe and log decisions but do not patch the DestinationRule.",
+    )
+    # Phase-separation flags. Phase 0 baseline runs with both set so the
+    # tick-latency table is comparable to the pre-plan-12 controller. The
+    # Phase 1 sweep leaves them off (= use the new fast paths).
+    parser.add_argument(
+        "--legacy-patch-kubectl", action="store_true",
+        help=(
+            "Bypass the persistent kubernetes Python client and shell out "
+            "to `kubectl patch` per tick (Phase 0 measurement baseline)."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-full-cat", action="store_true",
+        help=(
+            "Skip the server-side awk pre-filter in ssh_cat_metrics and "
+            "transfer every CSV byte each tick (Phase 0 measurement baseline)."
+        ),
     )
     args = parser.parse_args()
 
@@ -531,14 +661,19 @@ def main() -> int:
             tick_t0 = time.perf_counter()
             now = timing.t_loop_start
 
+            since_ts = now - cfg.observation_window_sec
             t = time.perf_counter()
             raw = ssh_cat_metrics(
-                args.client_host, args.ssh_user, args.ssh_opts, args.remote_metrics_dir,
+                args.client_host, args.ssh_user, args.ssh_opts,
+                args.remote_metrics_dir,
+                # Phase 0 baseline: --legacy-full-cat disables the awk
+                # pre-filter so every byte is shipped each tick.
+                since_ts=None if args.legacy_full_cat else since_ts,
             )
             timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
 
             t = time.perf_counter()
-            rows = parse_client_rows(raw, since_ts=now - cfg.observation_window_sec)
+            rows = parse_client_rows(raw, since_ts=since_ts)
             timing.obs_parse_ms = (time.perf_counter() - t) * 1000.0
             timing.rows = len(rows)
 
@@ -579,7 +714,10 @@ def main() -> int:
 
             if patch_allowed:
                 t = time.perf_counter()
-                patched = patch_retry_budget(args.namespace, selected)
+                patched = patch_retry_budget(
+                    args.namespace, selected,
+                    force_kubectl=args.legacy_patch_kubectl,
+                )
                 timing.patch_ms = (time.perf_counter() - t) * 1000.0
                 timing.patch_attempted = True
                 timing.patch_succeeded = patched

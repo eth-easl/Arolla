@@ -16,6 +16,8 @@ DRY_RUN=false
 SKIP_PLOTS=false
 SHADOW_MODE=false
 NUM_LOADERS_OVERRIDE=""
+RL_LEGACY_PATCH=false
+RL_LEGACY_FETCH=false
 
 usage() {
   cat <<EOF
@@ -43,6 +45,8 @@ while (( $# > 0 )); do
     --num-loaders) NUM_LOADERS_OVERRIDE="$2"; shift 2 ;;
     --shadow) SHADOW_MODE=true; shift ;;
     --skip-plots) SKIP_PLOTS=true; shift ;;
+    --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
+    --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
     -n|--dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -64,13 +68,15 @@ if [[ ! -d "${RL_VENV}" ]]; then
     python3 -m ensurepip --root "${RL_VENV}" 2>/dev/null || true
 fi
 # Ensure required packages are in the venv.
-if ! "${RL_VENV}/bin/python3" -c "import stable_baselines3" >/dev/null 2>&1; then
-  echo "[rl-v1] installing SB3 + torch into venv (this may take a minute)..." >&2
+# `kubernetes` is required for the persistent CustomObjectsApi client.
+if ! "${RL_VENV}/bin/python3" -c "import stable_baselines3, kubernetes" >/dev/null 2>&1; then
+  echo "[rl-v1] installing SB3 + torch + kubernetes into venv (this may take a minute)..." >&2
   "${RL_VENV}/bin/pip" install --quiet \
     "stable-baselines3>=2.0" \
     "torch" \
     --extra-index-url https://download.pytorch.org/whl/cpu \
-    "numpy>=2.0" matplotlib pandas gymnasium pyyaml
+    "numpy>=2.0" matplotlib pandas gymnasium pyyaml psutil \
+    "kubernetes>=29" requests
 fi
 # Prepend venv to PATH so every python3 call in subprocesses uses the venv.
 export PATH="${RL_VENV}/bin:${PATH}"
@@ -250,6 +256,8 @@ PY
   )
   [[ "${RESOURCE_ENABLED}" == "true" ]] && cmd+=(--resource-sampling)
   [[ "${SHADOW_MODE}" == "true" ]] && cmd+=(--rl-shadow)
+  [[ "${RL_LEGACY_PATCH}" == "true" ]] && cmd+=(--rl-legacy-patch)
+  [[ "${RL_LEGACY_FETCH}" == "true" ]] && cmd+=(--rl-legacy-fetch)
   [[ "${DRY_RUN}" == "true" ]] && cmd+=(--dry-run)
 
   echo "[rl-v1] command: NUM_LOADERS=${NUM_LOADERS} ${cmd[*]}"

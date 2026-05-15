@@ -69,5 +69,22 @@ ISTIO_TEST_NS="istio-test"         # Namespace for demo app + Gateway (with side
 KUBECONFIG_PATH="$HOME/.kube/config-emulab"    # Cluster-specific kubeconfig file
 export KUBECONFIG="$KUBECONFIG_PATH"
 
+# ---------- istiod tuning (Phase 1.3 of plan-12) ----------
+# Reduce istiod's debounce window so DestinationRule patches from the RL
+# controller propagate to sidecars in ~10ms instead of the default ~100ms.
+# This is a cluster-wide change — re-apply after every fresh allocation:
+#
+#   kubectl -n istio-system set env deployment/istiod PILOT_DEBOUNCE_AFTER=10ms
+#   kubectl -n istio-system rollout status deployment/istiod --timeout=60s
+#   # verify:
+#   kubectl -n istio-system exec deploy/istiod -- env | grep DEBOUNCE
+#
+# Revert with:
+#   kubectl -n istio-system set env deployment/istiod PILOT_DEBOUNCE_AFTER-
+#
+# Affects every workload in the cluster, so document it on any baseline runs
+# you compare against.
+ISTIOD_DEBOUNCE_AFTER="10ms"
+
 # ---------- Misc ----------
 LOG_DIR="./k8s-deploy-logs"         # Local directory for per-node log files
