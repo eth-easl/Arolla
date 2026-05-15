@@ -215,7 +215,17 @@ def plot_rps_comparison(
 # RL-specific: decision timeline and resource usage
 # ---------------------------------------------------------------------------
 
-def read_decisions(path: Path) -> dict[str, list[float]]:
+def read_decisions(path: Path, t_ref: float | None = None) -> dict[str, list[float]]:
+    """Load rl-decisions.csv.
+
+    Args:
+        path:   Path to rl-decisions.csv.
+        t_ref:  Absolute epoch time to use as x=0.  When provided (e.g. the
+                ``t_warmup_end`` value from timeline.json) the returned ``"t"``
+                values are aligned with the standard plot x-axis so the fault
+                band can be drawn at the correct position.  Falls back to the
+                first row's timestamp when omitted.
+    """
     if not path.exists():
         return {"t": [], "percent": [], "min": []}
     rows = []
@@ -231,7 +241,7 @@ def read_decisions(path: Path) -> dict[str, list[float]]:
                 continue
     if not rows:
         return {"t": [], "percent": [], "min": []}
-    t0 = rows[0]["ts"]
+    t0 = t_ref if t_ref is not None else rows[0]["ts"]
     return {
         "t": [r["ts"] - t0 for r in rows],
         "percent": [r["percent"] for r in rows],
@@ -265,8 +275,16 @@ def plot_decisions(
     reference_percent: float,
     reference_min: float,
     policy_label: str = "RL",
+    experiment: dict | None = None,
 ) -> None:
-    """Selected retry-budget trajectory for one policy, with DR-default refs."""
+    """Selected retry-budget trajectory for one policy, with DR-default refs.
+
+    When *experiment* is supplied the fault window is shaded using the same
+    ``prefault_sec`` / ``fault_sec`` values used by the success-rate and
+    latency plots, so all figures share the same visual timeline.  This
+    requires that ``decisions["t"]`` was computed with ``t_ref=t_warmup_end``
+    (pass the ``t_warmup_end`` value from timeline.json to ``read_decisions``).
+    """
     if not decisions["t"]:
         return
     analyze._apply_paper_style()
@@ -283,7 +301,7 @@ def plot_decisions(
         color="tab:blue",
         label=f"{policy_label} retryBudget.percent (agent)",
     )
-    ax1.set_xlabel("seconds since controller start")
+    ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("retryBudget.percent", color="tab:blue")
     ax1.tick_params(axis="y", labelcolor="tab:blue")
 
@@ -317,6 +335,20 @@ def plot_decisions(
         color="#92400e",
         label=f"DR default minConcurrency={int(reference_min)}",
     )[0]
+
+    # Fault-window shading — same position as success-rate / latency plots.
+    if experiment:
+        fault_start_x, fault_end_x = analyze._fault_band_x(experiment)
+        if fault_end_x > fault_start_x:
+            ax1.axvspan(fault_start_x, fault_end_x, color="lightgray", alpha=0.55, zorder=0)
+            ymin, ymax = ax1.get_ylim()
+            ax1.text(
+                (fault_start_x + fault_end_x) / 2.0,
+                ymax - 0.06 * (ymax - ymin),
+                "fault",
+                ha="center", va="top",
+                fontsize=11, fontstyle="italic", color="#555555",
+            )
 
     ax1.grid(alpha=0.25)
     handles = (
@@ -699,6 +731,165 @@ def plot_resource_breakdown(
 
 
 # ---------------------------------------------------------------------------
+# Task 4 — Cross-policy resource comparison (Static vs RL overhead)
+# ---------------------------------------------------------------------------
+
+def plot_resource_comparison(
+    scenario_paths: dict[str, Path],
+    policies: list[PolicyRun],
+    out_path: Path,
+    experiment: dict | None = None,
+) -> None:
+    """Overlay app-pod resource usage across policies and show RL controller overhead.
+
+    Produces two PDF files:
+      ``<out_path>-cpu.pdf``  — CPU (mcores)
+      ``<out_path>-mem.pdf``  — Memory (MiB)
+
+    Each figure has two panels:
+      Top   : aggregate app-pod usage per policy (overlaid lines)
+      Bottom: RL controller local process (only present in RL runs)
+
+    The fault window is shaded when *experiment* contains timing information.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    # Read resources for every policy that has a resource-usage.csv.
+    policy_resources: dict[str, dict[str, dict[str, list[float]]]] = {}
+    for p in policies:
+        scen_dir = scenario_paths.get(p.key)
+        if scen_dir is None:
+            continue
+        csv_path = scen_dir / POLICY / "resource-usage.csv"
+        res = read_resources(csv_path)
+        if res:
+            policy_resources[p.key] = res
+
+    if not policy_resources:
+        return
+
+    def _agg_app(res: dict[str, dict[str, list[float]]], metric: str) -> tuple[list[float], list[float]]:
+        """Sum non-RL pod scopes into one time series."""
+        app = {k: v for k, v in res.items() if not _is_rl_scope(k) and not k.endswith("_node")}
+        if not app:
+            return [], []
+        series_list = []
+        for v in app.values():
+            if not v["t"]:
+                continue
+            s = pd.Series(v[metric], index=v["t"]).sort_index()
+            s = s[~s.index.duplicated()]
+            series_list.append(s)
+        if not series_list:
+            return [], []
+        combined = pd.concat(series_list, axis=1).sort_index().interpolate("index").fillna(0)
+        agg = combined.sum(axis=1)
+        return list(agg.index), list(agg.values)
+
+    def _rl_series(res: dict[str, dict[str, list[float]]], metric: str) -> tuple[list[float], list[float]]:
+        """Aggregate all RL controller scopes."""
+        rl = {k: v for k, v in res.items() if _is_rl_scope(k)}
+        if not rl:
+            return [], []
+        series_list = []
+        for v in rl.values():
+            if not v["t"]:
+                continue
+            s = pd.Series(v[metric], index=v["t"]).sort_index()
+            s = s[~s.index.duplicated()]
+            series_list.append(s)
+        if not series_list:
+            return [], []
+        combined = pd.concat(series_list, axis=1).sort_index().interpolate("index").fillna(0)
+        agg = combined.sum(axis=1)
+        return list(agg.index), list(agg.values)
+
+    # Fault window (relative to sampler start ≈ warmup start).
+    prefault_sec = float((experiment or {}).get("prefault_sec", 0))
+    warmup_sec   = float((experiment or {}).get("warmup_sec", 0))
+    fault_sec    = float((experiment or {}).get("fault_sec", 0))
+    # Resource sampler starts right after warmup; fault window offset from t=0 of sampler.
+    fault_x0 = prefault_sec
+    fault_x1 = prefault_sec + fault_sec
+
+    any_rl = any(
+        _rl_series(res, "cpu")[0]
+        for res in policy_resources.values()
+    )
+    n_panels = 2 if any_rl else 1
+
+    analyze._apply_paper_style()
+
+    for metric, ylabel, suffix in [
+        ("cpu", "CPU (mcores)", "cpu"),
+        ("mem", "Memory (MiB)", "mem"),
+    ]:
+        fig, axes = plt.subplots(
+            n_panels, 1,
+            figsize=(10, 4.5 * n_panels),
+            sharex=True,
+            squeeze=False,
+        )
+        ax_app = axes[0][0]
+        ax_rl  = axes[1][0] if n_panels == 2 else None
+
+        for p in policies:
+            res = policy_resources.get(p.key)
+            if res is None:
+                continue
+            t_app, v_app = _agg_app(res, metric)
+            if t_app:
+                ax_app.plot(
+                    t_app, v_app,
+                    color=p.color,
+                    linestyle=p.linestyle,
+                    linewidth=1.8,
+                    label=p.label,
+                )
+            if ax_rl is not None:
+                t_rl, v_rl = _rl_series(res, metric)
+                if t_rl:
+                    ax_rl.plot(
+                        t_rl, v_rl,
+                        color=p.color,
+                        linestyle=p.linestyle,
+                        linewidth=1.8,
+                        label=p.label,
+                    )
+
+        for ax in [ax_app, ax_rl]:
+            if ax is None:
+                continue
+            if fault_sec > 0:
+                ax.axvspan(fault_x0, fault_x1, color="lightgray", alpha=0.55, zorder=0)
+                ymin, ymax = ax.get_ylim()
+                ax.text(
+                    (fault_x0 + fault_x1) / 2.0,
+                    ymax - 0.06 * (ymax - ymin),
+                    "fault",
+                    ha="center", va="top",
+                    fontsize=10, fontstyle="italic", color="#555555",
+                )
+            ax.grid(alpha=0.25)
+            ax.legend(fontsize=9, frameon=True, fancybox=False, edgecolor="#888888")
+
+        ax_app.set_ylabel(f"App pods — {ylabel}")
+        ax_app.set_title(f"Resource comparison across policies: {ylabel}")
+        if ax_rl is not None:
+            ax_rl.set_ylabel(f"RL controller — {ylabel}")
+            ax_rl.set_xlabel("Seconds since sampler start")
+        else:
+            ax_app.set_xlabel("Seconds since sampler start")
+
+        suffix_path = out_path.parent / f"{out_path.name}-{suffix}.pdf"
+        suffix_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.tight_layout()
+        fig.savefig(suffix_path, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  wrote {suffix_path}")
+
+
+# ---------------------------------------------------------------------------
 # Task 6 — Model action vs metrics analysis
 # ---------------------------------------------------------------------------
 
@@ -1067,7 +1258,10 @@ def plot_rl_only_for_policy(
     plots_dir = scenario_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
 
-    decisions = read_decisions(rl_dir / "rl-decisions.csv")
+    timeline = analyze.load_timeline(policy_dir)
+    t_warmup_end = float(timeline["t_warmup_end"]) if timeline and "t_warmup_end" in timeline else None
+
+    decisions = read_decisions(rl_dir / "rl-decisions.csv", t_ref=t_warmup_end)
     ref_pct, ref_mn = default_retry_budget_from_experiment(experiment)
     plot_decisions(
         decisions,
@@ -1075,6 +1269,7 @@ def plot_rl_only_for_policy(
         reference_percent=ref_pct,
         reference_min=ref_mn,
         policy_label=policy.label,
+        experiment=experiment,
     )
     resources = read_resources(policy_dir / "resource-usage.csv")
     plot_resources(resources, plots_dir / "resource_usage")
@@ -1163,6 +1358,10 @@ def compare_scenario(
         runs, plots_dir / "latency_phase_comparison.pdf", experiment, policies,
     )
 
+    plot_resource_comparison(
+        scenario_paths, policies, plots_dir / "resource_comparison", experiment,
+    )
+
 
 def plot_retry_budget_for_policy(
     policy: PolicyRun,
@@ -1170,7 +1369,13 @@ def plot_retry_budget_for_policy(
     experiment: dict,
 ) -> bool:
     """Regenerate only ``selected_retry_budget.png`` for one policy."""
-    decisions = read_decisions(scenario_dir / POLICY / "rl-controller" / "rl-decisions.csv")
+    policy_dir = scenario_dir / POLICY
+    timeline = analyze.load_timeline(policy_dir)
+    t_warmup_end = float(timeline["t_warmup_end"]) if timeline and "t_warmup_end" in timeline else None
+    decisions = read_decisions(
+        policy_dir / "rl-controller" / "rl-decisions.csv",
+        t_ref=t_warmup_end,
+    )
     if not decisions["t"]:
         print(f"  [warn] no rl-controller decisions for {scenario_dir}", flush=True)
         return False
@@ -1183,6 +1388,7 @@ def plot_retry_budget_for_policy(
         reference_percent=ref_pct,
         reference_min=ref_mn,
         policy_label=policy.label,
+        experiment=experiment,
     )
     return True
 

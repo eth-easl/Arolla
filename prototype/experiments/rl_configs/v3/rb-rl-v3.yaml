@@ -1,22 +1,25 @@
-# RL retry-budget controller — v2-a (dual-timescale observation).
+# RL retry-budget controller — v3 (long observation, fast decisions).
 #
-# Extends v1-b with a short observation window (short_window_sec) so the
-# agent sees both a stable long-window signal and a fast-reacting short-window
-# signal. The 5 short-window features (indices 18-22 in OBSERVATION_FIELDS)
-# capture abrupt fault onsets before the long window has time to absorb them.
+# Single 10s observation window like v1-a, but with a faster 2s decision
+# cadence. Tests whether the v1-b reactivity benefit holds when the agent
+# still has v1-a's full 10s of context to integrate over (rather than
+# v1-b's narrow 2s window).
 #
-# NOTE: rl_configs/v1/model-v1.zip was trained on the 18-dim v1 observation space.
-# The controller auto-slices the 23-dim obs to 18 for backward-compat inference
-# (see rl_policy() in rl_controller.py). To fully exploit the dual-timescale
-# signal a new model must be trained against the 23-dim space (see TRAINING.md).
-name: rb-rl-v2-a
-label: "RB-RL v2-a (dual timescale)"
+# Uses model-v3.zip, trained against this 10s-obs / 2s-decision setup.
+name: rb-rl-v3
+label: "RB-RL v3 (10s window, 2s decision)"
 mode: rl_ppo
-model_path: rl_configs/v1/model-v1.zip
+model_path: rl_configs/v3/model-v3.zip
 
-output_root: outputs/prototype/rb-rl-v2-a
-baseline_root: outputs/prototype/rb-mega-fault-sweep/20260501_151421
-baseline_label: "Static RB"
+output_root: outputs/prototype/rb-rl-v3
+# Primary baseline: the May-3 v1-a sweep (25 scenarios). v1-b's full sweep
+# isn't included here because v1-a covers the same grid and is the better
+# RL comparator (v1-b underperformed it across the board).
+baseline_root: outputs/prototype/rb-rl-v1-a/ignored-20260503_231749
+baseline_label: "RB-RL v1-a"
+extra_baselines:
+  - root: outputs/prototype/rb-mega-fault-sweep/20260501_151421
+    label: "Static RB"
 
 experiment:
   scenario: sustained-failure
@@ -30,9 +33,9 @@ experiment:
   num_loaders: 4
 
 controller:
-  decision_interval_sec: 2       # fast cadence
-  observation_window_sec: 10     # long-window: stable baseline signal
-  short_window_sec: 3            # short-window: fast fault-onset signal
+  decision_interval_sec: 2       # fast decision cadence (matches v1-b)
+  observation_window_sec: 10     # long window (matches v1-a)
+  startup_hold_off_sec: 60       # wait for full window to populate before first patch
   default_retry_budget:
     percent: 20.0
     minRetryConcurrency: 3
@@ -41,7 +44,7 @@ controller:
     minRetryConcurrency: [1, 2, 3, 5, 8]
 
 resource_sampling:
-  enabled: true
+  enabled: false
   interval_sec: 2
 
 scenarios:
