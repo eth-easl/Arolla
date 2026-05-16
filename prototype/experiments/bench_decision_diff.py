@@ -36,6 +36,32 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Feature order has to match the controller's `OBSERVATION_FIELDS`.
+# Duplicated here so this script can run without importing rl_controller
+# (which pulls in torch + SB3). If a future change adds a feature, the
+# diff harness will silently truncate to whichever side has the longer
+# vector — the bench tooling is best-effort, not the source of truth.
+OBSERVATION_FIELDS_DEFAULT = (
+    "success_rate_agg",
+    "min_client_success",
+    "retry_ratio",
+    "window_load_amplification",
+    "window_retry_efficiency",
+    "retry_fairness_gap",
+    "p95_latency_pressure",
+    "queue_utilization",
+    "server_fail_rate",
+    "deadline_rate",
+    "delta_success_agg",
+    "delta_window_load_amplification",
+    "budget_utilization",
+    "retry_pressure_vs_limit",
+    "current_percent_norm",
+    "current_min_retry_concurrency_norm",
+    "previous_percent_norm",
+    "previous_min_retry_concurrency_norm",
+)
+
 
 def find_observations(root: Path) -> dict[str, Path]:
     """Scenario label → rl-observations.jsonl, matching bench_summarize.py."""
@@ -168,6 +194,167 @@ def diff_scenarios(
     }
 
 
+def diff_features(
+    phase_a: dict[str, Path],
+    phase_b: dict[str, Path],
+    sample_size: int | None,
+    feature_names: tuple[str, ...],
+    rng: random.Random,
+) -> dict[str, Any]:
+    """Per-feature drift across matched (scenario, tick_index) pairs.
+
+    Matching by tick_index — rather than the obs-vector index used for
+    action drift — is deliberately tolerant: two runs of the same scenario
+    do not share observation vectors (the loader sees different live
+    traffic), but they do share scheduling, so tick i of run A and tick i
+    of run B both observe roughly the same wall-clock slice of the
+    scenario timeline.
+
+    For every matched pair this records the absolute feature delta and
+    the absolute feature value (averaged across the two sides). The
+    reported metric is ``mean(|Δ_i|) / mean(|x_i|)`` — the same
+    "relative mean delta" the Phase 3 acceptance bar names. We use mean
+    rather than per-tick relative because counter features are often 0
+    on a given tick, which would blow up a per-tick ratio.
+    """
+    matched_scenarios = sorted(set(phase_a) & set(phase_b))
+    per_scenario: list[dict[str, Any]] = []
+    feature_totals: dict[str, dict[str, float]] = {
+        name: {"abs_delta_sum": 0.0, "abs_value_sum": 0.0, "n": 0}
+        for name in feature_names
+    }
+
+    for label in matched_scenarios:
+        rows_a = load_jsonl(phase_a[label])
+        rows_b = load_jsonl(phase_b[label])
+
+        # Index by tick_index for matching. If multiple ticks share an
+        # index (shouldn't happen, but guard anyway) keep the first.
+        ix_a = {r.get("tick_index"): r for r in rows_a if r.get("tick_index") is not None}
+        ix_b = {r.get("tick_index"): r for r in rows_b if r.get("tick_index") is not None}
+        common = sorted(set(ix_a) & set(ix_b))
+        matched_pairs = [(ix_a[i], ix_b[i]) for i in common]
+
+        if sample_size and len(matched_pairs) > sample_size:
+            matched_pairs = rng.sample(matched_pairs, sample_size)
+
+        per_feature_local: dict[str, dict[str, float]] = {
+            name: {"abs_delta_sum": 0.0, "abs_value_sum": 0.0, "n": 0}
+            for name in feature_names
+        }
+
+        for ra, rb in matched_pairs:
+            obs_a = ra.get("observation")
+            obs_b = rb.get("observation")
+            if not (isinstance(obs_a, list) and isinstance(obs_b, list)):
+                continue
+            # Length mismatch: truncate to the shorter vector and let the
+            # operator notice via the per-feature `n` column.
+            common_len = min(len(obs_a), len(obs_b), len(feature_names))
+            for i in range(common_len):
+                name = feature_names[i]
+                va = float(obs_a[i])
+                vb = float(obs_b[i])
+                avg = 0.5 * (abs(va) + abs(vb))
+                per_feature_local[name]["abs_delta_sum"] += abs(va - vb)
+                per_feature_local[name]["abs_value_sum"] += avg
+                per_feature_local[name]["n"] += 1
+                feature_totals[name]["abs_delta_sum"] += abs(va - vb)
+                feature_totals[name]["abs_value_sum"] += avg
+                feature_totals[name]["n"] += 1
+
+        per_scenario.append({
+            "scenario": label,
+            "matched": len(matched_pairs),
+            "per_feature": {
+                name: {
+                    "n": stats["n"],
+                    "abs_delta_mean": (
+                        stats["abs_delta_sum"] / stats["n"] if stats["n"] else 0.0
+                    ),
+                    "abs_value_mean": (
+                        stats["abs_value_sum"] / stats["n"] if stats["n"] else 0.0
+                    ),
+                    "rel_drift": (
+                        stats["abs_delta_sum"] / stats["abs_value_sum"]
+                        if stats["abs_value_sum"] > 0 else 0.0
+                    ),
+                }
+                for name, stats in per_feature_local.items()
+            },
+        })
+
+    aggregate = {
+        name: {
+            "n": stats["n"],
+            "abs_delta_mean": (
+                stats["abs_delta_sum"] / stats["n"] if stats["n"] else 0.0
+            ),
+            "abs_value_mean": (
+                stats["abs_value_sum"] / stats["n"] if stats["n"] else 0.0
+            ),
+            "rel_drift": (
+                stats["abs_delta_sum"] / stats["abs_value_sum"]
+                if stats["abs_value_sum"] > 0 else 0.0
+            ),
+        }
+        for name, stats in feature_totals.items()
+    }
+
+    return {
+        "matched_scenarios": matched_scenarios,
+        "feature_names": list(feature_names),
+        "aggregate": aggregate,
+        "per_scenario": per_scenario,
+    }
+
+
+def render_feature_markdown(
+    report: dict[str, Any], phase_a: Path, phase_b: Path,
+) -> str:
+    lines: list[str] = []
+    lines.append(
+        f"# Per-feature observation drift — `{phase_a.name}` → `{phase_b.name}`"
+    )
+    lines.append("")
+    lines.append(
+        "Matched by `(scenario, tick_index)`. Reported metric per feature: "
+        "`rel_drift = mean(|Δ|) / mean(|x|)` (averaged across the two phases). "
+        "Phase 3 acceptance bar: every feature `≤ 1 %`."
+    )
+    lines.append("")
+
+    lines.append("## Aggregate across all matched ticks")
+    lines.append("")
+    lines.append("| feature | n | mean(|Δ|) | mean(|x|) | rel_drift |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for name in report["feature_names"]:
+        s = report["aggregate"][name]
+        lines.append(
+            f"| {name} | {s['n']} | {s['abs_delta_mean']:.6f} | "
+            f"{s['abs_value_mean']:.6f} | {s['rel_drift'] * 100:.3f} % |"
+        )
+    lines.append("")
+
+    if report["per_scenario"]:
+        lines.append("## Per-scenario rel_drift (%)")
+        lines.append("")
+        header = "| scenario | matched | " + " | ".join(report["feature_names"]) + " |"
+        sep = "|---|---:|" + "|".join(["---:"] * len(report["feature_names"])) + "|"
+        lines.append(header)
+        lines.append(sep)
+        for row in report["per_scenario"]:
+            cells = [
+                f"{row['per_feature'][name]['rel_drift'] * 100:.3f}"
+                for name in report["feature_names"]
+            ]
+            lines.append(
+                f"| {row['scenario']} | {row['matched']} | " + " | ".join(cells) + " |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
 def render_markdown(report: dict[str, Any], phase_a: Path, phase_b: Path) -> str:
     lines: list[str] = []
     lines.append(f"# Decision drift — `{phase_a.name}` → `{phase_b.name}`")
@@ -233,6 +420,15 @@ def main() -> int:
         "--out", type=Path, default=None,
         help="Write markdown here (default: <phase_b>/drift.md). '-' for stdout.",
     )
+    parser.add_argument(
+        "--per-feature", action="store_true",
+        help=(
+            "Report per-feature observation drift instead of action drift. "
+            "Matches by (scenario, tick_index) and emits "
+            "mean(|Δ_i|) / mean(|x_i|) for each of the 18 features. Used "
+            "for plan-optimization-phase3 §6.2 validation."
+        ),
+    )
     args = parser.parse_args()
 
     phase_a: Path = args.phase_a.resolve()
@@ -247,13 +443,31 @@ def main() -> int:
         print("warning: missing rl-observations.jsonl on one or both sides", file=sys.stderr)
 
     sample_size = None if args.all_ticks else args.sample_size
-    report = diff_scenarios(
-        obs_a, obs_b,
-        sample_size=sample_size,
-        feature_eps=args.feature_eps,
-        rng=random.Random(args.seed),
-    )
-    md = render_markdown(report, phase_a, phase_b)
+
+    if args.per_feature:
+        feat_report = diff_features(
+            obs_a, obs_b,
+            sample_size=sample_size,
+            feature_names=OBSERVATION_FIELDS_DEFAULT,
+            rng=random.Random(args.seed),
+        )
+        md = render_feature_markdown(feat_report, phase_a, phase_b)
+        worst_name, worst_value = max(
+            (
+                (name, stats["rel_drift"])
+                for name, stats in feat_report["aggregate"].items()
+            ),
+            key=lambda kv: kv[1],
+            default=("(none)", 0.0),
+        )
+    else:
+        report = diff_scenarios(
+            obs_a, obs_b,
+            sample_size=sample_size,
+            feature_eps=args.feature_eps,
+            rng=random.Random(args.seed),
+        )
+        md = render_markdown(report, phase_a, phase_b)
 
     if args.out is None:
         out_path = phase_b / "drift.md"
@@ -264,7 +478,15 @@ def main() -> int:
         out_path = args.out
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(md)
-    print(f"wrote {out_path}  drift={report['total_drift']}/{report['total_compared']}")
+    if args.per_feature:
+        print(
+            f"wrote {out_path}  worst_feature={worst_name} "
+            f"rel_drift={worst_value * 100:.3f}%"
+        )
+    else:
+        print(
+            f"wrote {out_path}  drift={report['total_drift']}/{report['total_compared']}"
+        )
     return 0
 
 

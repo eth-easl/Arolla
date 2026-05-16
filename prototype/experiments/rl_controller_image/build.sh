@@ -18,11 +18,12 @@ EXP_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TAG="${1:-v3}"
 IMAGE="rl-controller:${TAG}"
 
-# Stage rl_controller.py into the build context so the Dockerfile's
-# `COPY rl_controller.py` resolves locally. We delete the staged copy on
-# exit so the source-of-truth stays in the experiments directory.
-trap 'rm -f "${SCRIPT_DIR}/rl_controller.py"' EXIT
+# Stage rl_controller.py + rl_obs_schema.py into the build context so the
+# Dockerfile's COPY statements resolve locally. We delete the staged copies
+# on exit so the source-of-truth stays in the experiments directory.
+trap 'rm -f "${SCRIPT_DIR}/rl_controller.py" "${SCRIPT_DIR}/rl_obs_schema.py"' EXIT
 cp "${EXP_DIR}/rl_controller.py" "${SCRIPT_DIR}/rl_controller.py"
+cp "${EXP_DIR}/rl_obs_schema.py" "${SCRIPT_DIR}/rl_obs_schema.py"
 
 echo "[build] docker build -t ${IMAGE} ${SCRIPT_DIR} (platform=linux/amd64)"
 # `--platform=linux/amd64` and `--load` make this work on arm64 laptops

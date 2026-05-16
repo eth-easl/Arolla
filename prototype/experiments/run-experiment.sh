@@ -110,6 +110,10 @@ RL_LOADER_HOST=""               # default: derived from CLIENT_IP (k8s-config.sh
 # Used only for the baseline row
 RL_LEGACY_PATCH=false
 RL_LEGACY_FETCH=false
+# Phase 3 obs transport. `auto` is back-compatible with pre-Phase-3
+# loaders (falls back to /window on 404 / connection refused). Explicit
+# `buckets` / `rows` lets a sweep A/B without editing job.yaml by hand.
+RL_OBS_MODE="auto"
 RESOURCE_SAMPLING=false
 RESOURCE_SAMPLE_INTERVAL_SEC=2
 HELPER_PIDS=()
@@ -245,6 +249,11 @@ Options:
                               shard i gets port_base + i. Default ${RL_LOADER_PORT_BASE}.
       --rl-loader-host <ip>   Loader address the controller will hit
                               (default: \${CLIENT_IP} from k8s-config.sh).
+      --rl-obs-mode <mode>    Phase 3 observation transport. One of:
+                                auto    (default) /buckets, fall back to
+                                        /window on shards that 404.
+                                buckets force pre-aggregated counters.
+                                rows    force Phase-2 per-attempt rows.
       --resource-sampling     Sample cart/Istio pod and node CPU/memory during
                               each policy run.
       --resource-sample-interval <sec>
@@ -310,6 +319,7 @@ while (( $# > 0 )); do
     --rl-loader-host) RL_LOADER_HOST="$2"; shift 2 ;;
     --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
     --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
+    --rl-obs-mode)   RL_OBS_MODE="$2"; shift 2 ;;
     --resource-sampling) RESOURCE_SAMPLING=true; shift ;;
     --resource-sample-interval) RESOURCE_SAMPLE_INTERVAL_SEC="$2"; shift 2 ;;
     --num-spikes)    NUM_SPIKES="$2"; shift 2 ;;
@@ -914,7 +924,7 @@ run_single() {
       # in-cluster apiserver.
       _run_id="$(echo -n "${policy}-$(date +%H%M%S)-$$" | tr -c 'a-z0-9-' '-' | cut -c1-30)"
       _rl_job_name="rl-controller-${_run_id}"
-      phase "[${policy}] apply Job ${_rl_job_name} (image rl-controller:${RL_IMAGE_TAG})"
+      phase "[${policy}] apply Job ${_rl_job_name} (image rl-controller:${RL_IMAGE_TAG}, obs-mode=${RL_OBS_MODE})"
       _tmp_job="$(mktemp)"
       sed \
         -e "s|__RUN_ID__|${_run_id}|g" \
@@ -923,6 +933,7 @@ run_single() {
         -e "s|__CONFIGMAP__|${RL_CONFIGMAP}|g" \
         -e "s|__LOADER_HOST__|${RL_LOADER_HOST}|g" \
         -e "s|__LOADER_PORTS__|${RL_LOADER_PORTS_CSV}|g" \
+        -e "s|__OBS_MODE__|${RL_OBS_MODE}|g" \
         "${RL_JOB_MANIFEST}" > "${_tmp_job}"
       kubectl apply -f "${_tmp_job}" >/dev/null
       rm -f "${_tmp_job}"
@@ -967,6 +978,7 @@ run_single() {
       [[ "${RL_SHADOW}" == true ]] && controller_args+=(--shadow)
       [[ "${RL_LEGACY_PATCH}" == true ]] && controller_args+=(--legacy-patch-kubectl)
       [[ "${RL_LEGACY_FETCH}" == true ]] && controller_args+=(--legacy-full-cat)
+      controller_args+=(--obs-mode "${RL_OBS_MODE}")
       "${controller_args[@]}" > "${rl_controller_dir}/rl-controller.log" 2>&1 &
       rl_controller_pid="$!"
       HELPER_PIDS+=("${rl_controller_pid}")

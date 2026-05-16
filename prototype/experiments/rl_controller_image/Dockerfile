@@ -36,9 +36,13 @@ RUN pip install --no-cache-dir \
         "pyyaml" \
         "requests"
 
-# rl_controller.py is the only python file we need; it imports nothing from
-# its sibling modules. Copy it last so dependency layers cache across builds.
+# rl_controller.py + rl_obs_schema.py are the only python files we need.
+# The schema module is the shared loader/controller contract (WindowBucket +
+# histogram edges); a stale tag of the controller image without it would
+# crash on import as of Phase 3. Copy both last so dependency layers cache
+# across builds.
 COPY rl_controller.py /app/rl_controller.py
+COPY rl_obs_schema.py /app/rl_obs_schema.py
 WORKDIR /app
 
 # `--out-dir`, `--config`, etc. come from the Job manifest's `args:` list.

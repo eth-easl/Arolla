@@ -7,6 +7,8 @@
 #   __CONFIGMAP__      rl-controller-v3   (matches model+config-map)
 #   __LOADER_HOST__    pc808.emulab.net   (CLIENT_HOST private IP)
 #   __LOADER_PORTS__   8765,8766,8767,8768
+#   __OBS_MODE__       auto | rows | buckets (Phase 3 obs transport;
+#                      see rl_controller.py --obs-mode)
 #
 # A `Job` (not `Deployment`) is used so the controller's state — including
 # the SB3 model's warm caches and the persistent kubernetes client — is
@@ -52,6 +54,7 @@ spec:
             - "--namespace=__NAMESPACE__"
             - "--loader-url-template=http://__LOADER_HOST__:{port}/window"
             - "--loader-ports=__LOADER_PORTS__"
+            - "--obs-mode=__OBS_MODE__"
           # 1 cpu / 1 GiB is comfortable for the SB3 forward pass and
           # decision-rate computations at 2s cadence; bump if profiling
           # ever shows CPU contention.

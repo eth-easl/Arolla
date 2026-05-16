@@ -54,6 +54,32 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+# The bucket schema is shared with rl_controller.py via rl_obs_schema.py. On
+# the client host the loader is deployed alongside rl_obs_schema.py inside
+# REMOTE_BASE (see run-clients.sh::upload_files), so the import resolves
+# against sys.path[0] = traffic_gen.py's directory. In repo / test contexts
+# we fall back to inserting prototype/experiments/ before importing.
+try:
+    from rl_obs_schema import (  # noqa: PLC0415
+        LATENCY_HISTOGRAM_EDGES_S,
+        LATENCY_HISTOGRAM_NUM_BUCKETS,
+        WindowBucket,
+        latency_bucket_index,
+    )
+except ImportError:
+    _experiments_dir = (
+        Path(__file__).resolve().parent.parent.parent / "experiments"
+    )
+    if _experiments_dir.is_dir():
+        sys.path.insert(0, str(_experiments_dir))
+    from rl_obs_schema import (  # noqa: PLC0415
+        LATENCY_HISTOGRAM_EDGES_S,
+        LATENCY_HISTOGRAM_NUM_BUCKETS,
+        WindowBucket,
+        latency_bucket_index,
+    )
+
+
 # Concurrent HTTP calls are issued through asyncio.to_thread(), which uses the
 # loop's default ThreadPoolExecutor. That defaults to min(32, cpu_count+4) —
 # typically ~12 on a d430 — which caps real parallelism regardless of how many
@@ -102,6 +128,25 @@ _WINDOW_RING: "Optional[collections.deque[dict[str, Any]]]" = None
 _WINDOW_KEEP_SEC: float = 60.0
 _WINDOW_SHARD_ID: int = 0
 
+# Pre-aggregated parallel structure populated alongside `_WINDOW_RING` (see
+# enqueue_window_bucket_row). One bucket per (ts_sec, profile) — the firer
+# increments counters in place instead of pushing per-attempt dicts the
+# controller would have to scan linearly. `_BUCKET_INDEX` is the
+# fast-lookup map for the "current insertion point"; pruning runs lazily
+# alongside the row-deque's GC on every enqueue.
+#
+# The bucket cadence is per-process: this loader shard owns shard_id rows
+# only, so a single firer's asyncio loop is the only writer for these
+# structures. No locks are required for the same reason `_WINDOW_RING`
+# doesn't need any — the asyncio task that calls enqueue_window_row is the
+# same task that calls enqueue_window_bucket_row, and the GIL guarantees no
+# other thread reads either structure between increments. The aiohttp
+# `/buckets` handler is a coroutine on the same loop and snapshots the
+# deque with `list(...)` before iterating (see `_handle_buckets`).
+_WINDOW_BUCKETS: "Optional[collections.deque[WindowBucket]]" = None
+_BUCKET_KEEP_SEC: float = 60.0
+_BUCKET_INDEX: dict[tuple[int, str], WindowBucket] = {}
+
 
 def write_csv_row(line: str) -> None:
     """Append one row to the run's CSV. Single-threaded by construction:
@@ -127,6 +172,78 @@ def enqueue_window_row(row: dict[str, Any]) -> None:
     # single tick can introduce; in practice we drop 0-2 rows per call.
     while _WINDOW_RING and _WINDOW_RING[0]["timestamp"] < cutoff:
         _WINDOW_RING.popleft()
+
+
+def enqueue_window_bucket_row(
+    *,
+    timestamp: float,
+    profile: str,
+    is_retry: bool,
+    is_final: bool,
+    ok: bool,
+    status: int,
+    latency_s: float,
+) -> None:
+    """Pre-aggregate one attempt into the current second's bucket (if enabled).
+
+    Counterpart of :func:`enqueue_window_row` for the Phase 3 buckets path
+    (plan-optimization-phase3 §4). Both helpers are called from the same
+    site — the firer's per-attempt code path — so the two ring buffers
+    stay consistent under any ordering of attempts.
+
+    `is_final` distinguishes "this was a real outcome for the request" from
+    "this was an interim retry attempt that did not terminate the request":
+
+      * `attempts` / `retries` / `*_failures` count every wire attempt.
+      * `requests` / `successes` / `latency_hist` count only is_final rows,
+        so success-rate and latency reconstruction match what
+        ``final_attempts(rows)`` would compute on the rows path. The
+        controller's existing observation vector is built on that
+        equivalence — see ``rl_controller.build_metrics``.
+    """
+    if _WINDOW_BUCKETS is None:
+        return
+
+    ts_sec = int(timestamp)
+    key = (ts_sec, profile)
+    bucket = _BUCKET_INDEX.get(key)
+    if bucket is None:
+        bucket = WindowBucket(
+            ts_sec=ts_sec,
+            shard_id=_WINDOW_SHARD_ID,
+            profile=profile,
+        )
+        _BUCKET_INDEX[key] = bucket
+        _WINDOW_BUCKETS.append(bucket)
+
+    bucket.attempts += 1
+    if is_retry:
+        bucket.retries += 1
+        if ok:
+            bucket.retry_successes += 1
+    if status >= 500:
+        bucket.server_failures += 1
+    elif status == 0:
+        bucket.deadline_failures += 1
+    if is_final:
+        bucket.requests += 1
+        if ok:
+            bucket.successes += 1
+        idx = latency_bucket_index(latency_s, LATENCY_HISTOGRAM_EDGES_S)
+        if 0 <= idx < LATENCY_HISTOGRAM_NUM_BUCKETS:
+            bucket.latency_hist[idx] += 1
+
+    # Lazy GC mirrors `_WINDOW_RING`: drop everything strictly older than
+    # the retention cutoff. The bucket deque is naturally ordered by
+    # `ts_sec` because new buckets are only ever appended on the right; a
+    # late-arriving row whose `int(timestamp)` is older than the head
+    # bucket but still within retention falls into the matching existing
+    # bucket via `_BUCKET_INDEX`. Rows older than the cutoff are charged
+    # to the dropped bucket and lost — same behaviour the rows path has.
+    cutoff = ts_sec - _BUCKET_KEEP_SEC
+    while _WINDOW_BUCKETS and _WINDOW_BUCKETS[0].ts_sec < cutoff:
+        old = _WINDOW_BUCKETS.popleft()
+        _BUCKET_INDEX.pop((old.ts_sec, old.profile), None)
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +624,23 @@ async def execute_step(
         latency = time.time() - t0
         final_ok = ok
 
+        # `is_final` mirrors the retry-policy decision the firer is about to
+        # take below: an attempt is "final" iff no further retry will be
+        # issued for this request_id. We compute it here, before the break
+        # check, so the row + bucket get a stable per-attempt flag (rather
+        # than relying on the post-loop break — which would force a
+        # second pass through this code or a more invasive refactor).
+        #
+        # The buckets path uses this flag directly. The rows path / CSV
+        # ignores it: ``rl_controller.final_attempts`` recomputes "final"
+        # from the row's `_attempt` column to stay byte-compatible with
+        # the existing on-disk schema (plan-optimization-phase3 §4.5).
+        is_final = (
+            ok
+            or not should_retry(profile, status)
+            or retry_index >= max_retries
+        )
+
         # One CSV row per attempt. Synchronous write to a long-held file
         # handle — see write_csv_row for why this is safe.
         attempt_ts = time.time()
@@ -532,6 +666,17 @@ async def execute_step(
             "ok": int(ok),
             "latency_s": latency,
         })
+        # Phase 3 buckets path: pre-aggregate this attempt for the
+        # /buckets HTTP endpoint. No-op when buckets are disabled.
+        enqueue_window_bucket_row(
+            timestamp=attempt_ts,
+            profile=name,
+            is_retry=bool(is_retry),
+            is_final=bool(is_final),
+            ok=bool(ok),
+            status=status,
+            latency_s=latency,
+        )
 
         # Per-attempt structured log line. Off by default — at high RPS the
         # json.dumps + flushed print is one of the dominant per-fire costs.
@@ -736,6 +881,18 @@ async def _open_loop_one(
                 "ok": 0,
                 "latency_s": 0.0,
             })
+            # Buckets mirror: a drop terminates the request without a
+            # retry (is_final=True) and contributes to `attempts`+`requests`
+            # the same way ``final_attempts`` charges it on the rows path.
+            enqueue_window_bucket_row(
+                timestamp=drop_ts,
+                profile=drop_profile,
+                is_retry=False,
+                is_final=True,
+                ok=False,
+                status=-1,
+                latency_s=0.0,
+            )
             return
         await inflight_sem.acquire()
     try:
@@ -901,6 +1058,44 @@ async def _handle_window(request: "Any") -> "Any":
     })
 
 
+async def _handle_buckets(request: "Any") -> "Any":
+    """`GET /buckets?since=<unix_ts>` → JSON of pre-aggregated buckets.
+
+    Phase 3 transport (plan-optimization-phase3 §4.3). Each bucket is one
+    second of one (shard, profile) with integer counters + a fixed-edge
+    latency histogram. The controller's :func:`http_fetch_buckets`
+    matches this response schema.
+
+    `since` is the same wall-clock filter as `/window`'s — buckets with
+    ``ts_sec >= floor(since)`` are returned. Floor is used (rather than
+    a tighter `>=`) so a `since` value like 1.5 retains the second-1
+    bucket that contains attempts in [1.0, 2.0) — exactly the rows the
+    rows path would also keep at `since=1.5`.
+    """
+    from aiohttp import web  # noqa: PLC0415
+    from dataclasses import asdict as _asdict  # noqa: PLC0415
+
+    since_raw = request.query.get("since", "0")
+    try:
+        since = float(since_raw)
+    except (TypeError, ValueError):
+        return web.json_response({"error": f"bad since={since_raw!r}"}, status=400)
+    since_sec = int(since)  # floor; see docstring
+
+    if _WINDOW_BUCKETS is None:
+        buckets: list[dict[str, Any]] = []
+    else:
+        buckets = [
+            _asdict(b) for b in list(_WINDOW_BUCKETS) if b.ts_sec >= since_sec
+        ]
+    return web.json_response({
+        "buckets": buckets,
+        "now": time.time(),
+        "shard": _WINDOW_SHARD_ID,
+        "edges": list(LATENCY_HISTOGRAM_EDGES_S),
+    })
+
+
 async def _start_window_server(port: int) -> "Any":
     """Start the aiohttp server. Returns the AppRunner so main_async can
     cleanly stop it on shutdown. Returns None on import failure."""
@@ -916,6 +1111,7 @@ async def _start_window_server(port: int) -> "Any":
 
     app = web.Application()
     app.router.add_get("/window", _handle_window)
+    app.router.add_get("/buckets", _handle_buckets)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
@@ -951,6 +1147,7 @@ CSV_HEADER = (
 
 async def main_async(args) -> int:
     global _CSV_FILE, _LOG_ATTEMPTS, _WINDOW_RING, _WINDOW_KEEP_SEC, _WINDOW_SHARD_ID
+    global _WINDOW_BUCKETS, _BUCKET_KEEP_SEC, _BUCKET_INDEX
 
     profile_dir = Path(args.profile_dir)
     profiles = load_profiles(profile_dir)
@@ -1012,6 +1209,14 @@ async def main_async(args) -> int:
         _WINDOW_SHARD_ID = shard_id
         _WINDOW_KEEP_SEC = float(args.rl_window_keep_sec)
         _WINDOW_RING = collections.deque()
+        # Phase 3 buckets: same retention as the row ring, so a controller
+        # asking `since=now-window` gets a fully populated pre-aggregated
+        # window when the rows path would also be fully populated. The
+        # extra in-memory cost is ~130 B per (sec, profile) — well under
+        # 10 KB total for a 60 s window on the configured profile set.
+        _BUCKET_KEEP_SEC = float(args.rl_window_keep_sec)
+        _WINDOW_BUCKETS = collections.deque()
+        _BUCKET_INDEX = {}
         port = args.rl_window_port_base + shard_id
         window_runner = await _start_window_server(port)
 

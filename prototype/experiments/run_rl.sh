@@ -24,6 +24,7 @@ RL_LOADER_PORT_BASE=""
 RL_LOADER_HOST=""
 RL_LEGACY_PATCH=false
 RL_LEGACY_FETCH=false
+RL_OBS_MODE=""
 
 usage() {
   cat <<EOF
@@ -42,6 +43,7 @@ Options:
   --rl-configmap <name>  ConfigMap name (default: rl-controller-v3)
   --rl-loader-port-base <n>  /window port base on the loader (default: 8765)
   --rl-loader-host <ip>  Address pods use to reach the loader (default: \$CLIENT_IP)
+  --obs-mode <mode>      Phase 3 obs transport: auto|rows|buckets (default: auto)
   -n, --dry-run          Print run commands  without executing
   -h, --help             Show this message
 EOF
@@ -63,6 +65,7 @@ while (( $# > 0 )); do
     --rl-loader-host) RL_LOADER_HOST="$2"; shift 2 ;;
     --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
     --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
+    --obs-mode) RL_OBS_MODE="$2"; shift 2 ;;
     -n|--dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -283,6 +286,7 @@ PY
   fi
   [[ "${RL_LEGACY_PATCH}" == "true" ]] && cmd+=(--rl-legacy-patch)
   [[ "${RL_LEGACY_FETCH}" == "true" ]] && cmd+=(--rl-legacy-fetch)
+  [[ -n "${RL_OBS_MODE}" ]] && cmd+=(--rl-obs-mode "${RL_OBS_MODE}")
   [[ "${DRY_RUN}" == "true" ]] && cmd+=(--dry-run)
 
   echo "[rl-v1] command: NUM_LOADERS=${NUM_LOADERS} ${cmd[*]}"

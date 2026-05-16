@@ -32,6 +32,16 @@ from typing import Any
 
 import yaml
 
+# Shared schema with the loader (prototype/clients/online-boutique/traffic_gen.py).
+# Both sides import from rl_obs_schema.py so the histogram edges and the
+# WindowBucket field order are defined in exactly one place. The bare import
+# works because the file sits next to rl_controller.py in the experiments
+# directory (and inside the container both files land at /app/).
+from rl_obs_schema import (  # noqa: E402
+    LATENCY_HISTOGRAM_EDGES_S,
+    LATENCY_HISTOGRAM_NUM_BUCKETS,
+)
+
 
 # Feature order must match the training environment exactly.
 OBSERVATION_FIELDS = [
@@ -344,6 +354,255 @@ def parse_client_rows(raw: str, since_ts: float) -> list[dict[str, Any]]:
         except (ValueError, StopIteration):
             continue
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Buckets path (Phase 3) — pre-aggregated observation transport
+#
+# The loader pre-aggregates per-attempt counters into 1-second
+# (shard, profile) buckets and serves them at /buckets. Per-tick payload
+# drops from ~10 k JSON rows to ~40 buckets (~5 KB total), and the
+# controller's compose step becomes a single linear pass over the bucket
+# list + an O(22) histogram p95 reconstruction.
+#
+# Layout of `WindowBucket` is deliberately frozen here so a future schema
+# change doesn't silently break the loader/controller contract; both ends
+# pull the histogram edges out of `rl_obs_schema.py`.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WindowBucket:
+    """Decoded mirror of the loader's WindowBucket (rl_obs_schema.WindowBucket).
+
+    Kept as a frozen dataclass so `compose_observation_from_buckets` can rely
+    on the field order matching what the loader's `dataclasses.asdict`
+    produced. The `latency_hist` is a tuple here (no mutation post-fetch)
+    even though the loader uses a list.
+    """
+
+    ts_sec: int
+    shard_id: int
+    profile: str
+    attempts: int
+    requests: int
+    successes: int
+    retries: int
+    retry_successes: int
+    server_failures: int
+    deadline_failures: int
+    latency_hist: tuple[int, ...]
+
+
+def http_fetch_buckets(
+    url_template: str,
+    ports: list[int],
+    since_ts: float,
+    timeout: float = 4.0,
+) -> tuple[list[WindowBucket], int]:
+    """Pull pre-aggregated buckets from every loader shard.
+
+    Returns ``(buckets, ok_shards)``. The shard count is used by the main
+    loop to detect a silent rows/buckets transport regression: if 0 shards
+    answer 200 OK for /buckets across several consecutive ticks, the
+    controller logs a warning and (in `auto` mode) re-routes to /window.
+    """
+    session = _get_http_session()
+    if session is None:
+        return ([], 0)
+    out: list[WindowBucket] = []
+    ok_shards = 0
+    for port in ports:
+        url = url_template.format(port=port) + f"?since={since_ts:.6f}"
+        try:
+            resp = session.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                continue
+            doc = resp.json()
+        except Exception:
+            continue
+        ok_shards += 1
+        for raw in doc.get("buckets", []):
+            try:
+                out.append(WindowBucket(
+                    ts_sec=int(raw.get("ts_sec", 0)),
+                    shard_id=int(raw.get("shard_id", 0)),
+                    profile=str(raw.get("profile", "")),
+                    attempts=int(raw.get("attempts", 0)),
+                    requests=int(raw.get("requests", 0)),
+                    successes=int(raw.get("successes", 0)),
+                    retries=int(raw.get("retries", 0)),
+                    retry_successes=int(raw.get("retry_successes", 0)),
+                    server_failures=int(raw.get("server_failures", 0)),
+                    deadline_failures=int(raw.get("deadline_failures", 0)),
+                    latency_hist=tuple(
+                        int(x) for x in raw.get("latency_hist", ())
+                    ),
+                ))
+            except (TypeError, ValueError):
+                # A malformed bucket on one shard should not poison the
+                # whole tick; the controller is resilient to a partial
+                # window for the same reason the rows path is.
+                continue
+    return (out, ok_shards)
+
+
+def p95_from_histogram(
+    hist: list[int] | tuple[int, ...],
+    edges: tuple[float, ...] = LATENCY_HISTOGRAM_EDGES_S,
+) -> float:
+    """Reconstruct p95 latency from the aggregated histogram.
+
+    Linear interpolation inside the bucket containing the 95th-percentile
+    sample. The overflow bucket (index len(edges), unbounded above) maps
+    to the last finite edge so a fully-saturated window clamps to the
+    edge value — the consumer then divides by the 3 s attempt-timeout and
+    clamps to [0, 1] (see `_bucket_compose_pressure`).
+    """
+    n = sum(hist)
+    if n == 0:
+        return 0.0
+    target = 0.95 * n
+    cum = 0
+    for i, count in enumerate(hist):
+        if count <= 0:
+            continue
+        if cum + count >= target:
+            lo = edges[i - 1] if 0 < i <= len(edges) else 0.0
+            if i < len(edges):
+                hi = edges[i]
+            else:
+                hi = edges[-1]  # overflow bucket: clamp to last edge
+            if hi == lo:
+                return hi
+            frac = (target - cum) / count
+            return lo + (hi - lo) * frac
+        cum += count
+    return edges[-1]
+
+
+def compose_observation_from_buckets(
+    buckets: list[WindowBucket],
+    window_sec: float,
+    current: RetryBudget,
+    previous: RetryBudget,
+    previous_metrics: dict[str, Any] | None,
+) -> tuple[list[float], dict[str, str], dict[str, Any]]:
+    """Build the 18-feature observation vector from pre-aggregated buckets.
+
+    Mirror of the rows path
+    ``build_metrics → build_observation``, but every metric is computed
+    from integer counter sums + one histogram pass. Pure Python with
+    < 1 KOp per tick on typical workloads.
+    """
+    total_attempts = 0
+    total_requests = 0
+    total_successes = 0
+    total_retries = 0
+    total_retry_successes = 0
+    total_server_failures = 0
+    total_deadline_failures = 0
+    hist = [0] * LATENCY_HISTOGRAM_NUM_BUCKETS
+
+    per_profile: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "attempts": 0,
+            "requests": 0,
+            "successes": 0,
+            "retries": 0,
+        },
+    )
+
+    for b in buckets:
+        total_attempts += b.attempts
+        total_requests += b.requests
+        total_successes += b.successes
+        total_retries += b.retries
+        total_retry_successes += b.retry_successes
+        total_server_failures += b.server_failures
+        total_deadline_failures += b.deadline_failures
+        p = per_profile[b.profile]
+        p["attempts"] += b.attempts
+        p["requests"] += b.requests
+        p["successes"] += b.successes
+        p["retries"] += b.retries
+        # Histogram width is frozen at LATENCY_HISTOGRAM_NUM_BUCKETS; a
+        # mismatched bucket from a stale loader image gets clipped to that
+        # width (anything past it is dropped). Loud failure would be
+        # preferable but the loader version is not on the wire — drift is
+        # caught later by bench_decision_diff --per-feature.
+        for i, count in enumerate(b.latency_hist[:LATENCY_HISTOGRAM_NUM_BUCKETS]):
+            hist[i] += count
+
+    requests_denom = max(total_requests, 1)
+    attempts_denom = max(total_attempts, 1)
+    retries_denom = max(total_retries, 1)
+
+    success_rate = total_successes / requests_denom
+    profile_success_rates: list[float] = []
+    request_share: dict[str, float] = {}
+    retry_share: dict[str, float] = {}
+    retry_total = max(sum(p["retries"] for p in per_profile.values()), 1)
+    for name, p in per_profile.items():
+        denom = max(p["requests"], 1)
+        profile_success_rates.append(p["successes"] / denom)
+        request_share[name] = p["requests"] / requests_denom
+        retry_share[name] = p["retries"] / retry_total
+
+    fairness_gap = 0.0
+    if len(per_profile) > 1:
+        names = set(request_share) | set(retry_share)
+        fairness_gap = max(
+            abs(retry_share.get(n, 0.0) - request_share.get(n, 0.0))
+            for n in names
+        )
+
+    retry_ratio = total_retries / attempts_denom
+    load_amplification = total_attempts / requests_denom
+    retry_efficiency = (
+        total_retry_successes / retries_denom if total_retries else 0.0
+    )
+    p95_lat = p95_from_histogram(hist)
+    latency_pressure = min(p95_lat / 3.0, 1.0)
+
+    # Pseudo-RPS derived from the configured window size; identical to the
+    # rows path's `retry_rps`/`request_rps` so downstream pressure
+    # computations match exactly.
+    retry_rps = total_retries / max(window_sec, 1.0)
+    request_rps = total_requests / max(window_sec, 1.0)
+
+    metrics = {
+        # Same keys the rows path's `build_metrics` returns, so the
+        # downstream JSONL ingestion (`rl-observations.jsonl`) is
+        # byte-compatible.
+        "rows": total_attempts,
+        "requests": total_requests,
+        "window_sec": window_sec,
+        "success_rate_agg": success_rate,
+        "min_client_success": (
+            min(profile_success_rates) if profile_success_rates else success_rate
+        ),
+        "retry_ratio": retry_ratio,
+        "window_load_amplification": load_amplification,
+        "window_retry_efficiency": retry_efficiency,
+        "retry_fairness_gap": fairness_gap,
+        "p95_latency_pressure": latency_pressure,
+        "server_fail_rate": total_server_failures / attempts_denom,
+        "deadline_rate": total_deadline_failures / attempts_denom,
+        "retry_rps": retry_rps,
+        "request_rps": request_rps,
+        "quality": {
+            "client_metrics": "live_buckets" if buckets else "empty_window",
+            "retry_fairness_gap": (
+                "per_profile" if len(per_profile) > 1 else "single_client_profile"
+            ),
+        },
+    }
+
+    obs, sources = build_observation(metrics, current, previous, previous_metrics)
+    sources = dict(sources)
+    sources["obs_transport"] = "http_buckets"
+    return obs, sources, metrics
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -789,6 +1048,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--obs-mode",
+        choices=("auto", "rows", "buckets"),
+        default="auto",
+        help=(
+            "How the controller fetches observations from the loader. "
+            "`rows` (Phase 2 default): GET /window, per-attempt rows. "
+            "`buckets` (Phase 3): GET /buckets, pre-aggregated counters. "
+            "`auto`: try /buckets first, fall back to /window if every "
+            "shard returns 404 / connection refused (loader < Phase 3). "
+            "Only applies when --loader-url-template is set."
+        ),
+    )
+    parser.add_argument(
         "--shadow",
         action="store_true",
         help="Observe and log decisions but do not patch the DestinationRule.",
@@ -852,6 +1124,28 @@ def main() -> int:
             )
             return 2
 
+    # Derive the buckets URL template from the configured /window template.
+    # The loader serves both endpoints from the same aiohttp app, so the
+    # only difference is the path suffix; the controller stays oblivious
+    # to whether the loader's port assignment is hard-coded or dynamic.
+    obs_mode = args.obs_mode if use_http_obs else "rows"
+    buckets_url_template = ""
+    if use_http_obs:
+        if args.loader_url_template.endswith("/window"):
+            buckets_url_template = (
+                args.loader_url_template[: -len("/window")] + "/buckets"
+            )
+        elif args.loader_url_template.endswith("/window/"):
+            buckets_url_template = (
+                args.loader_url_template[: -len("/window/")] + "/buckets"
+            )
+        else:
+            # If the template doesn't end with /window we leave a /buckets
+            # sibling derived at the path level. This keeps the contract
+            # explicit: --loader-url-template names the rows endpoint, and
+            # the buckets endpoint is always its sibling.
+            buckets_url_template = args.loader_url_template + "/buckets"
+
     cfg = load_config(Path(args.config))
     apply_enabled = not args.shadow
 
@@ -877,9 +1171,10 @@ def main() -> int:
         effective_mode = "shadow_stub"
         apply_enabled = False
 
-    obs_path_label = (
-        f"http({len(loader_ports)} shards)" if use_http_obs else "ssh_cat"
-    )
+    if use_http_obs:
+        obs_path_label = f"http({len(loader_ports)} shards, mode={obs_mode})"
+    else:
+        obs_path_label = "ssh_cat"
     print(
         f"[rl_controller] mode={effective_mode}  apply={apply_enabled}  "
         f"model={'loaded' if model else 'none'}  "
@@ -902,6 +1197,15 @@ def main() -> int:
     previous_metrics: dict[str, Any] | None = None
     start_ts = time.time()
     tick_index = 0
+    # Buckets/rows runtime state. `effective_obs_mode` tracks what we are
+    # actually using (`obs_mode` is the operator's intent — `auto` resolves
+    # to `buckets` on first success and degrades to `rows` only if every
+    # shard returns 0 ok_shards on its first call). `consecutive_empty`
+    # counts ticks where every shard answered but returned zero buckets so
+    # the controller can fail loud rather than silently producing
+    # all-zero observations (plan-optimization-phase3 §8 risks row 4).
+    effective_obs_mode = "buckets" if obs_mode in {"auto", "buckets"} else "rows"
+    consecutive_empty_buckets = 0
     # Pending xDS-probe results land here keyed by the tick that triggered
     # the patch; they are flushed onto the *next* tick's timing record so
     # the apply-time is colocated with the patch event in the timeline.
@@ -931,32 +1235,96 @@ def main() -> int:
                 pending_xds_apply["ms"] = None
 
             since_ts = now - cfg.observation_window_sec
-            t = time.perf_counter()
-            if use_http_obs:
-                raw = http_fetch_window(
-                    args.loader_url_template, loader_ports, since_ts,
-                )
-            else:
-                raw = ssh_cat_metrics(
-                    args.client_host, args.ssh_user, args.ssh_opts,
-                    args.remote_metrics_dir,
-                    # Legacy baseline: --legacy-full-cat disables the awk
-                    # pre-filter so every byte is shipped each tick.
-                    since_ts=None if args.legacy_full_cat else since_ts,
-                )
-            timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
 
-            t = time.perf_counter()
-            rows = parse_client_rows(raw, since_ts=since_ts)
-            timing.obs_parse_ms = (time.perf_counter() - t) * 1000.0
-            timing.rows = len(rows)
+            # ---- Obs fetch + parse + build ----
+            # Buckets path (Phase 3): one /buckets call per shard, no
+            # row-level work, single linear pass over ~40 buckets in
+            # `compose_observation_from_buckets`.
+            # Rows path (Phase 2): /window or SSH-cat → parse_client_rows
+            # → build_metrics → build_observation, unchanged.
+            if use_http_obs and effective_obs_mode == "buckets":
+                t = time.perf_counter()
+                buckets, ok_shards = http_fetch_buckets(
+                    buckets_url_template, loader_ports, since_ts,
+                )
+                timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
 
-            t = time.perf_counter()
-            metrics = build_metrics(rows, cfg.observation_window_sec)
-            observation, sources = build_observation(
-                metrics, current, previous_budget, previous_metrics,
-            )
-            timing.obs_build_ms = (time.perf_counter() - t) * 1000.0
+                # /buckets returns 404 on pre-Phase-3 loaders. In `auto`
+                # mode the controller silently degrades to /window on the
+                # first tick where every shard refuses /buckets; in
+                # `buckets` mode (operator pinned it) we keep trying and
+                # the warning below surfaces the regression.
+                if ok_shards == 0 and obs_mode == "auto":
+                    print(
+                        "[rl_controller] /buckets unavailable on every shard; "
+                        "falling back to /window for this controller lifetime",
+                        file=sys.stderr,
+                    )
+                    effective_obs_mode = "rows"
+                else:
+                    t = time.perf_counter()
+                    # No row-level parse for buckets — fetch already
+                    # decoded JSON; the `obs_parse_ms` slot stays 0.
+                    timing.obs_parse_ms = (time.perf_counter() - t) * 1000.0
+                    timing.rows = sum(b.attempts for b in buckets)
+
+                    t = time.perf_counter()
+                    observation, sources, metrics = (
+                        compose_observation_from_buckets(
+                            buckets,
+                            cfg.observation_window_sec,
+                            current,
+                            previous_budget,
+                            previous_metrics,
+                        )
+                    )
+                    timing.obs_build_ms = (time.perf_counter() - t) * 1000.0
+
+                    # Buckets-path fail-loud guard. If the controller
+                    # silently produced zero-attempt observations for many
+                    # consecutive ticks (which Phase 2's smoke incident
+                    # showed is bug-prone), surface it.
+                    if not buckets:
+                        consecutive_empty_buckets += 1
+                    else:
+                        consecutive_empty_buckets = 0
+                    if consecutive_empty_buckets >= 5:
+                        print(
+                            "[rl_controller] obs_mode=buckets returned 0 "
+                            "buckets for 5 ticks in a row; loader endpoint "
+                            "is probably broken",
+                            file=sys.stderr,
+                        )
+
+            # Rows path — either the operator pinned --obs-mode=rows, or
+            # `auto` fell back to it because no shard served /buckets.
+            if not use_http_obs or effective_obs_mode == "rows":
+                t = time.perf_counter()
+                if use_http_obs:
+                    raw = http_fetch_window(
+                        args.loader_url_template, loader_ports, since_ts,
+                    )
+                else:
+                    raw = ssh_cat_metrics(
+                        args.client_host, args.ssh_user, args.ssh_opts,
+                        args.remote_metrics_dir,
+                        # Legacy baseline: --legacy-full-cat disables the awk
+                        # pre-filter so every byte is shipped each tick.
+                        since_ts=None if args.legacy_full_cat else since_ts,
+                    )
+                timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
+
+                t = time.perf_counter()
+                rows = parse_client_rows(raw, since_ts=since_ts)
+                timing.obs_parse_ms = (time.perf_counter() - t) * 1000.0
+                timing.rows = len(rows)
+
+                t = time.perf_counter()
+                metrics = build_metrics(rows, cfg.observation_window_sec)
+                observation, sources = build_observation(
+                    metrics, current, previous_budget, previous_metrics,
+                )
+                timing.obs_build_ms = (time.perf_counter() - t) * 1000.0
 
             # Policy: real RL inference or stub depending on what is available.
             pct_idx: int | None = None
