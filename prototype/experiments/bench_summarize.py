@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Summarise rl-timings.jsonl + per-scenario summary.csv into markdown.
 
-Crawls one phase output root (e.g. ``outputs/prototype/rb-rl-v3-bench/phase0``),
-finds every ``rl-timings.jsonl`` under it (one per scenario × policy run), and
+Crawls one bench output root (e.g. ``outputs/prototype/rb-rl-v3-bench/phase0``,
+where the leaf directory name is whatever convention the bench uses), finds
+every ``rl-timings.jsonl`` under it (one per scenario × policy run), and
 emits a markdown table with per-component p50 / p95 / p99 latencies aggregated
 across all ticks of all scenarios. Also pulls outcome metrics
 (``avg_goodput_fault``, ``avg_goodput_prefault``, ``recovery_sec``,
@@ -15,8 +16,8 @@ Usage::
         outputs/prototype/rb-rl-v3-bench/phase0 \\
         --out outputs/prototype/rb-rl-v3-bench/phase0/summary.md
 
-Designed to be re-run after every phase. The output is the row that gets
-appended to ``comparison.md``.
+Designed to be re-run after every bench round. The output is the row that
+gets appended to ``comparison.md``.
 """
 
 from __future__ import annotations
@@ -148,13 +149,13 @@ def fmt_num(value: float) -> str:
 
 def render_markdown(
     *,
-    phase_root: Path,
+    bench_root: Path,
     files: list[Path],
     aggregate_rows: list[dict[str, Any]],
     per_scenario: list[tuple[str, dict[str, dict[str, float]], dict[str, float]]],
 ) -> str:
     lines: list[str] = []
-    lines.append(f"# Bench summary — {phase_root}")
+    lines.append(f"# Bench summary — {bench_root}")
     lines.append("")
     lines.append(
         f"_{len(files)} timing files, "
@@ -222,17 +223,17 @@ def render_markdown(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
-        "phase_root",
+        "bench_root",
         type=Path,
-        help="Root directory (one phase) containing per-scenario subdirs.",
+        help="Root directory (one bench round) containing per-scenario subdirs.",
     )
     parser.add_argument(
         "--out", type=Path, default=None,
-        help="Write markdown here (default: <phase_root>/summary.md). Pass '-' for stdout.",
+        help="Write markdown here (default: <bench_root>/summary.md). Pass '-' for stdout.",
     )
     args = parser.parse_args()
 
-    root: Path = args.phase_root.resolve()
+    root: Path = args.bench_root.resolve()
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 2
@@ -256,7 +257,7 @@ def main() -> int:
         per_scenario.append((scenario_label_from_path(path, root), comp_stats, outcome))
 
     md = render_markdown(
-        phase_root=root,
+        bench_root=root,
         files=files,
         aggregate_rows=aggregate_rows,
         per_scenario=per_scenario,

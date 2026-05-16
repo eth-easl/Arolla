@@ -41,6 +41,13 @@ from rl_obs_schema import (  # noqa: E402
     LATENCY_HISTOGRAM_EDGES_S,
     LATENCY_HISTOGRAM_NUM_BUCKETS,
 )
+from rl_obs_envoy import (  # noqa: E402
+    aggregate_pod_snapshots,
+    compose_metrics_from_envoy,
+    delta_counters,
+    p95_from_envoy,
+    parse_envoy_stats_json,
+)
 
 
 # Feature order must match the training environment exactly.
@@ -229,9 +236,9 @@ def ssh_cat_metrics(
 ) -> str:
     """Fetch client_attempts*.csv rows newer than `since_ts` from CLIENT_HOST.
 
-    Phase 1.2: when `since_ts` is provided, the remote shell now runs an awk
-    pre-filter so only rows whose timestamp (column 1) is ≥ since_ts are sent
-    over the wire. At 1.6k RPS × 2 s decision interval that is ~3 KB per tick
+    When `since_ts` is provided, the remote shell runs an awk pre-filter so
+    only rows whose timestamp (column 1) is ≥ since_ts are sent over the
+    wire. At 1.6k RPS × 2 s decision interval that is ~3 KB per tick
     instead of multiple MB, which both shrinks the SCP-style copy and keeps
     parse_client_rows from re-doing the timestamp filter on millions of stale
     rows. Falls back to a full cat when since_ts is None (legacy callers)."""
@@ -268,8 +275,8 @@ def ssh_cat_metrics(
 # a single requests.Session so HTTP keep-alive + connection pooling apply,
 # and feeds the same `parse_client_rows` consumer as the SSH path. That
 # keeps the `build_metrics → build_observation` chain identical regardless
-# of which transport is in use, which is what makes the decision-drift
-# acceptance criterion in plan-12 §1 enforceable.
+# of which transport is in use, which is what makes cross-transport
+# decision-drift checks meaningful.
 # ---------------------------------------------------------------------------
 
 _HTTP_SESSION: Any = None
@@ -357,7 +364,7 @@ def parse_client_rows(raw: str, since_ts: float) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Buckets path (Phase 3) — pre-aggregated observation transport
+# Buckets path — pre-aggregated loader-side observation transport
 #
 # The loader pre-aggregates per-attempt counters into 1-second
 # (shard, profile) buckets and serves them at /buckets. Per-tick payload
@@ -602,6 +609,263 @@ def compose_observation_from_buckets(
     obs, sources = build_observation(metrics, current, previous, previous_metrics)
     sources = dict(sources)
     sources["obs_transport"] = "http_buckets"
+    return obs, sources, metrics
+
+
+# ---------------------------------------------------------------------------
+# Envoy /stats path — production-shape observation transport
+#
+# Each tick the controller:
+#
+#   1. Reads the cached caller-pod IP list (refreshed in a background
+#      thread every 30 s — `_PodCache` below).
+#   2. Fetches `http://<podIP>:15020/stats/prometheus?filter=upstream_rq.*<callee>&usedonly`
+#      from every pod in parallel via a ThreadPoolExecutor. The loader
+#      buckets path collapses N caller pods into one fan-in at the
+#      loader; here we have to talk to each pod, so parallel fan-out is
+#      load-bearing. Port 15020 is pilot-agent's pod-IP-reachable
+#      Prometheus merge endpoint (admin port 15000 is bound to localhost
+#      by Istio and not externally reachable from another pod).
+#   3. Parses each pod's Prom output via `rl_obs_envoy.parse_envoy_stats_prom`,
+#      element-wise sums them (`aggregate_pod_snapshots`), then takes the
+#      per-window delta against the previous-tick snapshot.
+#   4. Composes the same `metrics` dict the rows / buckets paths produce
+#      (`compose_metrics_from_envoy`) and runs it through the shared
+#      `build_observation` so the 18-feature vector is emitted identically.
+#
+# Sidecar CPU is reserved cluster-wide via
+# `manifests/istio/sidecar-cpu-reservation.yaml` (mesh default 100 m, up
+# from Istio's 10 m). That's what gives us the p95 ≤ 200 ms tail-latency
+# floor; without the bump the sidecar can be cgroup-throttled when its
+# pod's application container saturates the pod's CPU budget, which
+# pushes /stats latency into the seconds.
+# ---------------------------------------------------------------------------
+
+
+_HTTP_EXECUTOR: Any = None
+_HTTP_EXECUTOR_SIZE = 4
+
+
+def _get_http_executor() -> Any:
+    """Cached ThreadPoolExecutor for the parallel /stats fan-out.
+
+    4 workers covers cart's two callers (frontend, checkoutservice)
+    in parallel and leaves slack for any future sweep that asks the
+    controller to poll a third or fourth caller. Each fetch is an HTTP
+    GET against an in-cluster pod IP, so threads block on socket I/O
+    rather than the GIL.
+    """
+    global _HTTP_EXECUTOR
+    if _HTTP_EXECUTOR is not None:
+        return _HTTP_EXECUTOR
+    try:
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+    except ImportError:
+        return None
+    _HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=_HTTP_EXECUTOR_SIZE)
+    return _HTTP_EXECUTOR
+
+
+class _PodCache:
+    """Background-refreshed cache of caller-pod IPs.
+
+    The kubernetes List API is the slowest call in the controller's
+    toolbox (typically 50–150 ms; serial dependency on apiserver
+    pagination + RBAC checks). At the 2 s decision cadence, doing a List
+    every tick burns a third of the latency budget on something that
+    changes only when a pod is rescheduled. We refresh in a daemon
+    thread every 30 s and invalidate on demand so a fresh pod IP is
+    picked up within one tick of any pod restart.
+    """
+
+    def __init__(
+        self,
+        namespace: str,
+        labels: list[str],
+        refresh_sec: float = 30.0,
+    ) -> None:
+        self._namespace = namespace
+        self._labels = labels
+        self._refresh_sec = float(refresh_sec)
+        self._lock = threading.Lock()
+        self._ips: list[str] = []
+        self._last_error: str | None = None
+        self._last_refresh = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        # Synchronous first refresh so the very first tick has something
+        # to fetch. If discovery fails the controller logs and continues
+        # to the next tick (which auto-retries).
+        self._refresh_once()
+        t = threading.Thread(
+            target=self._loop, name="pod-cache", daemon=True,
+        )
+        t.start()
+        self._thread = t
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def get(self) -> list[str]:
+        with self._lock:
+            return list(self._ips)
+
+    def invalidate(self) -> None:
+        """Force a refresh on the next loop iteration.
+
+        Called by the fetch path when a connect error suggests the pod
+        IP set is stale. We don't refresh inline because a List API
+        call would block the tick; instead we shorten the daemon's next
+        wake-up.
+        """
+        with self._lock:
+            self._last_refresh = 0.0
+
+    def last_error(self) -> str | None:
+        with self._lock:
+            return self._last_error
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                age = time.time() - self._last_refresh
+            if age >= self._refresh_sec:
+                self._refresh_once()
+            self._stop.wait(min(2.0, self._refresh_sec))
+
+    def _refresh_once(self) -> None:
+        try:
+            from kubernetes import client, config  # noqa: PLC0415
+        except ImportError:
+            with self._lock:
+                self._last_error = "kubernetes-client-not-installed"
+                self._last_refresh = time.time()
+            return
+        try:
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+            v1 = client.CoreV1Api()
+            label_selector = f"app in ({','.join(self._labels)})"
+            resp = v1.list_namespaced_pod(
+                self._namespace,
+                label_selector=label_selector,
+                field_selector="status.phase=Running",
+                _request_timeout=5,
+            )
+            ips: list[str] = []
+            for pod in resp.items:
+                ip = getattr(pod.status, "pod_ip", None)
+                if ip:
+                    ips.append(str(ip))
+            with self._lock:
+                self._ips = ips
+                self._last_error = None
+                self._last_refresh = time.time()
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._last_error = f"{exc.__class__.__name__}: {exc}"
+                self._last_refresh = time.time()
+
+
+def http_fetch_envoy_stats(
+    pod_ips: list[str],
+    callee_match: str,
+    *,
+    timeout: float = 2.0,
+    admin_port: int = 15020,
+) -> tuple[dict[str, Any], int]:
+    """Fan-out fetch + element-wise aggregate of
+    ``/stats/prometheus?filter=upstream_rq.*<callee>&usedonly`` across
+    every caller-sidecar pod.
+
+    Returns ``(aggregated, n_ok)`` where ``aggregated`` is the dict from
+    :func:`rl_obs_envoy.aggregate_pod_snapshots` (counter sums + summed
+    histogram buckets across all responding pods) and ``n_ok`` is the
+    number of pods that returned a parseable response.
+
+    A pod that times out or returns a non-200 / unparseable body is
+    dropped from the aggregate; the controller relies on having ≥ 1
+    responding pod (typically 2 for cart's frontend + checkoutservice)
+    to compose a meaningful observation. If every pod fails the aggregate
+    is all-zero and the obs-source-fail-loud logic in the main loop
+    surfaces the regression after 5 consecutive empty windows.
+
+    Why port 15020 (pilot-agent merge endpoint) and not 15000 (Envoy
+    admin): Istio binds the Envoy admin listener to 127.0.0.1 only and
+    the bind address is hard-coded in the agent's bootstrap template
+    (not overridable via standard mesh config). A pod-to-pod request to
+    ``<podIP>:15000`` hits Envoy's inbound capture and returns 503.
+    pilot-agent runs its own listener on 15020 that proxies
+    ``/stats/prometheus`` through to Envoy admin internally and is
+    bound 0.0.0.0 by design (for the readiness probe). The endpoint
+    accepts Envoy's ``?filter=<regex>&usedonly`` query so we can shrink
+    the response to ≤ 15 KB without changing any sidecar config.
+    """
+    session = _get_http_session()
+    executor = _get_http_executor()
+    if session is None or executor is None or not pod_ips:
+        return ({}, 0)
+
+    def fetch_one(ip: str) -> dict[str, Any] | None:
+        # Envoy admin filter — matches the raw stat name shape
+        # ``cluster.outbound|<port>||<svc>.<ns>.svc.cluster.local;.upstream_rq*``.
+        # Prefixing with ``cluster.outbound`` keeps the response tiny
+        # (~20 KB) and rules out unrelated `internal_upstream_rq` /
+        # `external_upstream_rq` from other listeners.
+        url = (
+            f"http://{ip}:{admin_port}/stats/prometheus"
+            f"?filter=cluster.outbound.*{callee_match}.*upstream_rq"
+            f"&usedonly"
+        )
+        try:
+            resp = session.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                return None
+            return parse_envoy_stats_json(resp.text, callee=callee_match)
+        except Exception:
+            return None
+
+    snapshots: list[dict[str, Any]] = []
+    for snap in executor.map(fetch_one, pod_ips):
+        if snap is not None:
+            snapshots.append(snap)
+
+    if not snapshots:
+        return ({}, 0)
+    return (aggregate_pod_snapshots(snapshots), len(snapshots))
+
+
+def compose_observation_from_envoy(
+    snapshot: dict[str, Any],
+    prev_snapshot: dict[str, Any] | None,
+    window_sec: float,
+    current: RetryBudget,
+    previous: RetryBudget,
+    previous_metrics: dict[str, Any] | None,
+) -> tuple[list[float], dict[str, str], dict[str, Any]]:
+    """Build the 18-feature observation vector from an Envoy /stats snapshot.
+
+    Mirrors :func:`compose_observation_from_buckets`'s shape; the only
+    difference is where the per-window counter delta + histogram delta
+    come from (Envoy cumulative counters vs loader 1-second buckets).
+    """
+    counter_delta = delta_counters(snapshot, prev_snapshot)
+    # Envoy 1.27+ exposes a per-flush ``interval`` p95 in the histogram
+    # block; ``p95_from_envoy`` reads it directly (no bucket
+    # interpolation) and falls back to the cumulative value if Envoy
+    # hasn't flushed yet (first tick). See rl_obs_envoy.py for the full
+    # rationale.
+    p95_seconds = p95_from_envoy(snapshot, prev_snapshot)
+    metrics = compose_metrics_from_envoy(counter_delta, p95_seconds, window_sec)
+    obs, sources = build_observation(
+        metrics, current, previous, previous_metrics,
+    )
+    sources = dict(sources)
+    sources["obs_transport"] = "http_envoy_stats"
     return obs, sources, metrics
 
 
@@ -1049,15 +1313,43 @@ def main() -> int:
     )
     parser.add_argument(
         "--obs-mode",
-        choices=("auto", "rows", "buckets"),
+        choices=("auto", "rows", "buckets", "envoy"),
         default="auto",
         help=(
-            "How the controller fetches observations from the loader. "
-            "`rows` (Phase 2 default): GET /window, per-attempt rows. "
-            "`buckets` (Phase 3): GET /buckets, pre-aggregated counters. "
-            "`auto`: try /buckets first, fall back to /window if every "
-            "shard returns 404 / connection refused (loader < Phase 3). "
-            "Only applies when --loader-url-template is set."
+            "How the controller fetches observations. "
+            "`rows`: GET /window on the loader, per-attempt rows. "
+            "`buckets`: GET /buckets on the loader, pre-aggregated. "
+            "`envoy`: GET /stats on caller-pod sidecars, production-shape "
+            "(no loader involvement on the obs path). "
+            "`auto`: try envoy → buckets → rows; degrade to the next path "
+            "only if the active one returns nothing on five ticks in a row."
+        ),
+    )
+    # Envoy /stats source (only consulted when --obs-mode is `envoy`
+    # or when `auto` falls back to envoy).
+    parser.add_argument(
+        "--envoy-callee", default="cartservice",
+        help=(
+            "Callee cluster substring to filter on inside Envoy stat "
+            "names (e.g. `cartservice` matches "
+            "`cluster.outbound|7070||cartservice.<ns>.svc.cluster.local`). "
+            "Default: cartservice (Online Boutique's faulting service)."
+        ),
+    )
+    parser.add_argument(
+        "--envoy-caller-labels", default="frontend,checkoutservice",
+        help=(
+            "Comma-separated `app=<label>` values for the caller pods "
+            "whose Envoy sidecars expose retry counters for the callee. "
+            "Default: frontend,checkoutservice (cart's two callers in "
+            "Online Boutique)."
+        ),
+    )
+    parser.add_argument(
+        "--envoy-pod-discovery-namespace", default="",
+        help=(
+            "Namespace to list caller pods in. Defaults to --namespace, "
+            "which is correct for the standard single-namespace deploy."
         ),
     )
     parser.add_argument(
@@ -1097,6 +1389,14 @@ def main() -> int:
     # Resolve the observation transport. The HTTP path is the in-cluster
     # default; the SSH path is the laptop-side fallback. We pick exactly
     # one so the per-tick code is uniform.
+    #
+    # The `envoy` path doesn't need the loader URL/ports at all — it
+    # talks directly to caller-pod sidecars — but the in-cluster Job
+    # manifest still passes them through for the `auto` cascade
+    # (envoy → buckets → rows). The fall-back to buckets/rows only
+    # works when the loader endpoint info is configured; without it the
+    # envoy path is the only available source and a controller stalled
+    # on `/stats` failures will fail loud after 5 empty ticks.
     use_http_obs = bool(args.loader_url_template) and not args.legacy_ssh_obs
     loader_ports: list[int] = []
     if use_http_obs:
@@ -1114,12 +1414,17 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
+    elif args.obs_mode == "envoy":
+        # `envoy` mode is in-cluster by construction (it needs pod IPs
+        # on the worker fabric) but doesn't require loader plumbing.
+        pass
     else:
         # SSH path (laptop-side, or in-cluster with --legacy-ssh-obs).
         if not args.client_host or not args.ssh_user:
             print(
                 "[rl_controller] SSH-obs path requires --client-host and --ssh-user "
-                "(or pass --loader-url-template + --loader-ports for HTTP)",
+                "(or pass --loader-url-template + --loader-ports for HTTP, "
+                "or --obs-mode envoy for the sidecar path)",
                 file=sys.stderr,
             )
             return 2
@@ -1128,7 +1433,19 @@ def main() -> int:
     # The loader serves both endpoints from the same aiohttp app, so the
     # only difference is the path suffix; the controller stays oblivious
     # to whether the loader's port assignment is hard-coded or dynamic.
-    obs_mode = args.obs_mode if use_http_obs else "rows"
+    if use_http_obs:
+        obs_mode = args.obs_mode
+    elif args.obs_mode == "envoy":
+        obs_mode = "envoy"
+    else:
+        obs_mode = "rows"
+    # `use_envoy_obs` is the boolean for "we will or might use the envoy
+    # /stats source on at least one tick" — controls whether to spin up
+    # the pod-discovery cache. It must reflect the *resolved* obs_mode
+    # (e.g. legacy-ssh-obs forces obs_mode=rows even if the operator
+    # passed --obs-mode=auto, in which case there's no point in starting
+    # the pod cache).
+    use_envoy_obs = obs_mode in ("envoy", "auto")
     buckets_url_template = ""
     if use_http_obs:
         if args.loader_url_template.endswith("/window"):
@@ -1145,6 +1462,35 @@ def main() -> int:
             # explicit: --loader-url-template names the rows endpoint, and
             # the buckets endpoint is always its sibling.
             buckets_url_template = args.loader_url_template + "/buckets"
+
+    # Bring up the caller-pod IP cache when envoy mode is in the
+    # resolution set (either pinned or `auto`).
+    pod_cache: _PodCache | None = None
+    if use_envoy_obs:
+        envoy_ns = (
+            args.envoy_pod_discovery_namespace or args.namespace
+        )
+        labels = [
+            s.strip() for s in args.envoy_caller_labels.split(",") if s.strip()
+        ]
+        if not labels:
+            print(
+                "[rl_controller] --envoy-caller-labels resolved to empty list; "
+                "aborting envoy mode",
+                file=sys.stderr,
+            )
+            return 2
+        pod_cache = _PodCache(
+            namespace=envoy_ns, labels=labels, refresh_sec=30.0,
+        )
+        pod_cache.start()
+        print(
+            f"[rl_controller] envoy obs: namespace={envoy_ns} "
+            f"labels={labels} callee={args.envoy_callee} "
+            f"initial_pods={len(pod_cache.get())} "
+            f"discovery_error={pod_cache.last_error()}",
+            file=sys.stderr,
+        )
 
     cfg = load_config(Path(args.config))
     apply_enabled = not args.shadow
@@ -1171,7 +1517,12 @@ def main() -> int:
         effective_mode = "shadow_stub"
         apply_enabled = False
 
-    if use_http_obs:
+    if obs_mode == "envoy":
+        obs_path_label = (
+            f"envoy(initial_pods={len(pod_cache.get()) if pod_cache else 0}, "
+            f"mode={obs_mode})"
+        )
+    elif use_http_obs:
         obs_path_label = f"http({len(loader_ports)} shards, mode={obs_mode})"
     else:
         obs_path_label = "ssh_cat"
@@ -1197,15 +1548,31 @@ def main() -> int:
     previous_metrics: dict[str, Any] | None = None
     start_ts = time.time()
     tick_index = 0
-    # Buckets/rows runtime state. `effective_obs_mode` tracks what we are
-    # actually using (`obs_mode` is the operator's intent — `auto` resolves
-    # to `buckets` on first success and degrades to `rows` only if every
-    # shard returns 0 ok_shards on its first call). `consecutive_empty`
-    # counts ticks where every shard answered but returned zero buckets so
-    # the controller can fail loud rather than silently producing
-    # all-zero observations (plan-optimization-phase3 §8 risks row 4).
-    effective_obs_mode = "buckets" if obs_mode in {"auto", "buckets"} else "rows"
+    # Runtime state for the obs source. `effective_obs_mode` tracks what
+    # we are actually using (`obs_mode` is the operator's intent — `auto`
+    # cascades envoy → buckets → rows on first failure of the active
+    # source). `consecutive_empty_*` counts let the controller fail loud
+    # if the active source silently produces zero data, rather than
+    # producing all-zero observations.
+    if obs_mode == "envoy":
+        effective_obs_mode = "envoy"
+    elif obs_mode == "auto":
+        effective_obs_mode = "envoy" if use_envoy_obs else "buckets"
+    elif obs_mode == "buckets":
+        effective_obs_mode = "buckets"
+    else:
+        effective_obs_mode = "rows"
     consecutive_empty_buckets = 0
+    consecutive_empty_envoy = 0
+    # Envoy per-tick state. Envoy reports cumulative counters; we keep
+    # the previous-tick snapshot so `delta_counters` can report per-
+    # window deltas. The histogram p95 already comes pre-windowed from
+    # Envoy's tdigest ``interval`` field, so it doesn't need a per-tick
+    # diff (see rl_obs_envoy.p95_from_envoy). First-tick delta is the
+    # cumulative value since process start, which the model tolerates
+    # because the startup hold-off prevents that tick from ever
+    # causing a patch.
+    prev_envoy_snapshot: dict[str, Any] | None = None
     # Pending xDS-probe results land here keyed by the tick that triggered
     # the patch; they are flushed onto the *next* tick's timing record so
     # the apply-time is colocated with the patch event in the timeline.
@@ -1237,11 +1604,91 @@ def main() -> int:
             since_ts = now - cfg.observation_window_sec
 
             # ---- Obs fetch + parse + build ----
-            # Buckets path (Phase 3): one /buckets call per shard, no
-            # row-level work, single linear pass over ~40 buckets in
+            # Envoy path: parallel /stats fan-out across the caller-pod
+            # sidecars; per-tick delta against the previous snapshot;
+            # single pass through `compose_observation_from_envoy`.
+            # Buckets path: one /buckets call per shard, no row-level
+            # work, single linear pass over ~40 buckets in
             # `compose_observation_from_buckets`.
-            # Rows path (Phase 2): /window or SSH-cat → parse_client_rows
+            # Rows path: /window or SSH-cat → parse_client_rows
             # → build_metrics → build_observation, unchanged.
+            if effective_obs_mode == "envoy":
+                t = time.perf_counter()
+                pod_ips = pod_cache.get() if pod_cache else []
+                snapshot, n_ok = http_fetch_envoy_stats(
+                    pod_ips,
+                    args.envoy_callee,
+                )
+                timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
+
+                # When `auto` and every pod failed (no IPs discovered yet, or
+                # all sidecars are unreachable) cascade down. Pinned `envoy`
+                # mode keeps trying — the consecutive-empty guard below
+                # surfaces a sustained failure.
+                if n_ok == 0 and not pod_ips and obs_mode == "auto":
+                    print(
+                        "[rl_controller] envoy obs: no caller pods discovered "
+                        "yet; cascading to /buckets for this tick "
+                        f"(discovery_error={pod_cache.last_error() if pod_cache else 'no-cache'})",
+                        file=sys.stderr,
+                    )
+                    effective_obs_mode = "buckets" if use_http_obs else "rows"
+                elif n_ok == 0 and obs_mode == "auto":
+                    print(
+                        "[rl_controller] envoy obs: 0 of "
+                        f"{len(pod_ips)} caller pods responded; "
+                        "cascading to /buckets for this controller lifetime",
+                        file=sys.stderr,
+                    )
+                    if pod_cache is not None:
+                        pod_cache.invalidate()
+                    effective_obs_mode = "buckets" if use_http_obs else "rows"
+                else:
+                    t = time.perf_counter()
+                    timing.obs_parse_ms = (time.perf_counter() - t) * 1000.0
+                    timing.rows = int(snapshot.get("upstream_rq_total", 0))
+
+                    t = time.perf_counter()
+                    observation, sources, metrics = (
+                        compose_observation_from_envoy(
+                            snapshot,
+                            prev_envoy_snapshot,
+                            cfg.observation_window_sec,
+                            current,
+                            previous_budget,
+                            previous_metrics,
+                        )
+                    )
+                    sources["envoy_pods_responded"] = str(n_ok)
+                    timing.obs_build_ms = (time.perf_counter() - t) * 1000.0
+                    prev_envoy_snapshot = snapshot
+
+                    # Fail-loud guard for the envoy path. We tolerate one
+                    # connect-error tick (pod restarted) but bail noisily
+                    # if every fetch fails for 5 ticks in a row, which is
+                    # 10 s of policy-blind decisions. The guard fires
+                    # whether the operator pinned `envoy` or `auto` cascaded
+                    # to it; the message points to the right knob.
+                    counter_total = int(snapshot.get("upstream_rq_total", 0))
+                    if counter_total == 0:
+                        consecutive_empty_envoy += 1
+                    else:
+                        consecutive_empty_envoy = 0
+                    if consecutive_empty_envoy >= 5:
+                        print(
+                            f"[rl_controller] obs_mode=envoy returned 0 "
+                            f"upstream_rq_total for 5 ticks (pods={pod_ips}, "
+                            f"discovery_error={pod_cache.last_error() if pod_cache else None}); "
+                            "either the cluster is idle or the sidecars "
+                            "are not exposing /stats — falling back to /buckets",
+                            file=sys.stderr,
+                        )
+                        if obs_mode == "auto":
+                            effective_obs_mode = (
+                                "buckets" if use_http_obs else "rows"
+                            )
+                            consecutive_empty_envoy = 0
+
             if use_http_obs and effective_obs_mode == "buckets":
                 t = time.perf_counter()
                 buckets, ok_shards = http_fetch_buckets(
@@ -1249,8 +1696,9 @@ def main() -> int:
                 )
                 timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
 
-                # /buckets returns 404 on pre-Phase-3 loaders. In `auto`
-                # mode the controller silently degrades to /window on the
+                # /buckets returns 404 on loaders that pre-date the
+                # pre-aggregated transport. In `auto` mode the controller
+                # silently degrades to /window on the
                 # first tick where every shard refuses /buckets; in
                 # `buckets` mode (operator pinned it) we keep trying and
                 # the warning below surfaces the regression.
@@ -1282,8 +1730,9 @@ def main() -> int:
 
                     # Buckets-path fail-loud guard. If the controller
                     # silently produced zero-attempt observations for many
-                    # consecutive ticks (which Phase 2's smoke incident
-                    # showed is bug-prone), surface it.
+                    # consecutive ticks (an early-iteration regression that
+                    # was bug-prone enough to need its own guard), surface
+                    # it.
                     if not buckets:
                         consecutive_empty_buckets += 1
                     else:
@@ -1297,8 +1746,12 @@ def main() -> int:
                         )
 
             # Rows path — either the operator pinned --obs-mode=rows, or
-            # `auto` fell back to it because no shard served /buckets.
-            if not use_http_obs or effective_obs_mode == "rows":
+            # `auto` fell back to it because no shard served /buckets,
+            # or the SSH-cat (laptop-side) path is the only one configured.
+            # Skip when envoy mode owns this tick.
+            if effective_obs_mode != "envoy" and (
+                not use_http_obs or effective_obs_mode == "rows"
+            ):
                 t = time.perf_counter()
                 if use_http_obs:
                     raw = http_fetch_window(

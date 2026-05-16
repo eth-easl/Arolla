@@ -131,7 +131,12 @@ upload_manifests() {
     local scp_opts="${SSH_OPTS}"
     [[ -n "${SSH_KEY}" ]] && scp_opts+=" -i ${SSH_KEY}"
 
-    eval "$(ssh_cmd "$MASTER_HOST")" "mkdir -p ${REMOTE_MANIFESTS_DIR}"
+    # Clean any stale files from a previous (possibly partial) deploy so the
+    # `kubectl apply -R` below only sees the subdirs we explicitly skip in
+    # the loop below. Without this, a previously-uploaded rl-controller/ or
+    # policies/ subdir would persist and get re-applied, failing on the
+    # unsubstituted `__NAMESPACE__` placeholders.
+    eval "$(ssh_cmd "$MASTER_HOST")" "rm -rf ${REMOTE_MANIFESTS_DIR} && mkdir -p ${REMOTE_MANIFESTS_DIR}"
 
     # Upload top-level yaml files (namespace/gateway/routes/etc.)
     local top_yaml_found=0
@@ -145,10 +150,15 @@ upload_manifests() {
     #
     # Skip subdirectories that are managed *per-experiment* rather than as
     # part of the base app:
-    #   policies/  — retry-admission policies, switched by deploy-policy.sh
-    #   faults/    — fault-injection manifests, toggled by run-experiment.sh
-    #   chaos/     — chaos-mesh templates (e.g. CPU stress), toggled by
-    #                run-experiment.sh's --cpu-stress-target flag
+    #   policies/      — retry-admission policies, switched by deploy-policy.sh
+    #   faults/        — fault-injection manifests, toggled by run-experiment.sh
+    #   chaos/         — chaos-mesh templates (e.g. CPU stress), toggled by
+    #                    run-experiment.sh's --cpu-stress-target flag
+    #   rl-controller/ — RL controller Job template; contains __NAMESPACE__ /
+    #                    __IMAGE__ / __CONFIGMAP__ placeholders that
+    #                    run-experiment.sh substitutes per run. Applying the
+    #                    raw template directly fails with `namespaces
+    #                    "__NAMESPACE__" not found`.
     # Uploading these would cause `kubectl apply -R` below to install every
     # policy + fault at once, which is never what we want during app deploy.
     local sub_yaml_found=0
@@ -157,7 +167,7 @@ upload_manifests() {
         local dirname
         dirname=$(basename "$subdir")
         case "${dirname}" in
-            policies|faults|chaos|cluster-profiles)
+            policies|faults|chaos|cluster-profiles|rl-controller)
                 info "Skipping experiment-infrastructure subdir: ${dirname}/ (managed by deploy-policy.sh / run-experiment.sh / deploy-cluster-profile.sh)"
                 continue
                 ;;
@@ -261,6 +271,32 @@ do_deploy() {
         echo ''
         kubectl -n ${APP_NS} get destinationrule 2>/dev/null || true
         kubectl -n ${APP_NS} get xbackendtrafficpolicies.gateway.networking.x-k8s.io 2>/dev/null || true
+
+        # Ensure every sidecar in the namespace inherits the current
+        # global IstioOperator settings (in particular the 100 m sidecar
+        # CPU request set in manifests/istio/sidecar-cpu-reservation.yaml).
+        # On a fresh install the pods are already at the right value
+        # because the injection webhook used the latest mesh defaults;
+        # on a re-deploy where the operator settings changed since the
+        # previous run this rollout-restart is what makes the namespace
+        # catch up.
+        echo ''
+        echo '=== Verifying sidecar CPU reservation (≥ 100 m) ==='
+        STALE_PODS=\$(kubectl -n ${APP_NS} get pods \\
+          -o jsonpath='{range .items[*]}{.metadata.name}{\"\\t\"}{.spec.containers[?(@.name==\"istio-proxy\")].resources.requests.cpu}{\"\\n\"}{end}' \\
+          | awk -F'\\t' '\$2 != \"\" && \$2 != \"100m\" && \$2 != \"200m\" && \$2 != \"500m\" {print \$1}')
+        if [[ -n \"\$STALE_PODS\" ]]; then
+          echo \"sidecar bump not present on:\"
+          echo \"\$STALE_PODS\" | sed 's/^/  /'
+          echo ''
+          echo 'Rolling restart to pick up the IstioOperator-bumped sidecar resources…'
+          kubectl -n ${APP_NS} rollout restart deployment
+          for d in \$(kubectl -n ${APP_NS} get deployment -o name 2>/dev/null); do
+            kubectl -n ${APP_NS} rollout status \"\$d\" --timeout=180s || true
+          done
+        else
+          echo 'all sidecars at ≥ 100 m, no restart needed.'
+        fi
     "
 
     local node_port

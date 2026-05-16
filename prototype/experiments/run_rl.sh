@@ -43,7 +43,8 @@ Options:
   --rl-configmap <name>  ConfigMap name (default: rl-controller-v3)
   --rl-loader-port-base <n>  /window port base on the loader (default: 8765)
   --rl-loader-host <ip>  Address pods use to reach the loader (default: \$CLIENT_IP)
-  --obs-mode <mode>      Phase 3 obs transport: auto|rows|buckets (default: auto)
+  --obs-mode <mode>      Observation transport. auto|envoy|buckets|rows
+                         (default: auto = envoy → buckets → rows cascade).
   -n, --dry-run          Print run commands  without executing
   -h, --help             Show this message
 EOF

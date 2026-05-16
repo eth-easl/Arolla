@@ -201,7 +201,8 @@ by hand.
 - **§6.2.3 chain-depth amplification** is not yet wrapped as a scenario — it
   needs per-hop retry-rate queries against Istio Prometheus, which the
   current analyzer doesn't implement.
-- **§6.4 fairness** is blocked on the Arolla filter's Phase 2 per-tenant layer.
+- **§6.4 fairness** is blocked on the per-tenant layer of the Arolla filter
+  (not yet implemented; see `arolla-filter/README.md` "Known limitations").
 - **§6.5 sensitivity sweeps** are not yet orchestrated — they'd need a loop
   that re-templates the Arolla `pluginConfig` (varying `r`, `capacity`) and
   re-runs §6.2.1 for each value.

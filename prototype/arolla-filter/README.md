@@ -3,7 +3,7 @@
 Server-side retry admission filter implementing the paper's Algorithm 1 as an
 Envoy HTTP filter, deployable in an Istio service mesh via the `WasmPlugin` CRD.
 
-**Phase 1 scope**: aggregate mixed-refill token bucket only. Per-tenant max-min
+**MVP scope**: aggregate mixed-refill token bucket only. Per-tenant max-min
 fairness (paper §4.3) is not yet implemented — enough to run §6.2.1, §6.2.2,
 §6.2.3, §6.5 sensitivity, and §6.6 overhead experiments.
 
@@ -30,7 +30,7 @@ The filter reads the `x-attempt-number` HTTP header on each request:
 
 The load generator in `../clients/online-boutique/traffic_gen.py` already sets
 this header. For internal hops (frontend → checkout → cart → …), the calling
-service's local sidecar needs to propagate and increment the counter; a Phase 2
+service's local sidecar needs to propagate and increment the counter; a future
 iteration will add an outbound filter that does this automatically. For now,
 the filter only gates external client retries observed at the sidecar where
 it is installed.
@@ -125,17 +125,18 @@ With Online Boutique deployed and a fault injected via
         curl -s localhost:15000/stats | grep arolla_
     # expect: arolla_retries_rejected_total > 0 once bucket drains
 
-## Known limitations (Phase 1)
+## Known limitations (MVP)
 
-- **No per-tenant fairness** (§6.4 experiment blocked until Phase 2).
+- **No per-tenant fairness** (§6.4 experiment blocked until that layer
+  lands).
 - **gRPC status trailers are not inspected.** Online Boutique's
   service-to-service calls use gRPC, which always returns HTTP `:status 200`
   and encodes errors in the `grpc-status` trailer. The filter currently counts
-  all 200s as successes, which over-credits the bucket on gRPC errors. Phase 2
-  should inspect `on_http_response_trailers()`.
+  all 200s as successes, which over-credits the bucket on gRPC errors. A
+  future iteration should inspect `on_http_response_trailers()`.
 - **Retry counter propagation is client-side only.** Internal hops do not
   increment `x-attempt-number`, so the filter effectively only gates retries
   originating from the external load generator. Paper §5 says the local proxy
-  should set/increment this — a Phase 2 outbound filter will close this gap.
+  should set/increment this — a future outbound filter will close this gap.
 - **First-come-first-served within the aggregate bucket.** Without the
   per-tenant layer, one aggressive caller can still monopolize the bucket.

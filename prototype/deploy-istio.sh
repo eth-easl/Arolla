@@ -152,10 +152,21 @@ step3_install_istio() {
 
         echo ''
         echo \"Installing Istio with profile: \${ISTIO_PROFILE}…\"
+        # Mesh-wide sidecar CPU reservation bumped from Istios default
+        # 10 m to 100 m. The bump is the production recommendation for
+        # any deployment that wants a reservable observation channel
+        # through Envoy (which this paper does -- the RL controller
+        # polls /stats every 2 s). No limits block is set, so a sidecar
+        # can still burst above 100 m if its node has idle CPU; the
+        # 100 m is a floor under contention, not a quota. See
+        # manifests/istio/sidecar-cpu-reservation.yaml for the YAML
+        # form + sizing rationale.
         istioctl install --set profile=\${ISTIO_PROFILE} \
             --set values.pilot.resources.requests.memory=512Mi \
             --set values.pilot.resources.requests.cpu=250m \
             --set values.pilot.env.PILOT_ENABLE_ALPHA_GATEWAY_API=true \
+            --set values.global.proxy.resources.requests.cpu=100m \
+            --set values.global.proxy.resources.requests.memory=128Mi \
             --set meshConfig.accessLogFile=/dev/stdout \
             --set 'meshConfig.defaultConfig.proxyStatsMatcher.inclusionRegexps[0]=.*upstream_rq_retry.*' \
             --set 'meshConfig.defaultConfig.proxyStatsMatcher.inclusionRegexps[1]=.*upstream_rq_completed' \
@@ -175,6 +186,37 @@ step3_install_istio() {
         istioctl version
     "
     ok "Istio control plane installed"
+
+    # Also push the IstioOperator YAML form to the cluster so the bump
+    # is documented in-tree. The --set flags above already set the
+    # value; this kubectl-apply is here so any later operator who
+    # inspects the cluster sees the manifest annotation rather than
+    # having to reconstruct the bump from the install command line.
+    banner "Step 3b: Apply sidecar-cpu-reservation manifest"
+    local sidecar_manifest="${SCRIPT_DIR}/manifests/istio/sidecar-cpu-reservation.yaml"
+    if [[ ! -f "${sidecar_manifest}" ]]; then
+        warn "sidecar-cpu-reservation.yaml not found at ${sidecar_manifest}; skipping apply"
+        return 0
+    fi
+    local scp_opts="${SSH_OPTS}"
+    [[ -n "${SSH_KEY}" ]] && scp_opts+=" -i ${SSH_KEY}"
+    # shellcheck disable=SC2086
+    scp ${scp_opts} "${sidecar_manifest}" \
+        "${SSH_USER}@${MASTER_HOST}:/tmp/sidecar-cpu-reservation.yaml" >/dev/null
+    remote "$MASTER_HOST" "
+        echo 'Applying IstioOperator sidecar-cpu-reservation patch…'
+        # istioctl install merges into the existing operator state. The
+        # --set flags from Step 3 already wrote the same values; this
+        # second apply is the documented in-tree source of truth and is
+        # a no-op on the cluster state if Step 3 already installed.
+        istioctl install -f /tmp/sidecar-cpu-reservation.yaml -y
+        echo ''
+        echo 'Verifying mesh-wide sidecar CPU request reservation…'
+        kubectl -n ${ISTIO_NAMESPACE} get IstioOperator installed-state \
+          -o jsonpath='{.spec.values.global.proxy.resources.requests.cpu}'
+        echo ''
+    "
+    ok "Sidecar CPU reservation (mesh-wide 100 m) applied"
 }
 
 # ── Step 4: Verify GatewayClass + installation ──────────────────────────────

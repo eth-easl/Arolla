@@ -186,10 +186,10 @@ def enqueue_window_bucket_row(
 ) -> None:
     """Pre-aggregate one attempt into the current second's bucket (if enabled).
 
-    Counterpart of :func:`enqueue_window_row` for the Phase 3 buckets path
-    (plan-optimization-phase3 §4). Both helpers are called from the same
-    site — the firer's per-attempt code path — so the two ring buffers
-    stay consistent under any ordering of attempts.
+    Counterpart of :func:`enqueue_window_row` for the pre-aggregated
+    buckets path. Both helpers are called from the same site — the
+    firer's per-attempt code path — so the two ring buffers stay
+    consistent under any ordering of attempts.
 
     `is_final` distinguishes "this was a real outcome for the request" from
     "this was an interim retry attempt that did not terminate the request":
@@ -634,7 +634,7 @@ async def execute_step(
         # The buckets path uses this flag directly. The rows path / CSV
         # ignores it: ``rl_controller.final_attempts`` recomputes "final"
         # from the row's `_attempt` column to stay byte-compatible with
-        # the existing on-disk schema (plan-optimization-phase3 §4.5).
+        # the existing on-disk schema.
         is_final = (
             ok
             or not should_retry(profile, status)
@@ -666,8 +666,8 @@ async def execute_step(
             "ok": int(ok),
             "latency_s": latency,
         })
-        # Phase 3 buckets path: pre-aggregate this attempt for the
-        # /buckets HTTP endpoint. No-op when buckets are disabled.
+        # Buckets path: pre-aggregate this attempt for the /buckets
+        # HTTP endpoint. No-op when buckets are disabled.
         enqueue_window_bucket_row(
             timestamp=attempt_ts,
             profile=name,
@@ -1061,10 +1061,10 @@ async def _handle_window(request: "Any") -> "Any":
 async def _handle_buckets(request: "Any") -> "Any":
     """`GET /buckets?since=<unix_ts>` → JSON of pre-aggregated buckets.
 
-    Phase 3 transport (plan-optimization-phase3 §4.3). Each bucket is one
-    second of one (shard, profile) with integer counters + a fixed-edge
-    latency histogram. The controller's :func:`http_fetch_buckets`
-    matches this response schema.
+    Pre-aggregated buckets transport. Each bucket is one second of one
+    (shard, profile) with integer counters + a fixed-edge latency
+    histogram. The controller's :func:`http_fetch_buckets` matches this
+    response schema.
 
     `since` is the same wall-clock filter as `/window`'s — buckets with
     ``ts_sec >= floor(since)`` are returned. Floor is used (rather than
@@ -1209,11 +1209,12 @@ async def main_async(args) -> int:
         _WINDOW_SHARD_ID = shard_id
         _WINDOW_KEEP_SEC = float(args.rl_window_keep_sec)
         _WINDOW_RING = collections.deque()
-        # Phase 3 buckets: same retention as the row ring, so a controller
-        # asking `since=now-window` gets a fully populated pre-aggregated
-        # window when the rows path would also be fully populated. The
-        # extra in-memory cost is ~130 B per (sec, profile) — well under
-        # 10 KB total for a 60 s window on the configured profile set.
+        # Pre-aggregated buckets ring: same retention as the row ring,
+        # so a controller asking `since=now-window` gets a fully
+        # populated pre-aggregated window when the rows path would also
+        # be fully populated. The extra in-memory cost is ~130 B per
+        # (sec, profile) — well under 10 KB total for a 60 s window on
+        # the configured profile set.
         _BUCKET_KEEP_SEC = float(args.rl_window_keep_sec)
         _WINDOW_BUCKETS = collections.deque()
         _BUCKET_INDEX = {}

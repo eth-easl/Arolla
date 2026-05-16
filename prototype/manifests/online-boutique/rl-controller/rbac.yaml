@@ -1,9 +1,17 @@
 # RBAC for the in-cluster RL controller.
 #
-# Scope is intentionally narrow: get + patch on the single DestinationRule
-# `arolla-baseline-retry-budget` in `online-boutique`. The controller cannot
-# create new resources, mutate any other DR, or touch any other namespace.
-# That keeps the blast radius bounded if the controller misbehaves.
+# Scope is intentionally narrow:
+#   - get + patch on the single DestinationRule
+#     `arolla-baseline-retry-budget` in `online-boutique` — the
+#     hot-path the controller uses to apply retry-budget decisions.
+#   - list + get + watch on pods in `online-boutique` — only required
+#     when the envoy /stats observation path is used (it needs to
+#     discover caller-pod IPs and refresh them when a pod is
+#     rescheduled).
+#
+# The controller cannot create new resources, mutate any other DR,
+# touch any other namespace, or modify pods. The pod permission is
+# read-only and namespace-scoped.
 #
 # Apply once per cluster lifecycle:
 #   kubectl apply -f prototype/manifests/online-boutique/rl-controller/rbac.yaml
@@ -20,10 +28,17 @@ metadata:
   name: rl-controller-patch-dr
   namespace: online-boutique
 rules:
+  # Patch the active retry-budget DestinationRule.
   - apiGroups: ["networking.istio.io"]
     resources: ["destinationrules"]
     resourceNames: ["arolla-baseline-retry-budget"]
     verbs: ["get", "patch"]
+  # Envoy /stats observation path: discover caller-pod IPs. Read-only
+  # — the controller never modifies pods, only enumerates them so it
+  # can fetch each one's istio-proxy admin endpoint.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

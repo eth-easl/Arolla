@@ -1,4 +1,4 @@
-"""Shared schema for pre-aggregated RL observations (plan-optimization-phase3 §3).
+"""Shared schema for pre-aggregated RL observations.
 
 Both the loader (``prototype/clients/online-boutique/traffic_gen.py``) and the
 in-cluster controller (``prototype/experiments/rl_controller.py``) import this
@@ -8,15 +8,16 @@ either the edge list or the field order, every reconstructed feature in the
 observation vector becomes silently wrong; centralising the schema is the
 cheapest insurance against that.
 
-Phase 3 amortises the per-attempt linear scan from the controller into the
-loader's asyncio loop. Each bucket is one second of one (shard, profile),
-holding integer counters plus a fixed-edge latency histogram. The controller
-fetches ~40 small JSON records per tick (versus the Phase 2 ~10 000 rows /
-tick) and recomposes the 18-feature observation vector by summing buckets
-and running a single linear pass over the histogram.
+The pre-aggregated-buckets transport amortises the per-attempt linear scan
+from the controller into the loader's asyncio loop. Each bucket is one
+second of one (shard, profile), holding integer counters plus a fixed-edge
+latency histogram. The controller fetches ~40 small JSON records per tick
+(versus the original per-attempt-rows transport's ~10 000 rows / tick) and
+recomposes the 18-feature observation vector by summing buckets and running
+a single linear pass over the histogram.
 
 Bytes per bucket on the wire ≈ 130 B JSON-encoded → ~5 KB / tick total, vs
-Phase 2's ~3.2 MB / tick → ~620× reduction.
+the rows transport's ~3.2 MB / tick → ~620× reduction.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from dataclasses import dataclass, field
 #   bucket i  = [edges[i-1], edges[i])  for 1 ≤ i ≤ 20
 #   bucket 21 = [edges[-1], +inf)        (overflow / timeout)
 #
-# Rationale (plan-optimization-phase3 §3): p95 under load typically lands in
+# Rationale: p95 under load typically lands in
 # 0.3–1.0 s; the densest spacing is in that region (max bucket width 0.15 s).
 # Worst-case p95 reconstruction error is therefore ±0.075 s, which divided by
 # the 3 s attempt timeout gives ±2.5 % in p95_latency_pressure — well within

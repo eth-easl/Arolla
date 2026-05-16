@@ -24,7 +24,7 @@ whenever the model or controller code changes so old runs stay reproducible.
 prototype/experiments/rl_controller_image/build.sh
 prototype/experiments/rl_controller_image/distribute.sh
 
-# 2) RBAC + ConfigMap (one-shot per cluster, see plan-12 §4.2 / §4.3)
+# 2) RBAC + ConfigMap (one-shot per cluster)
 kubectl apply -f prototype/manifests/online-boutique/rl-controller/rbac.yaml
 kubectl -n online-boutique create configmap rl-controller-v3 \
   --from-file=model.zip=prototype/experiments/rl_configs/v3/model-v3.zip \

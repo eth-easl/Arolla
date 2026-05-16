@@ -110,9 +110,11 @@ RL_LOADER_HOST=""               # default: derived from CLIENT_IP (k8s-config.sh
 # Used only for the baseline row
 RL_LEGACY_PATCH=false
 RL_LEGACY_FETCH=false
-# Phase 3 obs transport. `auto` is back-compatible with pre-Phase-3
-# loaders (falls back to /window on 404 / connection refused). Explicit
-# `buckets` / `rows` lets a sweep A/B without editing job.yaml by hand.
+# Observation transport. `auto` is back-compatible with loaders that
+# pre-date the /buckets endpoint (falls back to /window on 404 /
+# connection refused) and with clusters that don't expose Envoy
+# sidecar stats. Explicit `envoy` / `buckets` / `rows` lets a sweep
+# A/B without editing job.yaml by hand.
 RL_OBS_MODE="auto"
 RESOURCE_SAMPLING=false
 RESOURCE_SAMPLE_INTERVAL_SEC=2
@@ -249,11 +251,14 @@ Options:
                               shard i gets port_base + i. Default ${RL_LOADER_PORT_BASE}.
       --rl-loader-host <ip>   Loader address the controller will hit
                               (default: \${CLIENT_IP} from k8s-config.sh).
-      --rl-obs-mode <mode>    Phase 3 observation transport. One of:
-                                auto    (default) /buckets, fall back to
-                                        /window on shards that 404.
-                                buckets force pre-aggregated counters.
-                                rows    force Phase-2 per-attempt rows.
+      --rl-obs-mode <mode>    Observation transport. One of:
+                                auto    (default) cascade
+                                        envoy → buckets → rows.
+                                envoy   GET /stats on caller-pod
+                                        sidecars (production-shape).
+                                buckets force the loader's pre-
+                                        aggregated counters.
+                                rows    force per-attempt rows.
       --resource-sampling     Sample cart/Istio pod and node CPU/memory during
                               each policy run.
       --resource-sample-interval <sec>

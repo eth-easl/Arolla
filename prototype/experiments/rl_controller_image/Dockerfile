@@ -36,13 +36,16 @@ RUN pip install --no-cache-dir \
         "pyyaml" \
         "requests"
 
-# rl_controller.py + rl_obs_schema.py are the only python files we need.
-# The schema module is the shared loader/controller contract (WindowBucket +
-# histogram edges); a stale tag of the controller image without it would
-# crash on import as of Phase 3. Copy both last so dependency layers cache
-# across builds.
+# rl_controller.py + rl_obs_schema.py + rl_obs_envoy.py are the only
+# python files we need. rl_obs_schema is the loader/controller contract
+# (WindowBucket + histogram edges, used by the loader-buckets obs path);
+# rl_obs_envoy is the Envoy /stats parser + 18-feature derivation used
+# by the sidecar obs path. A stale tag of the controller image without
+# either of them would crash on import. Copy all three last so
+# dependency layers cache across builds.
 COPY rl_controller.py /app/rl_controller.py
 COPY rl_obs_schema.py /app/rl_obs_schema.py
+COPY rl_obs_envoy.py /app/rl_obs_envoy.py
 WORKDIR /app
 
 # `--out-dir`, `--config`, etc. come from the Job manifest's `args:` list.

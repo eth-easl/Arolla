@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Cross-phase decision-drift sanity check (plan-12 §6 step 4).
+"""Cross-bench decision-drift sanity check.
 
 Replays each tick's stored ``observation_fields`` vector through the model
 loaded from the run's config (or, equivalently, looks up the recorded
 ``pct_idx``/``mrc_idx`` action) and reports how many ticks have a different
-selected action between two phase output roots. Drift = 0 is the bar Phases
-1 and 2 must clear; Phase 3 may have minor drift but it must be reported.
+selected action between two bench output roots. Drift = 0 is the bar that
+purely-transport-changing bench rounds must clear; an obs-source-changing
+bench round may have minor drift but it must be reported.
 
-The "spot-check ≥ 15 random ticks" wording in the plan is implemented as the
-default mode here: random sampling from the union of scenarios. Set
-``--all-ticks`` to compare every tick on every scenario when you want a
-hard guarantee instead of a sample.
+The "spot-check ≥ 15 random ticks" pattern is the default mode here:
+random sampling from the union of scenarios. Set ``--all-ticks`` to
+compare every tick on every scenario when you want a hard guarantee
+instead of a sample.
 
 Two ticks "match" if and only if they share the same scenario, the same
 ``observation_fields`` vector (within ``--feature-eps``), and resolve to the
 same ``(pct_idx, mrc_idx)`` action. We index by scenario + observation
-vector rather than by tick number because Phase 1 and Phase 2 ticks don't
-align in wall-clock time (HTTP fetch is faster, so there are slightly more
-ticks in Phase 2).
+vector rather than by tick number because two bench runs do not align in
+wall-clock time (a faster observation transport produces slightly more
+ticks per scenario).
 
 Usage::
 
@@ -125,22 +126,22 @@ def action_pair(row: dict[str, Any]) -> tuple[int | None, int | None]:
 
 
 def diff_scenarios(
-    phase_a: dict[str, Path],
-    phase_b: dict[str, Path],
+    root_a: dict[str, Path],
+    root_b: dict[str, Path],
     sample_size: int | None,
     feature_eps: float,
     rng: random.Random,
 ) -> dict[str, Any]:
-    matched_scenarios = sorted(set(phase_a) & set(phase_b))
-    only_a = sorted(set(phase_a) - set(phase_b))
-    only_b = sorted(set(phase_b) - set(phase_a))
+    matched_scenarios = sorted(set(root_a) & set(root_b))
+    only_a = sorted(set(root_a) - set(root_b))
+    only_b = sorted(set(root_b) - set(root_a))
 
     per_scenario: list[dict[str, Any]] = []
     total_compared = 0
     total_drift = 0
     for label in matched_scenarios:
-        rows_a = load_jsonl(phase_a[label])
-        rows_b = load_jsonl(phase_b[label])
+        rows_a = load_jsonl(root_a[label])
+        rows_b = load_jsonl(root_b[label])
         index_b = index_by_obs(rows_b, feature_eps)
 
         matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -164,8 +165,8 @@ def diff_scenarios(
                 scenario_drift += 1
                 if len(examples) < 5:
                     examples.append({
-                        "phase_a_action": action_pair(ra),
-                        "phase_b_action": action_pair(rb),
+                        "action_a": action_pair(ra),
+                        "action_b": action_pair(rb),
                         "observation_a_ts": ra.get("timestamp"),
                         "observation_b_ts": rb.get("timestamp"),
                     })
@@ -183,7 +184,7 @@ def diff_scenarios(
         })
 
     return {
-        "phases": {
+        "roots": {
             "a_only_scenarios": only_a,
             "b_only_scenarios": only_b,
             "matched_scenarios": matched_scenarios,
@@ -195,8 +196,8 @@ def diff_scenarios(
 
 
 def diff_features(
-    phase_a: dict[str, Path],
-    phase_b: dict[str, Path],
+    root_a: dict[str, Path],
+    root_b: dict[str, Path],
     sample_size: int | None,
     feature_names: tuple[str, ...],
     rng: random.Random,
@@ -212,12 +213,12 @@ def diff_features(
 
     For every matched pair this records the absolute feature delta and
     the absolute feature value (averaged across the two sides). The
-    reported metric is ``mean(|Δ_i|) / mean(|x_i|)`` — the same
-    "relative mean delta" the Phase 3 acceptance bar names. We use mean
-    rather than per-tick relative because counter features are often 0
-    on a given tick, which would blow up a per-tick ratio.
+    reported metric is ``mean(|Δ_i|) / mean(|x_i|)`` — the standard
+    "relative mean delta" used as the cross-bench acceptance bar. We use
+    mean rather than per-tick relative because counter features are
+    often 0 on a given tick, which would blow up a per-tick ratio.
     """
-    matched_scenarios = sorted(set(phase_a) & set(phase_b))
+    matched_scenarios = sorted(set(root_a) & set(root_b))
     per_scenario: list[dict[str, Any]] = []
     feature_totals: dict[str, dict[str, float]] = {
         name: {"abs_delta_sum": 0.0, "abs_value_sum": 0.0, "n": 0}
@@ -225,8 +226,8 @@ def diff_features(
     }
 
     for label in matched_scenarios:
-        rows_a = load_jsonl(phase_a[label])
-        rows_b = load_jsonl(phase_b[label])
+        rows_a = load_jsonl(root_a[label])
+        rows_b = load_jsonl(root_b[label])
 
         # Index by tick_index for matching. If multiple ticks share an
         # index (shouldn't happen, but guard anyway) keep the first.
@@ -310,17 +311,17 @@ def diff_features(
 
 
 def render_feature_markdown(
-    report: dict[str, Any], phase_a: Path, phase_b: Path,
+    report: dict[str, Any], root_a: Path, root_b: Path,
 ) -> str:
     lines: list[str] = []
     lines.append(
-        f"# Per-feature observation drift — `{phase_a.name}` → `{phase_b.name}`"
+        f"# Per-feature observation drift — `{root_a.name}` → `{root_b.name}`"
     )
     lines.append("")
     lines.append(
         "Matched by `(scenario, tick_index)`. Reported metric per feature: "
-        "`rel_drift = mean(|Δ|) / mean(|x|)` (averaged across the two phases). "
-        "Phase 3 acceptance bar: every feature `≤ 1 %`."
+        "`rel_drift = mean(|Δ|) / mean(|x|)` (averaged across the two roots). "
+        "Acceptance bar for pure-transport refactors: every feature `≤ 1 %`."
     )
     lines.append("")
 
@@ -355,22 +356,22 @@ def render_feature_markdown(
     return "\n".join(lines)
 
 
-def render_markdown(report: dict[str, Any], phase_a: Path, phase_b: Path) -> str:
+def render_markdown(report: dict[str, Any], root_a: Path, root_b: Path) -> str:
     lines: list[str] = []
-    lines.append(f"# Decision drift — `{phase_a.name}` → `{phase_b.name}`")
+    lines.append(f"# Decision drift — `{root_a.name}` → `{root_b.name}`")
     lines.append("")
     lines.append(
         f"Compared {report['total_compared']} matched ticks; "
         f"**{report['total_drift']}** had different actions."
     )
-    if report["phases"]["a_only_scenarios"]:
+    if report["roots"]["a_only_scenarios"]:
         lines.append("")
         lines.append("Scenarios present only in A: "
-                     + ", ".join(report["phases"]["a_only_scenarios"]))
-    if report["phases"]["b_only_scenarios"]:
+                     + ", ".join(report["roots"]["a_only_scenarios"]))
+    if report["roots"]["b_only_scenarios"]:
         lines.append("")
         lines.append("Scenarios present only in B: "
-                     + ", ".join(report["phases"]["b_only_scenarios"]))
+                     + ", ".join(report["roots"]["b_only_scenarios"]))
     lines.append("")
     lines.append("| scenario | ticks A | ticks B | matched | compared | drift |")
     lines.append("|---|---:|---:|---:|---:|---:|")
@@ -391,8 +392,8 @@ def render_markdown(report: dict[str, Any], phase_a: Path, phase_b: Path) -> str
         lines.append("")
         for scenario, ex in drift_examples:
             lines.append(
-                f"- **{scenario}** A={ex['phase_a_action']} "
-                f"B={ex['phase_b_action']}  "
+                f"- **{scenario}** A={ex['action_a']} "
+                f"B={ex['action_b']}  "
                 f"(ts_a={ex['observation_a_ts']}, ts_b={ex['observation_b_ts']})"
             )
         lines.append("")
@@ -401,11 +402,11 @@ def render_markdown(report: dict[str, Any], phase_a: Path, phase_b: Path) -> str
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("phase_a", type=Path, help="earlier phase root")
-    parser.add_argument("phase_b", type=Path, help="later phase root")
+    parser.add_argument("root_a", type=Path, help="earlier bench root")
+    parser.add_argument("root_b", type=Path, help="later bench root")
     parser.add_argument(
         "--sample-size", type=int, default=15,
-        help="Per-scenario sample size (default 15, matching plan-12 §1).",
+        help="Per-scenario sample size (default 15).",
     )
     parser.add_argument(
         "--all-ticks", action="store_true",
@@ -413,12 +414,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--feature-eps", type=float, default=1e-6,
-        help="Quantisation when matching observation vectors across phases.",
+        help="Quantisation when matching observation vectors across roots.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--out", type=Path, default=None,
-        help="Write markdown here (default: <phase_b>/drift.md). '-' for stdout.",
+        help="Write markdown here (default: <root_b>/drift.md). '-' for stdout.",
     )
     parser.add_argument(
         "--per-feature", action="store_true",
@@ -426,19 +427,20 @@ def main() -> int:
             "Report per-feature observation drift instead of action drift. "
             "Matches by (scenario, tick_index) and emits "
             "mean(|Δ_i|) / mean(|x_i|) for each of the 18 features. Used "
-            "for plan-optimization-phase3 §6.2 validation."
+            "to validate that a transport refactor does not move the "
+            "observation distribution."
         ),
     )
     args = parser.parse_args()
 
-    phase_a: Path = args.phase_a.resolve()
-    phase_b: Path = args.phase_b.resolve()
-    if not phase_a.is_dir() or not phase_b.is_dir():
-        print("error: phase_a and phase_b must both be directories", file=sys.stderr)
+    root_a: Path = args.root_a.resolve()
+    root_b: Path = args.root_b.resolve()
+    if not root_a.is_dir() or not root_b.is_dir():
+        print("error: root_a and root_b must both be directories", file=sys.stderr)
         return 2
 
-    obs_a = find_observations(phase_a)
-    obs_b = find_observations(phase_b)
+    obs_a = find_observations(root_a)
+    obs_b = find_observations(root_b)
     if not obs_a or not obs_b:
         print("warning: missing rl-observations.jsonl on one or both sides", file=sys.stderr)
 
@@ -451,7 +453,7 @@ def main() -> int:
             feature_names=OBSERVATION_FIELDS_DEFAULT,
             rng=random.Random(args.seed),
         )
-        md = render_feature_markdown(feat_report, phase_a, phase_b)
+        md = render_feature_markdown(feat_report, root_a, root_b)
         worst_name, worst_value = max(
             (
                 (name, stats["rel_drift"])
@@ -467,10 +469,10 @@ def main() -> int:
             feature_eps=args.feature_eps,
             rng=random.Random(args.seed),
         )
-        md = render_markdown(report, phase_a, phase_b)
+        md = render_markdown(report, root_a, root_b)
 
     if args.out is None:
-        out_path = phase_b / "drift.md"
+        out_path = root_b / "drift.md"
     elif str(args.out) == "-":
         sys.stdout.write(md)
         return 0

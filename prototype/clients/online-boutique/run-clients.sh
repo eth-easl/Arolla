@@ -66,14 +66,15 @@ remote_mkdir() {
 upload_files() {
   remote_mkdir
   scp ${SSH_OPTS} "${SCRIPT_DIR}/traffic_gen.py" "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/traffic_gen.py" >/dev/null
-  # Phase 3: traffic_gen.py imports `rl_obs_schema` (the WindowBucket schema
-  # + histogram edges shared with the in-cluster RL controller). The file
-  # lives in prototype/experiments/ in the repo but must land next to
-  # traffic_gen.py on CLIENT_HOST so the import resolves against sys.path[0]
-  # = the script's directory. Missing the upload would surface as the
-  # loader exiting in the liveness check below with "ImportError:
-  # rl_obs_schema" — defensive but not visible in non-RL runs because the
-  # import only runs when --rl-window-port-base > 0.
+  # traffic_gen.py imports `rl_obs_schema` (the WindowBucket schema +
+  # histogram edges shared with the in-cluster RL controller) when the
+  # /buckets endpoint is enabled. The file lives in prototype/experiments/
+  # in the repo but must land next to traffic_gen.py on CLIENT_HOST so
+  # the import resolves against sys.path[0] = the script's directory.
+  # Missing the upload would surface as the loader exiting in the
+  # liveness check below with "ImportError: rl_obs_schema" — defensive
+  # but not visible in non-RL runs because the import only runs when
+  # --rl-window-port-base > 0.
   local schema_path="${PROTO_DIR}/experiments/rl_obs_schema.py"
   if [[ -f "${schema_path}" ]]; then
     scp ${SSH_OPTS} "${schema_path}" \
@@ -93,6 +94,25 @@ start_clients() {
   [[ -n "${profiles_arg}" ]] && echo "[info] Profiles:     ${profiles_arg}"
 
   upload_files
+
+  # Ensure the loader's optional aiohttp dependency is present when the
+  # in-cluster RL controller is active (RL_WINDOW_PORT_BASE > 0). Without
+  # aiohttp, traffic_gen.py silently no-ops the /window+/buckets HTTP
+  # servers (see _start_window_server), and the in-cluster controller —
+  # which has no SSH-cat fallback — observes 0-traffic windows for the
+  # entire run. The check is a no-op when aiohttp is already installed
+  # and when RL_WINDOW_PORT_BASE=0 (legacy SSH-cat path).
+  if [[ "${RL_WINDOW_PORT_BASE:-0}" != "0" ]]; then
+    ${SSH} "bash -lc '
+      set -e
+      if ! python3 -c \"import aiohttp\" >/dev/null 2>&1; then
+        echo \"[run-clients] aiohttp missing on ${CLIENT_HOST}, installing...\" >&2
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq python3-aiohttp
+        python3 -c \"import aiohttp; print(\\\"aiohttp\\\", aiohttp.__version__)\" >&2
+      fi
+    '"
+  fi
 
   ${SSH} "bash -lc '
     set -euo pipefail
