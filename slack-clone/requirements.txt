@@ -1,5 +1,0 @@
-Flask
-pymemcache
-pymysql
-gunicorn
-cryptography
