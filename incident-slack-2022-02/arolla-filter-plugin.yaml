@@ -1,0 +1,21 @@
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: arolla
+  namespace: default
+spec:
+  # No `selector` → attaches to every sidecar in the namespace. Add
+  # `selector.matchLabels:` if you only want the filter on a subset of
+  # services (e.g. matchLabels: {app: cartservice}).
+  phase: AUTHN # early in the filter chain — reject retries before routing
+  url: http://d2zlsalfp4vlei.cloudfront.net/arolla_filter.wasm
+  # Fail closed if the wasm binary can't be fetched — better to drop traffic
+  # than to silently disable retry admission.
+  failStrategy: FAIL_CLOSE
+  pluginConfig:
+    r: 0.1
+    capacity: 20.0
+    t: 1.0
+    attempt_header: "x-envoy-attempt-count"
+    attempt_header_secondary: "X-Attempt-Number"
+    reject_status: 429
