@@ -3,28 +3,36 @@
 This repository contains:
 
 - a discrete-event simulator for retry behavior and global retry budgets in microservices
-- a Kubernetes/Istio prototype (Emulab/CloudLab) for live experiments, including the **Arolla** Envoy WASM filter — a goodput-coupled retry budget with two-level admission control
+- a Kubernetes/Istio prototype (Emulab/CloudLab) for live experiments
+- postmortem-informed reproductions of real incidents, in both the simulator and on a live Kind cluster
 
 ## Repository Layout
 
 - `simulator/`
-  - Discrete-event simulator (M/G/c/K queues, retry policies, AIMD + Arolla budgets)
+  - Discrete-event simulator (M/G/c/K queues, retry policies)
   - Main docs: [`simulator/README.md`](simulator/README.md)
 - `prototype/`
   - Kubernetes + Istio deployment scripts, the Arolla WASM filter (`arolla-filter/`, `arolla-filter-fairness/`), policy manifests, and the experiment harness in `experiments/`
   - Main docs: [`prototype/README.md`](prototype/README.md)
+- `incident-slack-2022-02/`
+  - Self-contained Kind reproduction of the Slack 2022-02-22 cache-stampede incident
+  - Main docs: [`incident-slack-2022-02/README.md`](incident-slack-2022-02/README.md)
 - `outputs/`
   - Local experiment outputs / generated artifacts
 
 ## Simulator
 
 ```bash
+# First time only: create venv and install the package
+python3 -m venv .venv
+source .venv/bin/activate
 cd simulator
 pip install -e .
-python bin/workflow.py experiments/yaml/default.yaml
+
+python3 bin/workflow.py experiments/yaml/industry_retreat/motivation.yaml 
 ```
 
-Results land in `results/<config>_<timestamp>/` (CSV + plots). See [`simulator/README.md`](simulator/README.md) for sweep configs, multi-client mode, and AIMD/Arolla retry-budget YAML.
+Results land in `outputs/simulation/<scenario>_<timestamp>/` (CSV + plots). Override with `-o <path>`. See [`simulator/README.md`](simulator/README.md) for sweep configs, multi-client mode, and AIMD/Arolla retry-budget YAML.
 
 ## Prototype (Kubernetes/Istio)
 
@@ -93,6 +101,36 @@ NUM_LOADERS=4 experiments/run-experiment.sh \
 ```
 
 Results land in `outputs/prototype/<client-profile>/<client-profile>_<timestamp>/`. For parameter sweeps, grid sweeps, the `paper.sh` dispatcher, and analysis/plotting, see [`prototype/README.md`](prototype/README.md) and `prototype/experiments/`.
+
+## Postmortem Analysis
+
+Reproductions of real outages, used to test whether different retry-control policies would have helped contain them. Two harnesses:
+
+### Simulator scenarios
+
+Four postmortem-informed scenarios in `simulator/experiments/yaml/post_mortem_simulation/`:
+
+- `s01__buggy_release.yaml`
+- `s02__shaky_foundations.yaml`
+- `s03__thundering_herd.yaml`
+- `s04__internal_retry_rogue.yaml`
+
+Run any of them via the standard simulator workflow:
+
+```bash
+cd simulator
+python bin/workflow.py experiments/yaml/post_mortem_simulation/s03__thundering_herd.yaml
+```
+
+### Live incident — Slack 2022-02-22 (cache stampede)
+
+A self-contained Kind-based reproduction of the Slack outage on 2022-02-22 (Consul rolling restart → flushed memcached → DB overload → retry-driven cascading failure). Runs locally; no Emulab needed. See [`incident-slack-2022-02/README.md`](incident-slack-2022-02/README.md) for the full incident breakdown and step-by-step setup.
+
+```bash
+cd incident-slack-2022-02
+./prepare-everything.sh         # bring up the Kind cluster + apps
+python run_experiment.py        # drive load and collect metrics
+```
 
 ## Notes
 
