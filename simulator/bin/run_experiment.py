@@ -205,6 +205,20 @@ Examples:
             if args.verbose:
                  print(f"  ✓ Fault events exported to {fault_json_path}")
         
+        # Export per-tenant retry admission stats from load limiter
+        import json
+        admission_stats = {}
+        for svc_name, svc_rt in services.items():
+            stats = svc_rt.get_admission_stats()
+            if stats:
+                admission_stats[svc_name] = stats
+        if admission_stats:
+            stats_path = csv_path.parent / "admission_stats.json"
+            with open(stats_path, 'w') as f:
+                json.dump(admission_stats, f, indent=2)
+            if args.verbose:
+                print(f"  ✓ Admission stats exported to {stats_path}")
+
         # Export per-service metrics if multi-service topology
         if len(services) > 1:
             from simulator.metrics.service_collector import (

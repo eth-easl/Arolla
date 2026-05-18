@@ -250,15 +250,3 @@ For lognormal latency: `Mean = median * e^(sigma^2 / 2)`
 **Example:** 16 workers, 20ms median, sigma=0.5:
 - Mean = 20ms x 1.133 = 22.66ms
 - RPS_max = 16 / 0.02266 = 706 RPS
-
-## Testing
-
-```bash
-cd simulator
-python -m pytest tests/ -v
-```
-
-## Documentation
-
-- [Queue Theory & Configuration](docs/queue_explained.md) - M/G/c/K model explanation
-- [Policy Analysis & Results](docs/policy_analysis.md) - Retry policy comparison and AIMD evaluation

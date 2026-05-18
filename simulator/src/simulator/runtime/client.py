@@ -17,6 +17,7 @@ class ClientConfig:
     name: str = "client"
     retry: Optional['RetryPolicy'] = None
     timeout: Optional['Timeout'] = None
+    e2e_retry_budget: Optional[int] = None  # Arolla Level 2: max retries across all hops
 
 
 @dataclass
@@ -25,6 +26,7 @@ class AttemptCtx:
     req: Request
     last_delay: TimeDuration = 0
     total_delay: TimeDuration = 0
+    _retry_budget_remaining: Optional[list] = None  # Arolla Level 2: shared [B]
 
 
 @dataclass
@@ -71,7 +73,12 @@ class ClientRuntime:
             interval=TimeInterval(begin=sim.timestep, end=sim.timestep),
             deadline=None,
         )
-        ctx = AttemptCtx(root=root_req, req=dummy_req, last_delay=0, total_delay=0)
+        ctx = AttemptCtx(
+            root=root_req, req=dummy_req, last_delay=0, total_delay=0,
+            _retry_budget_remaining=(
+                [self.cfg.e2e_retry_budget] if self.cfg.e2e_retry_budget is not None else None
+            ),
+        )
 
         # Trigger the first attempt
         self._make_attempt(sim, ctx, is_retry=False)
@@ -117,6 +124,8 @@ class ClientRuntime:
             on_root_done=on_root_done,
             global_deadline=ctx.root.global_deadline,
             is_retry=is_retry,
+            retry_budget_remaining=ctx._retry_budget_remaining,
+            tenant_id=self.cfg.name,
         )
 
     def _on_local_timeout(self, ctx: AttemptCtx, sim: Simulator, attempt_id: int, attempt_begin_time: TimePoint):

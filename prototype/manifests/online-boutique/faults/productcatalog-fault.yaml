@@ -1,0 +1,40 @@
+# Fault injection — productcatalogservice
+#
+# Drops 50% of requests to productcatalogservice with HTTP 503 and adds a 3s
+# delay to another 30%. productcatalogservice has very high fan-in: frontend,
+# checkoutservice, and recommendationservice all call it — so a failure here
+# demonstrates cascading retries along multiple call paths simultaneously.
+#
+# Used by:
+#   experiments/scenarios/recovery-overload.conf (paper §6.2.2 approximation)
+#
+# Usage:
+#   Apply:  kubectl apply -f faults/productcatalog-fault.yaml
+#   Remove: kubectl delete -f faults/productcatalog-fault.yaml
+#
+# Tuning:
+#   - abort.percentage.value — % of requests that return HTTP 503
+#   - delay.percentage.value — % of requests with artificial latency
+#   - delay.fixedDelay       — how much latency to inject
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: productcatalog-fault
+  namespace: online-boutique
+spec:
+  hosts:
+  - productcatalogservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 50.0
+        httpStatus: 503
+      delay:
+        percentage:
+          value: 30.0
+        fixedDelay: 3s
+    route:
+    - destination:
+        host: productcatalogservice

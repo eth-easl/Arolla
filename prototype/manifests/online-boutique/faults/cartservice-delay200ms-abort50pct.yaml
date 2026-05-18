@@ -1,0 +1,67 @@
+# Cartservice fault — SLOW variant for metastability experiments.
+#
+# Istio's `abort` filter fast-rejects requests at the sidecar (~0.1ms).
+# That means cart never actually sees the load during an abort-only fault —
+# it stays idle and no queue ever builds. Metastability (the paper §6.2.2
+# "recovery-phase overload" pattern) requires cart to actually be slow so
+# that concurrent requests pile up faster than cart can drain them.
+#
+# This manifest combines:
+#   - 100% DELAY of +200ms on every cart call (forces real slowness)
+#   - 50% ABORT with 503 on top of that (half the slow calls still fail)
+#
+# Under closed-loop 100-worker clients this alone won't collapse the
+# system — workers just throttle to one request per ~400ms — but combined
+# with either a large client worker count (~500+) OR a DestinationRule
+# concurrency limit, the pending queue at cart WILL grow and the system
+# will behave metastably:
+#
+#   1. Each call takes 200ms minimum
+#   2. Envoy's perTryTimeout (23ms) fires → marked failed → retry
+#   3. Retry also delayed 200ms → also times out
+#   4. 3 mesh retries × 4 client retries = 12 stacked 200ms delays
+#   5. Effective cart concurrency climbs → more timeouts → more retries
+#   6. Even after the fault ends, the workers currently in retry loops
+#      are still tied up → offered load stays elevated
+#
+# Pair this with either:
+#   - Lower cart CPU (services/cartservice.yaml: cpu=50m) for a tight
+#     capacity ceiling, OR
+#   - cartservice-concurrency-limit.yaml DestinationRule (applied
+#     separately) for an artificial concurrency cap, OR
+#   - More client workers (cart-stress.json: count=500)
+#
+# Usage:
+#   prototype/experiments/run-experiment.sh \
+#       -F cartservice-delay200ms-abort50pct \
+#       --policies no-control --client-profiles cart-stress \
+#       --warmup 25 --prefault 20 --fault 30 --recovery 60 --cooldown 10
+#
+# Uses same VirtualService name as service-retries.yaml so kubectl apply
+# replaces the base entry. run-experiment.sh restores via apply-to-revert.
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cartservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - cartservice
+  http:
+  - fault:
+      delay:
+        percentage:
+          value: 100.0          # all cart calls get the delay
+        fixedDelay: 200ms       # 200ms extra latency per call
+      abort:
+        percentage:
+          value: 50.0           # half of delayed calls also abort with 503
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 23ms       # matches healthy p99 — fires reliably under delay
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: cartservice

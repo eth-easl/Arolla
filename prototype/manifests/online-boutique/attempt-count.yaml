@@ -1,0 +1,50 @@
+# Make Envoy stamp `x-envoy-attempt-count` on retried upstream requests.
+#
+# Why this exists:
+#   The arolla server-side admission filter needs a way to tell first
+#   attempts from retries. Envoy's router exposes the attempt counter via
+#   the `x-envoy-attempt-count` request header, but only when the virtual
+#   host's `include_request_attempt_count` field is true. That field
+#   defaults to false in Envoy, and Istio's VirtualService API does NOT
+#   expose it directly.
+#
+#   Istio ≥ 1.19 enables this header by default via
+#   meshConfig.defaultConfig.proxyHeaders.attemptCount, but on older
+#   istiod releases (or where meshConfig isn't editable) the field stays
+#   off. This EnvoyFilter forces it on for every outbound virtual host
+#   in the online-boutique namespace, scoped to SIDECAR_OUTBOUND so it
+#   only affects mesh-internal calls (not the ingressgateway).
+#
+# What it touches:
+#   * applyTo VIRTUAL_HOST + context SIDECAR_OUTBOUND → patches every
+#     outbound virtual host on every sidecar in this namespace.
+#   * MERGE operation sets one boolean and leaves everything else alone.
+#
+# Verification:
+#   POD=$(kubectl -n online-boutique get pod -l app=cartservice -o name | head -1)
+#   kubectl -n online-boutique exec "$POD" -c istio-proxy -- \
+#     curl -s localhost:15000/config_dump | grep -i include_request_attempt_count
+#   → expect: "include_request_attempt_count": true (one entry per VH)
+#
+# Usage:
+#   kubectl apply -f attempt-count.yaml
+#   kubectl delete -f attempt-count.yaml --ignore-not-found
+#
+# This is base state; apply it once and leave it on. All four policies
+# (no-control, circuit-breaker, envoy-retry-budget, arolla) coexist with
+# it — only arolla actually reads the header, the others ignore it.
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: include-attempt-count
+  namespace: online-boutique
+spec:
+  configPatches:
+  - applyTo: VIRTUAL_HOST
+    match:
+      context: SIDECAR_OUTBOUND
+    patch:
+      operation: MERGE
+      value:
+        include_request_attempt_count: true

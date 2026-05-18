@@ -14,7 +14,7 @@ from simulator.middleware.base import Middleware, AttemptContext, MiddlewareChai
 from simulator.middleware.retry import RetryMiddleware, NoRetryMiddleware
 from simulator.middleware.load_limiter import LoadLimiterMiddleware
 from simulator.policies.retry import FixedBackoffRetryPolicy, NoRetryPolicy
-from simulator.policies.load_limiter import RetryBudgetPolicy
+from simulator.policies.retry_controls import LimiterRetryBudgetPolicy
 from simulator.core.engine import Simulator
 from simulator.core.types import DropReason, TimePoint
 from simulator.utils.time import ms_to_ns
@@ -111,7 +111,7 @@ def test_retry_middleware_no_retry_on_success():
 def test_load_limiter_blocks_retry():
     """Test that LoadLimiterMiddleware can block retries"""
     # Create retry budget with no budget
-    budget = RetryBudgetPolicy(budget_ratio=0.1, max_retries=10)
+    budget = LimiterRetryBudgetPolicy(budget_ratio=0.1, max_retries=10)
     budget._tokens = 0  # Exhaust budget
     
     middleware = LoadLimiterMiddleware(budget)
@@ -144,7 +144,7 @@ def test_load_limiter_blocks_retry():
 def test_retry_and_load_limiter_composition():
     """Test that RetryMiddleware and LoadLimiterMiddleware compose correctly"""
     retry_policy = FixedBackoffRetryPolicy(max_attempts=3, delay=ms_to_ns(100))
-    budget = RetryBudgetPolicy(budget_ratio=0.1, max_retries=10)
+    budget = LimiterRetryBudgetPolicy(budget_ratio=0.1, max_retries=10)
     budget._tokens = 200  # Have budget
     
     chain = MiddlewareChain([

@@ -1,0 +1,24 @@
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: arolla-fairness
+  namespace: online-boutique
+spec:
+  phase: AUTHN
+  # __MASTER_IP__ is substituted by deploy-policy.sh at apply time.
+  url: http://__MASTER_IP__:8000/arolla_filter_fairness.wasm
+  failStrategy: FAIL_CLOSE
+  pluginConfig:
+    # Attempt-aware cost:
+    #   attempt <= cheap_threshold: cost = 1 token
+    #   attempt >  cheap_threshold: cost = attempt tokens
+    # Admit only if B_agg >= cost.
+    r: 0.1
+    capacity: 20.0
+    t: 1.0
+    attempt_header: "x-envoy-attempt-count"
+    attempt_header_secondary: "X-Attempt-Number"
+    reject_status: 429
+    cheap_threshold: 3
+    # cost_mode: linear | triangular | quadratic
+    cost_mode: "triangular"

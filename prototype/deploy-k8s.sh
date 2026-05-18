@@ -418,6 +418,18 @@ full_deploy() {
         info "Worker: ${SSH_USER}@${WORKER_HOSTS[$i]} → ${WORKER_HOSTNAMES[$i]}"
     done
     echo ""
+    info "Steps:"
+    info "  1.  Set hostnames"
+    info "  2.  Update /etc/hosts"
+    info "  3.  Disable swap & configure kernel"
+    info "  4.  Install containerd"
+    info "  5.  Install Kubernetes components (kubeadm, kubelet, kubectl)"
+    info "  6.  Initialize cluster on master (kubeadm init)"
+    info "  7.  Join workers to cluster"
+    info "  8.  Install CNI plugin (${CNI_PLUGIN})"
+    info "  9.  Install Metrics Server"
+    info "  10. Verify cluster"
+    echo ""
 
     # Resolve IPs
     resolve_ips
@@ -454,8 +466,8 @@ full_deploy() {
     mkdir -p "$HOME/.kube"
     local scp_opts="${SSH_OPTS}"
     [[ -n "${SSH_KEY}" ]] && scp_opts+=" -i ${SSH_KEY}"
-    scp ${scp_opts} "${SSH_USER}@${MASTER_HOST}:~/.kube/config" "$HOME/.kube/config"
-    ok "Kubeconfig saved to ~/.kube/config"
+    scp ${scp_opts} "${SSH_USER}@${MASTER_HOST}:~/.kube/config" "${KUBECONFIG_PATH}"
+    ok "Kubeconfig saved to ${KUBECONFIG_PATH}"
     info "Verifying local access:"
     kubectl get nodes
 

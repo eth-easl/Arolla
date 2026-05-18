@@ -136,6 +136,17 @@ class AIMDGlobalRetryBudgetConfig(BaseModel):
     failure_threshold: float = Field(default=0.1, ge=0, le=1, description="Failure rate threshold (0.0-1.0)")
 
 
+class ArollaRetryBudgetConfig(BaseModel):
+    """Configuration for Arolla goodput-coupled retry budget (Level 1)"""
+    alpha: float = Field(default=0.1, ge=0, le=1, description="Retry budget ratio (retries < alpha * goodput)")
+    beta_down: float = Field(default=0.3, gt=0, le=1, description="EWMA fast decay for goodput decrease")
+    beta_up: float = Field(default=0.05, gt=0, le=1, description="EWMA slow growth for goodput increase")
+    window_ms: float = Field(default=1000.0, gt=0, description="Window duration in ms")
+    success_rate_threshold: Optional[float] = Field(default=None, ge=0, le=1, description="Retry success rate gate (beta); None = disabled")
+    success_rate_beta: float = Field(default=0.1, gt=0, le=1, description="EWMA smoothing for retry success rate")
+    max_retry_ratio: Optional[float] = Field(default=None, gt=0, le=1, description="Burst cap: max retries as fraction of request rate; None = disabled")
+
+
 # ============================================================================
 # Fault Injection Configurations
 # ============================================================================
@@ -231,7 +242,8 @@ class ServiceConfigYAML(BaseModel):
     retry_budget: Optional[RetryBudgetConfig] = None
     global_retry_budget: Optional[GlobalRetryBudgetConfig] = None
     aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig] = None
-    
+    arolla_retry_budget: Optional[ArollaRetryBudgetConfig] = None
+
     # Faults
     latency_injections: List[LatencyInjectionConfig] = Field(default_factory=list)
     partial_failures: List[PartialFailureConfig] = Field(default_factory=list)
@@ -272,6 +284,7 @@ class ClientConfigYAML(BaseModel):
     timeout: Optional[TimeoutConfig] = Field(default=None, description="Client-side timeout policy")
     circuit_breaker: Optional[CircuitBreakerConfig] = Field(default=None, description="Client-side circuit breaker")
     retry_budget: Optional[RetryBudgetConfig] = Field(default=None, description="Client-side retry budget")
+    e2e_retry_budget: Optional[int] = Field(default=None, ge=0, description="Arolla Level 2: max retries across all hops")
     replicas: Union[int, List[int]] = Field(default=1, description="Number of replica clients to spawn (or list for sweep)")
 
 # ============================================================================

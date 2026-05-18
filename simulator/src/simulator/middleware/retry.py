@@ -44,7 +44,7 @@ class RetryMiddleware(Middleware):
             return
         
         # Consult retry policy
-        retry_ctx = RetryContext(attempt=ctx.attempt_number, now=ctx.end_time)
+        retry_ctx = RetryContext(attempt=ctx.attempt_number, now=ctx.end_time, tenant_id=ctx.tenant_id)
         policy_allows, delay = self.policy.next_delay(retry_ctx)
 
         # Check global deadline constraint

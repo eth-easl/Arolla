@@ -1,0 +1,13 @@
+# Baseline 3: Envoy retry budget (via Istio 1.27+ native API).
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: arolla-baseline-retry-budget
+  namespace: online-boutique
+spec:
+  host: "*.online-boutique.svc.cluster.local"
+  trafficPolicy:
+    retryBudget:
+      percent: 20.0          
+      minRetryConcurrency: 3

@@ -1,0 +1,73 @@
+# §6.2.1 — Sustained partial failure on cart → Redis, with chain retries
+#                                                       and a tight timeout.
+#
+# Paper §6.2.1: "We exercise this scenario by injecting 50% failure on the
+# cart → Redis path for 60s. Half of all cart requests return HTTP 503;
+# checkout, which depends on cart, begins failing and retrying along the
+# four-hop chain (frontend → checkout → cart → Redis)."
+#
+# Why this manifest carries retry config too:
+#   This VirtualService uses the same name as cartservice-routing in
+#   ../service-retries.yaml, so applying it REPLACES the base entry.
+#   We re-include the retry block here so chain retries stay on during the
+#   fault — without it, applying the fault would disable retries and we'd
+#   only see the raw 50% drop instead of the retry-amplification dynamics.
+#
+# Why the tight perTryTimeout:
+#   Cartservice's measured healthy p99 is 2.1ms (calibration_report.txt).
+#   We set perTryTimeout = 2ms (matching the base value in service-retries.yaml).
+#   With 4 attempts available, the per-attempt 1% false-positive rate at
+#   steady state collapses to (0.01)^4 ≈ 1e-8 at the logical-request level —
+#   so retries fully mask any healthy-tail false positives. Under fault,
+#   when cart's queue starts to back up, latency immediately exceeds 2ms and
+#   the timeout fires reliably.
+#
+# perTryTimeout vs request timeout — IMPORTANT:
+#   Istio's request `timeout:` is the TOTAL budget for the whole request,
+#   including all retries. The previous version had `timeout: 200ms` +
+#   `perTryTimeout: 2s`, which was a bug — the 200ms total budget would
+#   expire before any retry could fire.
+#
+#   New shape: perTryTimeout=2ms, attempts=3 (= 4 attempts max), no
+#   request-level timeout. Worst case: 4 × 2ms = 8ms per logical request,
+#   which lets retry amplification fully play out.
+#
+# Note on injection point:
+#   cart → Redis uses RESP (TCP), so Istio HTTP fault injection cannot
+#   target that hop directly. We inject at cartservice's HTTP/gRPC frontend
+#   instead — half of cart's responses to its callers (frontend, checkout)
+#   become 503. From the chain's perspective this is indistinguishable from
+#   cart's Redis backend failing.
+#
+# Usage:
+#   Apply:  kubectl apply -f faults/cartservice-50pct.yaml
+#   Remove: kubectl apply -f service-retries.yaml         ← restore base
+#
+#   (NOT `kubectl delete` — that would also delete the routing VS, leaving
+#    cartservice without retries during recovery. run-experiment.sh handles
+#    the apply-to-restore pattern automatically.)
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cartservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - cartservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 50.0
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 23ms     
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    # NO request-level timeout: lets retries fully play out (4 × 2ms = 8ms
+    # max per logical request), so retry amplification is the dominant failure
+    # mode rather than request-budget exhaustion.
+    route:
+    - destination:
+        host: cartservice
