@@ -3,7 +3,6 @@
 This repository contains:
 
 - a discrete-event simulator for retry behavior and retry budgets in microservices
-- a calibration pipeline that fits simulator parameters from a live Istio deployment
 - Kubernetes/Istio prototype deployments (including `online-boutique`) for experiments
 
 ## Repository Layout
@@ -11,9 +10,6 @@ This repository contains:
 - `simulator/`
   - Core retry-budget simulator (event-driven, queueing + faults + retries + policies)
   - Main docs: `simulator/README.md`
-- `calibration/`
-  - Collect Envoy/Istio stats from a live `online-boutique` deployment and generate calibrated simulator configs
-  - Main docs: `calibration/README.md`
 - `prototype/`
   - Kubernetes + Istio deployment scripts and app manifests used for experiments
   - Includes `online-boutique` and external traffic clients on `CLIENT_HOST`
@@ -64,22 +60,8 @@ Run only selected profiles:
 PROFILES=good,bad ./run-clients.sh start
 ```
 
-### 4. Calibrate simulator from the live prototype
-
-```bash
-cd calibration
-./pipeline.sh
-RUN_SIM=1 COMPARE=1 ./pipeline.sh
-```
-
-This produces:
-- fitted parameters (`data/fitted_params.json`)
-- generated simulator config (`configs/online_boutique.yaml`)
-- comparison report/plots (`reports/`)
-
 ## Notes
 
-- The simulator and calibration pipeline are the main analysis workflow.
 - The prototype `online-boutique` app disables the stock in-cluster loadgenerator by default in this repo and uses external controllable clients instead.
 - External client profiles are "AWS-SDK-style" retry behaviors (not literal AWS SDK calls), because `online-boutique` is a generic HTTP application.
 
@@ -87,6 +69,5 @@ This produces:
 
 - Simulator workflow: `simulator/bin/workflow.py`
 - Simulator single run: `simulator/bin/run_experiment.py`
-- Calibration pipeline: `calibration/pipeline.sh`
 - Prototype deployer: `prototype/deploy-app.sh`
 - External clients (online-boutique): `prototype/clients/online-boutique/run-clients.sh`

@@ -214,9 +214,6 @@ outputs/
 *.DS_Store
 results*/
 .k8s-deploy-logs/
-calibration/configs/
-calibration/data/
-calibration/reports/
 paper_figures/
 *.pdf
 simulator/experiments/yaml/aimd_vs_sysname/
