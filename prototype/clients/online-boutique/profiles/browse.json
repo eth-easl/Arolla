@@ -1,0 +1,23 @@
+{
+  "name": "browse",
+  "description": "Read-only catalog browser — mostly GETs, no purchases",
+
+  "count": 4,
+  "rate_rps_per_client": 1.0,
+  "timeout_s": 2.0,
+
+  "sku_pool": [
+    "OLJCESPC7Z", "66VCHSJNUP", "1YMWWN1N4O", "L9ECAV7KIM", "2ZYFJ3GM2N",
+    "0PUK6V6EV0", "LS4PSXUNUM", "9SIQT8TOJO", "6E92ZMYYFZ"
+  ],
+
+  "requests": [
+    { "name": "home",           "weight": 40, "method": "GET", "path": "/" },
+    { "name": "browse-product", "weight": 40, "method": "GET", "path": "/product/{sku}" },
+    { "name": "view-cart",      "weight": 20, "method": "GET", "path": "/cart" }
+  ],
+
+  "retries": 2,
+  "backoff": { "mode": "exponential", "base_s": 0.1, "max_s": 2.0, "jitter": "full" },
+  "retry_on_status": [0, 500, 502, 503, 504]
+}

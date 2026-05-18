@@ -1,0 +1,248 @@
+# Mesh-wide per-service retry policies (BASE STATE).
+#
+# Online Boutique's services don't configure gRPC client retries themselves.
+# Without mesh-level retries, only the external client (traffic_gen.py) ever
+# retries — so chain amplification is invisible. We add Istio VirtualService
+# retries on EVERY HTTP/gRPC service in the namespace, so a single failed
+# downstream call triggers retries at every hop above it in the call graph.
+# This is the standing system configuration; faults are layered on top.
+#
+# Online Boutique services and their callers:
+#
+#   adservice              ← frontend
+#   cartservice            ← frontend, checkoutservice              [touches Redis]
+#   checkoutservice        ← frontend
+#   currencyservice        ← frontend, checkoutservice
+#   emailservice           ← checkoutservice
+#   frontend               ← gateway (external)
+#   paymentservice         ← checkoutservice
+#   productcatalogservice  ← frontend, checkoutservice, recommendationservice
+#   recommendationservice  ← frontend
+#   shippingservice        ← frontend, checkoutservice
+#   redis-cart             ← cartservice (TCP/RESP — NOT covered here, Istio
+#                            HTTP fault & retry don't apply to Redis)
+#
+# Each VirtualService below applies retries to the *outbound* sidecar of
+# anyone calling that service. Adding retries on every service means a
+# request to one downstream that fails (e.g. cartservice under fault) gets
+# retried at *every* hop above it in the call graph.
+#
+# IMPORTANT: fault manifests under faults/ use the SAME VirtualService names
+# (cartservice-routing, checkoutservice-routing, etc.) so applying a fault
+# REPLACES the corresponding base entry. When the fault is removed,
+# run-experiment.sh re-applies this file to restore the base routing state.
+#
+# Retry config: 3 attempts (Istio default exponential backoff with jitter,
+# 25ms+), retry on 5xx + connect/refused/reset. Matches the "k=3 retries
+# per hop" assumption used in the paper's §6.2.3 chain-depth experiment.
+#
+# perTryTimeout values are set to the *measured* healthy p99 latency of each
+# service (rounded to nearest ms). With 4 attempts per chain hop, the 1%
+# steady-state false-positive rate per attempt collapses to (0.01)^4 ≈ 1e-8
+# at the logical-request level — i.e. retries fully mask any healthy-tail
+# false positives. Under fault, when downstream latency climbs above p99,
+# timeouts fire immediately and retries cascade.
+#
+
+# ----- frontend (entry point — gateway → frontend) ---------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: frontend-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - frontend
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 2s     # measured p99 = 938ms (end-to-end)
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: frontend
+
+# ----- adservice -------------------------------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: adservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - adservice
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 95ms      # measured p99 = 2.0ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: adservice
+
+# ----- cartservice (talks to redis-cart) -------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cartservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - cartservice
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 50ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: cartservice
+
+# ----- checkoutservice (orchestrator — fans out to many) ---------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: checkoutservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - checkoutservice
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 800ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: checkoutservice
+
+# ----- currencyservice -------------------------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: currencyservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - currencyservice
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 410ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: currencyservice
+
+# ----- emailservice ----------------------------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: emailservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - emailservice
+  http:
+  - retries:
+      attempts: 3
+      # Old value 3ms was inherited from a near-idle calibration. Under
+      # checkout-fan-out load, p99 climbs into the tens of ms easily,
+      # so 3ms caused frequent spurious cancellations on the checkout
+      # path. Bumped to 100ms for headroom under load.
+      perTryTimeout: 100ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: emailservice
+
+# ----- paymentservice --------------------------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: paymentservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - paymentservice
+  http:
+  - retries:
+      attempts: 3
+      # Old value 18ms was inherited from a near-idle calibration. Under
+      # checkout-fan-out load, p99 grows into the tens-to-hundreds of ms,
+      # so 18ms caused spurious cancellations even at zero offered load.
+      # Bumped to 100ms for headroom; still tight enough that a deliberate
+      # fault (e.g. paymentservice-50pct.yaml) trips mesh retries cleanly.
+      perTryTimeout: 100ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: paymentservice
+
+# ----- productcatalogservice (called by 3 services — high fan-in) ------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: productcatalog-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - productcatalogservice
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 50ms  
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: productcatalogservice
+
+# ----- recommendationservice -------------------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: recommendationservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - recommendationservice
+  http:
+  - retries:
+      attempts: 3
+      perTryTimeout: 220ms      # measured p99 = 8.1ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: recommendationservice
+
+# ----- shippingservice -------------------------------------------------------
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: shippingservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - shippingservice
+  http:
+  - retries:
+      attempts: 3
+      # Old value 5ms was inherited from a near-idle calibration. Under
+      # checkout-fan-out load, shipping's GetQuote and ShipOrder both
+      # routinely take >5ms each, so 5ms caused spurious cancellations.
+      # Bumped to 100ms for headroom under load.
+      perTryTimeout: 100ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: shippingservice

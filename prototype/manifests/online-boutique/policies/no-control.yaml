@@ -1,0 +1,14 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: arolla-baseline-no-control
+  namespace: online-boutique
+spec:
+  host: "*.online-boutique.svc.cluster.local"
+  trafficPolicy:
+    outlierDetection:
+      # All-zero thresholds disable ejection entirely.
+      consecutive5xxErrors: 0
+      interval: 1s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 0

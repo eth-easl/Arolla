@@ -1,0 +1,132 @@
+# Client-Side Retry forcing Storm Behavior
+# Matches legacy_test.yaml configuration exactly (Service Timeout ENABLED)
+
+name: client_storm_test
+seed: 43232
+
+services:
+  - name: svc-no-control
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: 0.25
+  
+
+  - name: svc-cb-target
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 1000
+      min_requests: 20
+      half_open_delay_ms: 500
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: 0.25
+
+  - name: svc-budget-target
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: 0.25  
+  
+  - name: svc-arolla-target
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1000
+    arolla_retry_budget:
+      alpha: 0.1
+      beta_down: 0.3
+      beta_up: 0.15
+      window_ms: 1000
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 40
+        p_fail: 0.25
+
+clients:
+  - name: no_control
+    target_service: svc-no-control
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload: &default_workload
+      base_rps: 188
+      duration_s: 70
+      rng_seed: 1
+
+ 
+  - name: circuit_breaker
+    target_service: svc-cb-target
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload: *default_workload
+
+  - name: retry_budget
+    target_service: svc-budget-target
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload: *default_workload
+
+  - name: arolla_retry_budget
+    target_service: svc-arolla-target
+    retry: 
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload: *default_workload
+
+# Output configuration
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+plotting_script: plotting/plot_success_rps.py
+plotting_script_args:
+  smoothing_window: 3
+  font_size: 24
+  tick_size: 22
+  line_width: 3.0
+  no_legend_frame: true
+  legend_size: 18
+  figsize: "12,6"
+  legend_loc: "center left"
+  legend_bbox: "1.02, 0.5"
+  legend_order: "no_retries,three_retries,exponential_backoff_jitter,circuit_breaker,retry_budget"
+  metric: success_rate

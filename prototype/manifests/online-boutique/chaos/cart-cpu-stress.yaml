@@ -1,0 +1,27 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: experiment-cpu-stress
+  namespace: online-boutique
+spec:
+  # `mode: all` stresses every matching pod. For 2-replica deployments
+  # both replicas are degraded simultaneously, reproducing the same
+  # metastable failure mode as 1-replica experiments at 2× capacity.
+  # Switch to `mode: one` for partial-failure scenarios where outlier
+  # detection and load balancing matter.
+  mode: all
+  selector:
+    namespaces:
+    - online-boutique
+    labelSelectors:
+      app: __TARGET__
+
+  stressors:
+    cpu:
+      workers: __WORKERS__
+      load: __LOAD__
+
+  # Chaos-mesh auto-cleans up after this duration (safety net in case the
+  # orchestrator dies mid-run). The orchestrator ALSO explicitly deletes
+  # the resource at fault_end, so this duration acts as a backstop only.
+  duration: __DURATION__s

@@ -1,0 +1,99 @@
+# Cluster profile: 2 replicas per service, high resource limits.
+#
+# Sized for 4 worker nodes × 32 cores × 64 GB each, targeting 80% of
+# machine capacity. Fault-target services (cartservice, paymentservice)
+# use required anti-affinity so their two replicas are guaranteed to
+# land on different nodes. Other services use preferred anti-affinity
+# (best-effort spreading).
+#
+# Redis-cart stays at 1 replica (stateful, shared by both cart replicas).
+#
+# Usage:
+#   prototype/deploy-cluster-profile.sh 2-replica
+#
+# Chaos-mesh targeting:
+#   With 2 replicas, StressChaos by label hits BOTH replicas. To stress
+#   only one replica (partial failure), target by pod name:
+#     kubectl get pod -n online-boutique -l app=cartservice -o name | head -1
+#   Then use that pod name in the StressChaos selector.pods field.
+#
+# Expected capacity:
+#   Each service now has 4 CPU cores (tier 1) or 2 cores (tier 2) per
+#   replica. With 2 replicas, tier-1 services can serve ~8× the current
+#   1-replica throughput before hitting CPU limits. Offered load for
+#   experiments should be scaled accordingly.
+
+defaults: &tier1
+  replicas: 2
+  cpu_request: 1
+  cpu_limit: 4
+  mem_request: 256Mi
+  mem_limit: 1Gi
+  anti_affinity: preferred
+
+tier2: &tier2
+  replicas: 2
+  cpu_request: 500m
+  cpu_limit: 2
+  mem_request: 128Mi
+  mem_limit: 512Mi
+  anti_affinity: preferred
+
+services:
+  frontend:
+    <<: *tier1
+
+  cartservice:
+    <<: *tier1
+    # replicas: 1                # stateful — shared by both cart replicas
+    # cpu_request: 1
+    # cpu_limit: 2
+    # mem_request: 256Mi
+    # mem_limit: 1Gi
+    anti_affinity: required    # fault target — replicas MUST be on different nodes
+
+  checkoutservice:
+    <<: *tier1
+
+  productcatalogservice:
+    <<: *tier1
+
+  paymentservice:
+    <<: *tier1
+    anti_affinity: required    # fault target — replicas MUST be on different nodes
+
+  currencyservice:
+    <<: *tier2
+
+  emailservice:
+    <<: *tier2
+
+  shippingservice:
+    <<: *tier2
+
+  adservice:
+    <<: *tier2
+    mem_request: 256Mi
+
+  recommendationservice:
+    <<: *tier2
+    mem_request: 256Mi
+
+  redis-cart:
+    replicas: 1                # stateful — shared by both cart replicas
+    container: redis           # container name differs from the default "server"
+    cpu_request: 500m
+    cpu_limit: 2
+    mem_request: 256Mi
+    mem_limit: 1Gi
+    anti_affinity: none
+
+  boutique-gateway-istio:
+    replicas: 2                # 2 replicas for the ingress gateway
+                               # amplification (6000 TCP conn/s) without saturating
+    container: istio-proxy     # gateway pod container name
+    cpu_request: 500m
+    cpu_limit: 2
+    mem_request: 256Mi
+    mem_limit: 1Gi
+    anti_affinity: preferred

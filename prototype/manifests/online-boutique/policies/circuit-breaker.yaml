@@ -1,0 +1,44 @@
+# Baseline 2: Circuit breaker — Envoy outlier detection, failure-rate mode.
+#
+# Scope: every SIDECAR_OUTBOUND cluster in the online-boutique namespace.
+# This matches arolla's namespace-wide attachment so the comparison is
+# scope-symmetric — both policies see all retry traffic across the call
+# graph, not just retries to cart. To restrict the patch to a specific
+# upstream, add `cluster.service: <FQDN>` under match below.
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: arolla-baseline-circuit-breaker
+  namespace: online-boutique
+spec:
+  configPatches:
+  - applyTo: CLUSTER
+    match:
+      context: SIDECAR_OUTBOUND
+    patch:
+      operation: MERGE
+      value:
+        outlier_detection:
+          # Failure-rate mode: trip when ≥ 80% of recent requests failed.
+          failure_percentage_threshold: 80
+          # Envoy default for enforcing_failure_percentage is 0 (log only).
+          # Set to 100 so the threshold actually ejects hosts.
+          enforcing_failure_percentage: 100
+          # Cart has 1 replica → minimum-hosts gate must allow 1.
+          failure_percentage_minimum_hosts: 1
+          # Need at least 10 requests in the eval window before considering
+          # ejection — prevents tripping on a single early error at startup.
+          failure_percentage_request_volume: 10
+          # Pin consecutive-5xx mode off so only failure-rate is in play.
+          enforcing_consecutive_5xx: 0
+          interval: 1s            # re-evaluate every 1s
+          base_ejection_time: 5s
+          # Cap on exponential ejection backoff. Envoy multiplies
+          # base_ejection_time by the ejection count on repeated trips,
+          # capped here. Default upstream is 300s — much longer than our
+          # recovery window, which traps the system in "never recovers"
+          # under retry storms. Explicit to enable sweep-based tuning.
+          max_ejection_time: 30s
+          # Cart has 1 replica; allow 100% so the lone host can be ejected.
+          max_ejection_percent: 100

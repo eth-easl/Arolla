@@ -11,10 +11,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from simulator.core.engine import Simulator
 from simulator.core.types import TimePoint
 from simulator.policies.load_limiter import (
-    NoLoadLimiter, CountBasedCircuitBreakerPolicy,
-    TimeBasedCircuitBreakerPolicy, CBState,
-    RetryBudgetPolicy, LeakyRateLimiterPolicy,
-    BurstyRateLimiterPolicy, FixedWindowBurstyLimiterPolicy
+    NoLoadLimiter,
+    LeakyRateLimiterPolicy,
+    BurstyRateLimiterPolicy,
+    FixedWindowBurstyLimiterPolicy,
+)
+from simulator.policies.retry_controls import (
+    CBState,
+    CountBasedCircuitBreakerPolicy,
+    LimiterTimeBasedCircuitBreakerPolicy as TimeBasedCircuitBreakerPolicy,
+    LimiterRetryBudgetPolicy as RetryBudgetPolicy,
 )
 from simulator.policies.retry import RetryContext
 from simulator.utils.time import ms_to_ns, s_to_ns

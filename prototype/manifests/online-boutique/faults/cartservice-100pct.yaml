@@ -1,0 +1,58 @@
+# §6.2.1/§6.2.2 hybrid — METASTABLE FAILURE: 100% abort on cartservice.
+#
+# Use this manifest (instead of cartservice-50pct.yaml) when the goal is to
+# show that uncontrolled retries trap the system in a degraded state that
+# persists beyond the original fault. The harsher 100% abort drives a much
+# bigger retry queue during the fault window — when the fault is removed,
+# the accumulated queue of in-flight retries hits cartservice all at once
+# and (combined with cartservice's tight CPU limit) overloads it before it
+# can drain. The retry storm then self-perpetuates because every slow
+# response triggers a perTryTimeout, which generates another retry, which
+# arrives at an even more overloaded cart…
+#
+# Conditions required for the metastable trap to actually engage:
+#   1. cartservice CPU limit is tight (services/cartservice.yaml: cpu=100m)
+#   2. Offered load is high enough to come close to that ceiling in steady
+#      state (cart-stress.json: count=100, rps=5 → 500 root rps)
+#   3. perTryTimeout on cart is tight enough to fire under queue pressure
+#      (service-retries.yaml: cartservice perTryTimeout=2ms)
+#   4. Mesh retries are configured to amplify load (service-retries.yaml)
+#
+# If any of these are missing the system will recover quickly and you'll
+# see the cliff-and-recovery shape from the previous run.
+#
+# Same VirtualService name as service-retries.yaml so kubectl apply REPLACES
+# the base entry. To restore the base routing after the experiment:
+#   kubectl apply -f manifests/online-boutique/service-retries.yaml
+#
+# Usage:
+#   prototype/experiments/run-experiment.sh \
+#       --policies no-control \
+#       --client-profiles cart-stress \
+#       (manually edit run-experiment.sh fault path or use this manifest
+#        directly: kubectl apply -f faults/cartservice-100pct.yaml)
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cartservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - cartservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 100.0       # full outage during fault window
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 23ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    # No request-level timeout — let retry storm fully play out so the
+    # in-flight backlog at fault end is large enough to overload cart's
+    # 100m CPU limit and trap the system metastably.
+    route:
+    - destination:
+        host: cartservice

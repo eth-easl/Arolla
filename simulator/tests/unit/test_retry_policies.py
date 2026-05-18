@@ -14,8 +14,8 @@ from simulator.policies.retry import (
     RetryPolicy, RetryContext, NoRetryPolicy,
     FixedBackoffRetryPolicy, ExponentialBackoffRetryPolicy,
     ExponentialBackoffWithJitterRetryPolicy, JitterMode,
-    RetryBudgetPolicy, CircuitBreakerPolicy
 )
+from simulator.policies.retry_controls import RetryBudgetPolicy, RetryCircuitBreakerPolicy
 from simulator.utils.time import ms_to_ns
 
 
@@ -323,12 +323,14 @@ def test_retry_budget_replenishment():
 
 
 def test_circuit_breaker_basic():
-    """Test circuit breaker basic behavior"""
+    """Test retry circuit breaker basic behavior"""
     inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
-    policy = CircuitBreakerPolicy(
+    policy = RetryCircuitBreakerPolicy(
         inner=inner,
         failure_rate_threshold=0.5,
-        window_size=10
+        window_duration=ms_to_ns(1000),
+        min_window_size=10,
+        wait_duration_in_open_state=0,
     )
     
     # Initially empty history -> should allow
@@ -336,22 +338,22 @@ def test_circuit_breaker_basic():
     should, _ = policy.next_delay(ctx)
     assert should == True
     
-    print("✓ CircuitBreakerPolicy basic allowance works")
+    print("✓ RetryCircuitBreakerPolicy basic allowance works")
 
 
 def test_circuit_breaker_open():
-    """Test circuit breaker opening on failures"""
+    """Test retry circuit breaker blocks on threshold"""
     inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
-    policy = CircuitBreakerPolicy(
+    policy = RetryCircuitBreakerPolicy(
         inner=inner,
         failure_rate_threshold=0.5,
-        window_size=4
+        window_duration=ms_to_ns(1000),
+        min_window_size=4,
+        wait_duration_in_open_state=0,
     )
     
-    # Fill with 2 failures, 2 successes -> 50% failure rate -> should open?
-    # Logic: if rate >= threshold -> Open
-    
-    ctx = RetryContext(attempt=1)
+    # Fill with 2 failures, 2 successes -> 50% failure rate -> block retries
+    ctx = RetryContext(attempt=1, now=0)
     
     # Add 2 failures
     policy.record_attempt(ctx, success=False)
@@ -360,45 +362,38 @@ def test_circuit_breaker_open():
     policy.record_attempt(ctx, success=True)
     policy.record_attempt(ctx, success=True)
     
-    # History: [F, F, S, S]. Failures=2. Total=4. Rate=0.5.
-    # Should open (block)
     should, _ = policy.next_delay(ctx)
     assert should == False
     
-    print("✓ CircuitBreakerPolicy opens correctly")
+    print("✓ RetryCircuitBreakerPolicy blocks correctly at threshold")
 
 
 def test_circuit_breaker_closes():
-    """Test circuit breaker closing (recovering)"""
+    """Test retry circuit breaker recovers as failure rate drops"""
     inner = FixedBackoffRetryPolicy(max_attempts=100, delay=ms_to_ns(10))
-    policy = CircuitBreakerPolicy(
+    policy = RetryCircuitBreakerPolicy(
         inner=inner,
         failure_rate_threshold=0.5,
-        window_size=4
+        window_duration=ms_to_ns(1000),
+        min_window_size=4,
+        wait_duration_in_open_state=0,
     )
-    
-    # Start open: [F, F, S, S]
-    policy._history = [True, True, False, False] # True=Failure
-    policy._failures = 2
-    
-    should, _ = policy.next_delay(RetryContext(1))
+
+    ctx = RetryContext(attempt=1, now=0)
+    policy.record_attempt(ctx, success=False)
+    policy.record_attempt(ctx, success=False)
+    policy.record_attempt(ctx, success=True)
+    policy.record_attempt(ctx, success=True)
+
+    should, _ = policy.next_delay(ctx)
     assert should == False
-    
-    # Record a success (maybe from another ongoing request)
-    # New history: [T, F, F, S] -> [True, False, False, False] 
-    # Wait, pop(0) removes the oldest.
-    # append adds to the end.
-    
-    policy.record_attempt(RetryContext(1), success=True)
-    # History became: [T, F, F, F(success=False, failure=True)] ? No success=True means failure=False.
-    # Old: [T, T, F, F] (Indices 0,1,2,3)
-    # Pop 0 (T). New: [T, F, F]. Append F (success).
-    # New: [T, F, F, F]. Failures = 1. Rate = 0.25.
-    
-    should, _ = policy.next_delay(RetryContext(1))
+
+    # Add one more success in-window, rate becomes 2/5 = 0.4 < 0.5
+    policy.record_attempt(ctx, success=True)
+    should, _ = policy.next_delay(ctx)
     assert should == True
-    
-    print("✓ CircuitBreakerPolicy closes correctly")
+
+    print("✓ RetryCircuitBreakerPolicy recovers correctly")
 
 
 if __name__ == "__main__":
@@ -423,4 +418,3 @@ if __name__ == "__main__":
     test_circuit_breaker_closes()
     
     print("\n✅ All retry policy tests passed!")
-
