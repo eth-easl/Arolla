@@ -4,8 +4,12 @@ import { listHeatmapFiles } from "@/lib/fs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const root = req.nextUrl.searchParams.get("root");
   const experiment = req.nextUrl.searchParams.get("experiment");
   const run = req.nextUrl.searchParams.get("run");
+  if (!root) {
+    return NextResponse.json({ error: "root is required" }, { status: 400 });
+  }
   if (!experiment || !run) {
     return NextResponse.json(
       { error: "experiment and run are required" },
@@ -14,7 +18,7 @@ export async function GET(req: NextRequest) {
   }
   const timestamp = run.split("/")[0] ?? run;
   try {
-    const files = await listHeatmapFiles(experiment, timestamp);
+    const files = await listHeatmapFiles(root, experiment, timestamp);
     return NextResponse.json({ files });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "failed";

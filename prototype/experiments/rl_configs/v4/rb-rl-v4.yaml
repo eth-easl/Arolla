@@ -1,0 +1,75 @@
+# RL retry-budget controller — v4 (10s observation, 5s decision, 5s reflection).
+#
+# Same 10s observation window as v1-a / v3, but with a 5s decision cadence
+# (between v1-a's original 5s and v3's fast 2s) and a 5s post-action
+# reflection period baked into the training: after emitting an action the
+# model waits 5 s before folding in the next observations, giving the
+# Envoy xDS push (~30–100 ms) and the cartservice enough time to react
+# before the next inference step judges the outcome.
+#
+# Training parameters: obs_window=10s, delta=5s, reflection=5s.
+# Uses model-v4.zip trained against this configuration.
+name: rb-rl-v4
+label: "RB-RL v4 (10s window, 5s delta, 5s reflection)"
+mode: rl_ppo
+model_path: rl_configs/v4/model-v4.zip
+
+output_root: outputs/prototype/rb-rl-v4
+
+experiment:
+  scenario: sustained-failure
+  policy: envoy-retry-budget
+  client_profile: post-cart-stress-open
+  warmup: 30
+  prefault: 60
+  recovery: 180
+  cooldown: 10
+  settle: 30
+  num_loaders: 4
+
+controller:
+  decision_interval_sec: 5       # matches training delta
+  observation_window_sec: 10     # matches training obs window
+  startup_hold_off_sec: 60       # wait for full window + system warm-up before first patch
+  default_retry_budget:
+    percent: 20.0
+    minRetryConcurrency: 3
+  action_maps:
+    percent: [5.0, 10.0, 20.0, 30.0, 50.0]
+    minRetryConcurrency: [1, 2, 3, 5, 8]
+
+resource_sampling:
+  enabled: false
+  interval_sec: 2
+
+scenarios:
+  source: scenarios_rl.md
+  core:
+    - {id: S01, rate_rps: 1000, fault_duration: 20, fault_rate: 50, default_label: Recovered}
+    - {id: S02, rate_rps: 1000, fault_duration: 75, fault_rate: 100, default_label: Recovered}
+    - {id: S03, rate_rps: 1200, fault_duration: 30, fault_rate: 90, default_label: Recovered}
+    - {id: S04, rate_rps: 1400, fault_duration: 20, fault_rate: 90, default_label: Recovered}
+    - {id: S05, rate_rps: 1200, fault_duration: 20, fault_rate: 95, default_label: Metastable}
+    - {id: S06, rate_rps: 1200, fault_duration: 45, fault_rate: 75, default_label: Metastable}
+    - {id: S07, rate_rps: 1200, fault_duration: 45, fault_rate: 90, default_label: Metastable}
+    - {id: S08, rate_rps: 1200, fault_duration: 75, fault_rate: 75, default_label: Metastable}
+    - {id: S09, rate_rps: 1400, fault_duration: 20, fault_rate: 50, default_label: Metastable}
+    - {id: S10, rate_rps: 1400, fault_duration: 20, fault_rate: 75, default_label: Recovered}
+    - {id: S11, rate_rps: 1400, fault_duration: 45, fault_rate: 75, default_label: Recovered}
+    - {id: S12, rate_rps: 1400, fault_duration: 45, fault_rate: 90, default_label: Metastable}
+    - {id: S13, rate_rps: 1400, fault_duration: 45, fault_rate: 100, default_label: Metastable}
+    - {id: S14, rate_rps: 1400, fault_duration: 75, fault_rate: 50, default_label: Recovered}
+    - {id: S15, rate_rps: 1400, fault_duration: 75, fault_rate: 75, default_label: Metastable}
+    - {id: S16, rate_rps: 1600, fault_duration: 30, fault_rate: 50, default_label: Metastable}
+    - {id: S17, rate_rps: 1600, fault_duration: 30, fault_rate: 90, default_label: Metastable}
+    - {id: S18, rate_rps: 1600, fault_duration: 60, fault_rate: 75, default_label: Metastable}
+    - {id: S19, rate_rps: 1800, fault_duration: 20, fault_rate: 50, default_label: Metastable}
+    - {id: S20, rate_rps: 1800, fault_duration: 30, fault_rate: 95, default_label: Metastable}
+    - {id: S21, rate_rps: 1600, fault_duration: 45, fault_rate: 75, default_label: Ambiguous}
+    - {id: S22, rate_rps: 1600, fault_duration: 75, fault_rate: 100, default_label: Ambiguous}
+    - {id: S23, rate_rps: 1800, fault_duration: 45, fault_rate: 100, default_label: Ambiguous}
+    - {id: S24, rate_rps: 1800, fault_duration: 60, fault_rate: 90, default_label: Ambiguous}
+    - {id: S25, rate_rps: 1800, fault_duration: 75, fault_rate: 75, default_label: Ambiguous}
+  smoke:
+    - S01
+    - S12

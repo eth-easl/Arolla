@@ -1,0 +1,12 @@
+{
+  "policy": "no-control",
+  "t_start": 1000,
+  "t_warmup_end": 1030,
+  "t_prefault_end": 1090,
+  "t_fault_start": 1090,
+  "t_fault_end": 1110,
+  "t_fault_actual_start": 1090,
+  "t_fault_actual_end": 1110,
+  "t_recovery_end": 1290,
+  "t_cooldown_end": 1300
+}

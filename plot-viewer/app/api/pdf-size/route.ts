@@ -2,16 +2,20 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import { extractLargestPageBox } from "@/lib/pdfMediaBox";
 import {
-  assertUnderPrototype,
+  assertUnderRoot,
   plotFilePath,
 } from "@/lib/fs";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const root = req.nextUrl.searchParams.get("root");
   const experiment = req.nextUrl.searchParams.get("experiment");
   const run = req.nextUrl.searchParams.get("run");
   const file = req.nextUrl.searchParams.get("file");
+  if (!root) {
+    return NextResponse.json({ error: "root is required" }, { status: 400 });
+  }
   if (!experiment || !run || !file) {
     return NextResponse.json(
       { error: "experiment, run, and file are required" },
@@ -20,12 +24,12 @@ export async function GET(req: NextRequest) {
   }
   let abs: string;
   try {
-    abs = plotFilePath(experiment, run, file);
+    abs = plotFilePath(root, experiment, run, file);
   } catch {
     return NextResponse.json({ error: "invalid path" }, { status: 400 });
   }
   try {
-    await assertUnderPrototype(abs);
+    await assertUnderRoot(root, abs);
     const buf = await fs.readFile(abs);
     const dims = extractLargestPageBox(buf);
     if (!dims) {

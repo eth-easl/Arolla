@@ -4,6 +4,8 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { absentCellStyle, cellStyle, outcomeColor } from "@/lib/cellOutcome";
 
 const HIDDEN_ROWS_STORAGE_KEY = "plotViewerTableHiddenRowKeys";
+/** This page is locked to the legacy `prototype/` outputs root. See /table-new for prototype-new. */
+const TABLE_ROOT = "prototype";
 
 type SweepParam = { key: string; label: string; value: string };
 
@@ -197,6 +199,7 @@ function IconFunnel() {
 }
 
 function TableContent() {
+  const root = TABLE_ROOT;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
@@ -212,12 +215,15 @@ function TableContent() {
   }, []);
 
   useEffect(() => {
+    if (!root) return;
     let cancel = false;
     (async () => {
       setBusy(true);
       setError(null);
       try {
-        const res = await fetch("/api/table-matrix-all");
+        const res = await fetch(
+          `/api/table-matrix-all?root=${encodeURIComponent(root)}`,
+        );
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "matrix fetch failed");
         if (cancel) return;
@@ -233,7 +239,7 @@ function TableContent() {
     return () => {
       cancel = true;
     };
-  }, []);
+  }, [root]);
 
   function toggleRowHidden(key: string) {
     setColumnFilterSourceKey((f) => (f === key ? null : f));

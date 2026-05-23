@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { listExperiments } from "@/lib/fs";
 import {
   buildTableMatrix,
@@ -17,13 +17,17 @@ type AllTableRow = {
   cells: Record<string, CellPayload>;
 };
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const root = req.nextUrl.searchParams.get("root");
+  if (!root) {
+    return NextResponse.json({ error: "root is required" }, { status: 400 });
+  }
   try {
-    const experiments = await listExperiments();
+    const experiments = await listExperiments(root);
     const built = await Promise.all(
       experiments.map(async (experiment) => ({
         experiment,
-        ...(await buildTableMatrix(experiment)),
+        ...(await buildTableMatrix(root, experiment)),
       })),
     );
 
@@ -40,7 +44,7 @@ export async function GET() {
           };
         }
         rows.push({
-          key: rowKey(b.experiment, ts),
+          key: rowKey(root, b.experiment, ts),
           experiment: b.experiment,
           timestamp: ts,
           cells,

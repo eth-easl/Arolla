@@ -119,6 +119,23 @@ def discover_targets(app_namespace: str) -> list[Target]:
     return targets
 
 
+def discover_rl_pod(namespace: str, job_name: str) -> Target | None:
+    """Discover the in-cluster RL controller pod for *job_name*.
+
+    Returns a Target with scope ``rl_controller_pod`` so its CPU/memory
+    flow through the same ``top_pod`` path as the other targets. Returns
+    None if the Job hasn't spawned a pod yet (e.g. brief race at startup)
+    or if the pod has terminated, so the sampler can recover gracefully
+    across pod restarts without raising.
+    """
+    if not job_name:
+        return None
+    pod, node = first_pod(namespace, f"job-name={job_name}")
+    if not pod:
+        return None
+    return Target(scope="rl_controller_pod", namespace=namespace, pod=pod, node=node)
+
+
 def top_pod(namespace: str, pod: str) -> list[tuple[str, float | None, float | None, str]]:
     output = kubectl(["-n", namespace, "top", "pod", pod, "--containers", "--no-headers"], timeout=6)
     rows = []
@@ -219,6 +236,15 @@ def main() -> int:
         default=None,
         help="Local process PID to sample alongside K8s pods (requires psutil).",
     )
+    parser.add_argument(
+        "--rl-job-name",
+        default="",
+        help=(
+            "Name of the in-cluster RL controller Job; when set, its pod is "
+            "sampled each interval via `kubectl top pod -l job-name=...` and "
+            "emitted with scope=rl_controller_pod."
+        ),
+    )
     args = parser.parse_args()
 
     if args.pid is not None and not _PSUTIL_OK:
@@ -240,6 +266,9 @@ def main() -> int:
         while not STOP:
             ts = f"{time.time():.6f}"
             targets = discover_targets(args.namespace)
+            rl_target = discover_rl_pod(args.namespace, args.rl_job_name)
+            if rl_target is not None:
+                targets.append(rl_target)
             seen_nodes: set[tuple[str, str]] = set()
             if not targets:
                 writer.writerow([ts, "cluster_probe", "", "", "", "", "", "", "target discovery unavailable"])

@@ -62,6 +62,32 @@ export default function RootLayout({
             >
               Table
             </Link>
+            <Link
+              href="/compare"
+              style={{
+                color: "#e2e8f0",
+                fontSize: "0.88rem",
+                fontWeight: 600,
+                textDecoration: "none",
+                padding: "0.35rem 0.65rem",
+                borderRadius: 6,
+              }}
+            >
+              Compare
+            </Link>
+            <Link
+              href="/table-new"
+              style={{
+                color: "#e2e8f0",
+                fontSize: "0.88rem",
+                fontWeight: 600,
+                textDecoration: "none",
+                padding: "0.35rem 0.65rem",
+                borderRadius: 6,
+              }}
+            >
+              Table (new)
+            </Link>
           </nav>
         </header>
         {children}

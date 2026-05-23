@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import type { Dirent } from "fs";
 import path from "path";
+import { resolveOutputsRoot } from "./roots";
 
 /** Safe segment: experiment / run directory names */
 const SEG_RE = /^[\w.=-]+$/;
@@ -8,11 +9,8 @@ const SEG_RE = /^[\w.=-]+$/;
 /** PDF or PNG filename */
 const FILE_RE = /^[\w.-]+\.(pdf|png)$/i;
 
-export function getPrototypeRoot(): string {
-  return (
-    process.env.OUTPUTS_PROTOTYPE_ROOT ||
-    path.resolve(process.cwd(), "..", "outputs", "prototype")
-  );
+export function getOutputsRoot(root: string): string {
+  return resolveOutputsRoot(root);
 }
 
 function assertSegment(name: string, label: string): void {
@@ -30,24 +28,24 @@ function assertRelativeRunPath(runPath: string): string[] {
   return parts;
 }
 
-export function plotsDir(experiment: string, runId: string): string {
+export function plotsDir(root: string, experiment: string, runId: string): string {
   assertSegment(experiment, "experiment");
   const runParts = assertRelativeRunPath(runId);
-  return path.join(getPrototypeRoot(), experiment, ...runParts, "plots");
+  return path.join(getOutputsRoot(root), experiment, ...runParts, "plots");
 }
 
-export async function assertUnderPrototype(resolvedPath: string): Promise<void> {
-  const proto = path.resolve(getPrototypeRoot());
+export async function assertUnderRoot(root: string, resolvedPath: string): Promise<void> {
+  const proto = path.resolve(getOutputsRoot(root));
   const resolved = path.resolve(resolvedPath);
   if (!resolved.startsWith(proto + path.sep) && resolved !== proto) {
-    throw new Error("Path escapes prototype outputs root");
+    throw new Error("Path escapes outputs root");
   }
 }
 
-export async function listExperiments(): Promise<string[]> {
-  const root = path.resolve(getPrototypeRoot());
+export async function listExperiments(root: string): Promise<string[]> {
+  const base = path.resolve(getOutputsRoot(root));
   try {
-    const names = await fs.readdir(root, { withFileTypes: true }).then((ents) =>
+    const names = await fs.readdir(base, { withFileTypes: true }).then((ents) =>
       ents
         .filter((d) => d.isDirectory() && !d.name.startsWith("_"))
         .map((d) => d.name),
@@ -58,14 +56,14 @@ export async function listExperiments(): Promise<string[]> {
   }
 }
 
-export async function listRuns(experiment: string): Promise<string[]> {
+export async function listRuns(root: string, experiment: string): Promise<string[]> {
   assertSegment(experiment, "experiment");
-  const expPath = path.join(getPrototypeRoot(), experiment);
-  await assertUnderPrototype(expPath);
+  const expPath = path.join(getOutputsRoot(root), experiment);
+  await assertUnderRoot(root, expPath);
   const runs: string[] = [];
 
   async function walk(dir: string, relParts: string[]): Promise<void> {
-    await assertUnderPrototype(dir);
+    await assertUnderRoot(root, dir);
     let ents: Dirent[];
     try {
       ents = await fs.readdir(dir, { withFileTypes: true });
@@ -99,11 +97,12 @@ export async function listRuns(experiment: string): Promise<string[]> {
 }
 
 export async function listPlotFiles(
+  root: string,
   experiment: string,
   runId: string,
 ): Promise<string[]> {
-  const dir = plotsDir(experiment, runId);
-  await assertUnderPrototype(dir);
+  const dir = plotsDir(root, experiment, runId);
+  await assertUnderRoot(root, dir);
   let names: string[];
   try {
     names = await fs.readdir(dir);
@@ -117,9 +116,9 @@ export function validatePlotFilename(file: string): void {
   if (!FILE_RE.test(file)) throw new Error("Invalid plot file");
 }
 
-export function plotFilePath(experiment: string, runId: string, file: string): string {
+export function plotFilePath(root: string, experiment: string, runId: string, file: string): string {
   validatePlotFilename(file);
-  const dir = plotsDir(experiment, runId);
+  const dir = plotsDir(root, experiment, runId);
   return path.join(dir, file);
 }
 
@@ -154,18 +153,19 @@ function symbolFromComparisonHealthJson(raw: unknown): string | undefined {
 }
 
 export async function readComparisonHealthSymbol(
+  root: string,
   experiment: string,
   runId: string,
 ): Promise<string | undefined> {
   assertSegment(experiment, "experiment");
   const parts = assertRelativeRunPath(runId);
   const abs = path.join(
-    getPrototypeRoot(),
+    getOutputsRoot(root),
     experiment,
     ...parts,
     "comparison-health.json",
   );
-  await assertUnderPrototype(abs);
+  await assertUnderRoot(root, abs);
   try {
     const buf = await fs.readFile(abs, "utf8");
     return symbolFromComparisonHealthJson(JSON.parse(buf));
@@ -176,18 +176,19 @@ export async function readComparisonHealthSymbol(
 
 /** classify_runs.py emits + / - / ~ (recovered / metastable / unhealthy). */
 export async function readClassificationSymbol(
+  root: string,
   experiment: string,
   runId: string,
 ): Promise<string | undefined> {
   assertSegment(experiment, "experiment");
   const parts = assertRelativeRunPath(runId);
   const abs = path.join(
-    getPrototypeRoot(),
+    getOutputsRoot(root),
     experiment,
     ...parts,
     "classification.json",
   );
-  await assertUnderPrototype(abs);
+  await assertUnderRoot(root, abs);
   try {
     const buf = await fs.readFile(abs, "utf8");
     const j = JSON.parse(buf) as { symbol?: unknown };
@@ -199,21 +200,22 @@ export async function readClassificationSymbol(
 }
 
 export async function readRunOutcomeSymbol(
+  root: string,
   experiment: string,
   runId: string,
 ): Promise<string | undefined> {
   if (/^rb-rl-v/.test(experiment)) {
-    const ch = await readComparisonHealthSymbol(experiment, runId);
+    const ch = await readComparisonHealthSymbol(root, experiment, runId);
     if (ch) return ch;
   }
-  return readClassificationSymbol(experiment, runId);
+  return readClassificationSymbol(root, experiment, runId);
 }
 
 /** First-level timestamp directories under an experiment (excludes _-prefixed dirs). */
-export async function listTimestamps(experiment: string): Promise<string[]> {
+export async function listTimestamps(root: string, experiment: string): Promise<string[]> {
   assertSegment(experiment, "experiment");
-  const expPath = path.join(getPrototypeRoot(), experiment);
-  await assertUnderPrototype(expPath);
+  const expPath = path.join(getOutputsRoot(root), experiment);
+  await assertUnderRoot(root, expPath);
   try {
     const ents = await fs.readdir(expPath, { withFileTypes: true });
     return ents
@@ -229,13 +231,14 @@ export async function listTimestamps(experiment: string): Promise<string[]> {
  * Returns [] when plots/ lives directly inside the timestamp dir (no sub-scenarios).
  */
 export async function listScenarios(
+  root: string,
   experiment: string,
   timestamp: string,
 ): Promise<string[]> {
   assertSegment(experiment, "experiment");
   assertSegment(timestamp, "timestamp");
-  const tsPath = path.join(getPrototypeRoot(), experiment, timestamp);
-  await assertUnderPrototype(tsPath);
+  const tsPath = path.join(getOutputsRoot(root), experiment, timestamp);
+  await assertUnderRoot(root, tsPath);
   try {
     const ents = await fs.readdir(tsPath, { withFileTypes: true });
     // Plots directly at timestamp level → no sub-scenarios
@@ -256,7 +259,7 @@ export async function listScenarios(
         e.name === "heatmap"
       ) continue;
       const scenPath = path.join(tsPath, e.name);
-      await assertUnderPrototype(scenPath);
+      await assertUnderRoot(root, scenPath);
       try {
         const subEnts = await fs.readdir(scenPath, { withFileTypes: true });
         if (subEnts.some((s) => s.isDirectory() && s.name === "plots")) {
@@ -277,18 +280,19 @@ export async function listScenarios(
  * Structure: <root>/<experiment>/<timestamp>/heatmap/
  * Pass the first segment of a run ID as `timestamp`.
  */
-export function heatmapDir(experiment: string, timestamp: string): string {
+export function heatmapDir(root: string, experiment: string, timestamp: string): string {
   assertSegment(experiment, "experiment");
   assertSegment(timestamp, "timestamp");
-  return path.join(getPrototypeRoot(), experiment, timestamp, "heatmap");
+  return path.join(getOutputsRoot(root), experiment, timestamp, "heatmap");
 }
 
 export async function listHeatmapFiles(
+  root: string,
   experiment: string,
   timestamp: string,
 ): Promise<string[]> {
-  const dir = heatmapDir(experiment, timestamp);
-  await assertUnderPrototype(dir);
+  const dir = heatmapDir(root, experiment, timestamp);
+  await assertUnderRoot(root, dir);
   let names: string[];
   try {
     names = await fs.readdir(dir);
@@ -299,10 +303,11 @@ export async function listHeatmapFiles(
 }
 
 export function heatmapFilePath(
+  root: string,
   experiment: string,
   timestamp: string,
   file: string,
 ): string {
   validatePlotFilename(file);
-  return path.join(heatmapDir(experiment, timestamp), file);
+  return path.join(heatmapDir(root, experiment, timestamp), file);
 }

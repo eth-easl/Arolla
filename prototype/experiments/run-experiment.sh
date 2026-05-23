@@ -116,6 +116,9 @@ RL_LEGACY_FETCH=false
 # sidecar stats. Explicit `envoy` / `buckets` / `rows` lets a sweep
 # A/B without editing job.yaml by hand.
 RL_OBS_MODE="auto"
+# In-cluster Job pod: after a namespace-wide rollout, workers can stay busy
+# (disk/cpu) and delay image unpack / schedule; 60s was tight on Emulab.
+RL_POD_READY_TIMEOUT_SEC="${RL_POD_READY_TIMEOUT_SEC:-180}"
 RESOURCE_SAMPLING=false
 RESOURCE_SAMPLE_INTERVAL_SEC=2
 HELPER_PIDS=()
@@ -403,6 +406,9 @@ if "${RL_IN_CLUSTER}"; then
       RL_LOADER_PORTS_CSV="${RL_LOADER_PORTS_CSV},${p}"
     fi
   done
+  if ! kubectl -n "${NAMESPACE}" get configmap "${RL_CONFIGMAP}" >/dev/null 2>&1; then
+    err "ConfigMap '${RL_CONFIGMAP}' not found in '${NAMESPACE}'. Apply RL bundles with: ${SCRIPT_DIR}/ensure_rl_configmaps.sh"
+  fi
   log "rl-in-cluster: loader=${RL_LOADER_HOST} ports=${RL_LOADER_PORTS_CSV} image=rl-controller:${RL_IMAGE_TAG} configmap=${RL_CONFIGMAP}"
 fi
 
@@ -863,6 +869,8 @@ run_single() {
   local rl_controller_dir="${out_dir}/rl-controller"
   local rl_controller_pid=""
   local resource_sampler_pid=""
+  local _rl_job_for_cleanup=""
+  local _rl_pod_for_cleanup=""
 
   mkdir -p "${client_metrics_dir}" "${sidecar_stats_dir}"
 
@@ -943,20 +951,24 @@ run_single() {
       kubectl apply -f "${_tmp_job}" >/dev/null
       rm -f "${_tmp_job}"
 
-      log "[${policy}] waiting for pod of ${_rl_job_name} (≤ 60s)"
+      log "[${policy}] waiting for pod of ${_rl_job_name} (≤ ${RL_POD_READY_TIMEOUT_SEC}s)"
       # Pod name is not predictable up-front (the Job's controller appends
       # a random suffix). Poll until selector matches a pod, then wait for
       # it to be Ready.
       _rl_pod=""
-      for _i in $(seq 1 30); do
+      for _i in $(seq 1 45); do
         _rl_pod="$(kubectl -n "${NAMESPACE}" get pod -l job-name="${_rl_job_name}" \
           -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
         [[ -n "${_rl_pod}" ]] && break
         sleep 1
       done
       [[ -n "${_rl_pod}" ]] || err "[${policy}] no pod ever appeared for ${_rl_job_name}"
-      kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod "${_rl_pod}" --timeout=60s \
-        || err "[${policy}] pod ${_rl_pod} did not reach Ready within 60s"
+      if ! kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod "${_rl_pod}" \
+        --timeout="${RL_POD_READY_TIMEOUT_SEC}s"; then
+        log "[${policy}] pod ${_rl_pod} not Ready — tail of describe (events / state):"
+        kubectl -n "${NAMESPACE}" describe pod "${_rl_pod}" 2>/dev/null | tail -n 50 >&2 || true
+        err "[${policy}] pod ${_rl_pod} did not reach Ready within ${RL_POD_READY_TIMEOUT_SEC}s"
+      fi
 
       log "[${policy}] streaming logs from ${_rl_pod} → rl-controller.log"
       kubectl -n "${NAMESPACE}" logs -f "${_rl_pod}" \
@@ -1002,6 +1014,9 @@ run_single() {
     )
     # Also sample the RL controller process when it's running.
     [[ -n "${rl_controller_pid}" ]] && sampler_args+=(--pid "${rl_controller_pid}")
+    # And sample the in-cluster RL controller Job's pod (CPU/mem of the
+    # actual controller, not just the local kubectl-logs streamer).
+    [[ -n "${_rl_job_for_cleanup}" ]] && sampler_args+=(--rl-job-name "${_rl_job_for_cleanup}")
     "${sampler_args[@]}" > "${out_dir}/resource-sampler.log" 2>&1 &
     resource_sampler_pid="$!"
     HELPER_PIDS+=("${resource_sampler_pid}")

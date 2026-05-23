@@ -29,17 +29,17 @@ export function orderColumns(cols: string[]): string[] {
   return hasEmpty ? ["", ...sorted] : sorted;
 }
 
-export async function buildTableMatrix(experiment: string): Promise<{
+export async function buildTableMatrix(root: string, experiment: string): Promise<{
   timestamps: string[];
   columns: string[];
   cells: Record<string, Record<string, CellPayload>>;
 }> {
-  const timestamps = sortTimestampIds(await listTimestamps(experiment));
+  const timestamps = sortTimestampIds(await listTimestamps(root, experiment));
   const colSet = new Set<string>();
 
   const perTs = await Promise.all(
     timestamps.map(async (ts) => {
-      const scenarios = await listScenarios(experiment, ts);
+      const scenarios = await listScenarios(root, experiment, ts);
       if (!scenarios.length) colSet.add("");
       else for (const s of scenarios) colSet.add(s);
       return { ts, scenarios };
@@ -62,7 +62,7 @@ export async function buildTableMatrix(experiment: string): Promise<{
               row[col] = { present: false, symbol: null };
               return;
             }
-            const sym = await readRunOutcomeSymbol(experiment, ts);
+            const sym = await readRunOutcomeSymbol(root, experiment, ts);
             row[col] = { present: true, symbol: sym ?? null };
             return;
           }
@@ -70,7 +70,7 @@ export async function buildTableMatrix(experiment: string): Promise<{
             row[col] = { present: false, symbol: null };
           } else {
             const runId = `${ts}/${col}`;
-            const sym = await readRunOutcomeSymbol(experiment, runId);
+            const sym = await readRunOutcomeSymbol(root, experiment, runId);
             row[col] = { present: true, symbol: sym ?? null };
           }
         }),
@@ -82,8 +82,8 @@ export async function buildTableMatrix(experiment: string): Promise<{
   return { timestamps, columns, cells };
 }
 
-export function rowKey(experiment: string, timestamp: string): string {
-  return `${experiment}::${timestamp}`;
+export function rowKey(root: string, experiment: string, timestamp: string): string {
+  return `${root}::${experiment}::${timestamp}`;
 }
 
 export function mergeColumns(matrices: { columns: string[] }[]): string[] {

@@ -4,7 +4,11 @@ import { buildTableMatrix } from "@/lib/tableMatrix";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
+  const root = req.nextUrl.searchParams.get("root");
   const experiment = req.nextUrl.searchParams.get("experiment");
+  if (!root) {
+    return NextResponse.json({ error: "root is required" }, { status: 400 });
+  }
   if (!experiment) {
     return NextResponse.json(
       { error: "experiment is required" },
@@ -12,7 +16,7 @@ export async function GET(req: NextRequest) {
     );
   }
   try {
-    const data = await buildTableMatrix(experiment);
+    const data = await buildTableMatrix(root, experiment);
     return NextResponse.json(data);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "failed";

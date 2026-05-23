@@ -8,6 +8,8 @@ type Err = string | null;
 
 const DEFAULT_EXPERIMENT = "rb-rl-v1-a";
 const FALLBACK_EXPERIMENT = "post-cart-stress-open";
+/** This page is locked to the legacy `prototype/` outputs root. Use /compare for prototype-new. */
+const PLOTS_ROOT = "prototype";
 
 const GRID_COLUMNS = 3;
 /** Matches row `gap` between columns — used only for aspect → pixel height math. */
@@ -255,8 +257,14 @@ function formatScenarioLabel(scen: string, symbol?: string | null): string {
  * Fragment hints for the built-in PDF viewer (PDFium / Acrobat params):
  * FitH = fit page width to the view, reducing side grey bars from “whole page” zoom.
  */
-function pdfEmbedSrc(experiment: string, run: string, file: string): string {
+function pdfEmbedSrc(
+  root: string,
+  experiment: string,
+  run: string,
+  file: string,
+): string {
   const q = new URLSearchParams({
+    root,
     experiment,
     run,
     file,
@@ -268,6 +276,7 @@ function PageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
+  const root = PLOTS_ROOT;
   const [experiments, setExperiments] = useState<string[]>([]);
   const [experiment, setExperiment] = useState(
     () => searchParams.get("experiment") || DEFAULT_EXPERIMENT,
@@ -299,11 +308,14 @@ function PageContent() {
   const [showHeatmap, setShowHeatmap] = useState(false);
 
   useEffect(() => {
+    if (!root) return;
     let cancel = false;
     (async () => {
       setError(null);
       try {
-        const res = await fetch("/api/experiments");
+        const res = await fetch(
+          `/api/experiments?root=${encodeURIComponent(root)}`,
+        );
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "experiments fetch failed");
         if (cancel) return;
@@ -322,7 +334,7 @@ function PageContent() {
     return () => {
       cancel = true;
     };
-  }, []);
+  }, [root]);
 
   // Load timestamps when experiment changes
   useEffect(() => {
@@ -330,14 +342,14 @@ function PageContent() {
     setTimestamp("");
     setScenarios([]);
     setScenario("");
+    if (!root || !experiment) return;
     let cancel = false;
     (async () => {
       setBusy(true);
       setError(null);
       try {
-        const res = await fetch(
-          `/api/timestamps?experiment=${encodeURIComponent(experiment)}`,
-        );
+        const q = new URLSearchParams({ root, experiment });
+        const res = await fetch(`/api/timestamps?${q.toString()}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "timestamps fetch failed");
         if (cancel) return;
@@ -354,7 +366,7 @@ function PageContent() {
       }
     })();
     return () => { cancel = true; };
-  }, [experiment]);
+  }, [root, experiment]);
 
   // Load scenarios when timestamp changes
   useEffect(() => {
@@ -365,12 +377,13 @@ function PageContent() {
     }
     setScenarios([]);
     setScenario("");
+    if (!root) return;
     let cancel = false;
     (async () => {
       setBusy(true);
       setError(null);
       try {
-        const q = new URLSearchParams({ experiment, timestamp });
+        const q = new URLSearchParams({ root, experiment, timestamp });
         const res = await fetch(`/api/runs?${q.toString()}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "scenarios fetch failed");
@@ -404,7 +417,7 @@ function PageContent() {
       }
     })();
     return () => { cancel = true; };
-  }, [experiment, timestamp]);
+  }, [root, experiment, timestamp]);
 
   useEffect(() => {
     if (!run) {
@@ -412,10 +425,11 @@ function PageContent() {
       setShowHeatmap(false);
       return;
     }
+    if (!root) return;
     let cancel = false;
     (async () => {
       try {
-        const q = new URLSearchParams({ experiment, run });
+        const q = new URLSearchParams({ root, experiment, run });
         const res = await fetch(`/api/heatmap?${q.toString()}`);
         if (!res.ok) { setHeatmapFiles([]); return; }
         const data = await res.json();
@@ -426,21 +440,21 @@ function PageContent() {
     })();
     setShowHeatmap(false);
     return () => { cancel = true; };
-  }, [experiment, run]);
+  }, [root, experiment, run]);
 
   useEffect(() => {
     if (!run) {
       setFiles([]);
       return;
     }
+    if (!root) return;
     let cancel = false;
     (async () => {
       setBusy(true);
       setError(null);
       try {
-        const res = await fetch(
-          `/api/plots?experiment=${encodeURIComponent(experiment)}&run=${encodeURIComponent(run)}`,
-        );
+        const q = new URLSearchParams({ root, experiment, run });
+        const res = await fetch(`/api/plots?${q.toString()}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "plots fetch failed");
         if (cancel) return;
@@ -454,7 +468,7 @@ function PageContent() {
     return () => {
       cancel = true;
     };
-  }, [experiment, run]);
+  }, [root, experiment, run]);
 
   useEffect(() => {
     setPdfSizes({});
@@ -480,7 +494,7 @@ function PageContent() {
   }, []);
 
   useEffect(() => {
-    if (!run || files.length === 0) {
+    if (!run || files.length === 0 || !root) {
       setPdfSizes({});
       return;
     }
@@ -489,8 +503,9 @@ function PageContent() {
       try {
         const pairs = await Promise.all(
           files.map(async (f) => {
+            const q = new URLSearchParams({ root, experiment, run, file: f });
             const res = await fetch(
-              `/api/pdf-size?experiment=${encodeURIComponent(experiment)}&run=${encodeURIComponent(run)}&file=${encodeURIComponent(f)}`,
+              `/api/pdf-size?${q.toString()}`,
               { signal: ac.signal },
             );
             const data: unknown = await res.json().catch(() => ({}));
@@ -519,7 +534,7 @@ function PageContent() {
       }
     })();
     return () => ac.abort();
-  }, [experiment, run, files]);
+  }, [root, experiment, run, files]);
 
   const plotSectionsLayout = useMemo(() => {
     const colW =
@@ -705,7 +720,7 @@ function PageContent() {
             }}
           >
             {heatmapFiles.map((file) => {
-              const q = new URLSearchParams({ experiment, run, file });
+              const q = new URLSearchParams({ root, experiment, run, file });
               const src = `/api/heatmap-pdf?${q.toString()}#page=1&toolbar=0&navpanes=0&view=FitH`;
               const isPng = /\.png$/i.test(file);
               return (
@@ -810,7 +825,7 @@ function PageContent() {
                             // eslint-disable-next-line @next/next/no-img-element
                             <img
                               alt={plotBaseName(file)}
-                              src={pdfEmbedSrc(experiment, run, file)}
+                              src={pdfEmbedSrc(root, experiment, run, file)}
                               style={{
                                 width: "100%",
                                 height: "100%",
@@ -823,7 +838,7 @@ function PageContent() {
                             <>
                               <iframe
                                 title={file}
-                                src={pdfEmbedSrc(experiment, run, file)}
+                                src={pdfEmbedSrc(root, experiment, run, file)}
                                 tabIndex={-1}
                                 style={{
                                   position: "absolute",
