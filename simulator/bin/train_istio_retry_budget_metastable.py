@@ -56,11 +56,19 @@ class NormSyncCallback(BaseCallback):
         return True
 
 
-def make_env(rank: int, scenario_profile: str):
+def make_env(
+    rank: int,
+    scenario_profile: str,
+    decision_interval_s: float,
+    observation_window_s: float | None,
+    delta_window_s: float | None,
+):
     def _init():
         return IstioRetryBudgetMetastableEnv(
             YAML_PATH,
-            decision_interval_s=2.0,
+            decision_interval_s=decision_interval_s,
+            observation_window_s=observation_window_s,
+            delta_window_s=delta_window_s,
             randomize_scenarios=True,
             scenario_profile=scenario_profile,
         )
@@ -68,7 +76,15 @@ def make_env(rank: int, scenario_profile: str):
     return _init
 
 
-def write_training_spec(run_dir: Path, scenario_profile: str) -> None:
+def write_training_spec(
+    run_dir: Path,
+    scenario_profile: str,
+    decision_interval_s: float,
+    observation_window_s: float | None,
+    delta_window_s: float | None,
+) -> None:
+    metrics_window_s = observation_window_s if observation_window_s is not None else decision_interval_s
+    effective_delta_window_s = delta_window_s if delta_window_s is not None else metrics_window_s
     (run_dir / "training_spec.txt").write_text(
         "\n".join(
             [
@@ -77,7 +93,9 @@ def write_training_spec(run_dir: Path, scenario_profile: str) -> None:
                 f"Model family: {MODEL_FAMILY}",
                 f"YAML template: {YAML_PATH}",
                 f"Scenario profile: {scenario_profile}",
-                "Decision interval: 2.0s",
+                f"Decision interval: {decision_interval_s:.1f}s",
+                f"Observation metrics window: {metrics_window_s:.1f}s",
+                f"Delta metrics window: {effective_delta_window_s:.1f}s",
                 "",
                 IstioRetryBudgetMetastableEnv.observation_space_description(),
                 "",
@@ -97,6 +115,9 @@ def write_training_spec(run_dir: Path, scenario_profile: str) -> None:
                 f"scenario_profile={scenario_profile}",
                 "server_side_budget=istio_retry_budget",
                 "knobs=percent,minRetryConcurrency",
+                f"decision_interval_s={decision_interval_s:.1f}",
+                f"observation_window_s={metrics_window_s:.1f}",
+                f"delta_window_s={effective_delta_window_s:.1f}",
             ]
         )
         + "\n"
@@ -175,7 +196,13 @@ def plot_eval_results(log_dir: str, save_path: str):
     plt.close(fig)
 
 
-def train(total_timesteps: int, scenario_profile: str) -> Path:
+def train(
+    total_timesteps: int,
+    scenario_profile: str,
+    decision_interval_s: float,
+    observation_window_s: float | None,
+    delta_window_s: float | None,
+) -> Path:
     run_dir = _make_run_dir(total_timesteps)
     model_path = str(run_dir / "model")
     vecnorm_path = str(run_dir / "vecnormalize_stats.pkl")
@@ -185,10 +212,15 @@ def train(total_timesteps: int, scenario_profile: str) -> Path:
 
     print(f"Run directory: {run_dir}")
 
-    train_env = SubprocVecEnv([make_env(i, scenario_profile) for i in range(4)])
+    train_env = SubprocVecEnv([
+        make_env(i, scenario_profile, decision_interval_s, observation_window_s, delta_window_s)
+        for i in range(4)
+    ])
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True)
 
-    eval_env = DummyVecEnv([make_env(99, scenario_profile)])
+    eval_env = DummyVecEnv([
+        make_env(99, scenario_profile, decision_interval_s, observation_window_s, delta_window_s)
+    ])
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, training=False)
 
     model = PPO(
@@ -218,7 +250,13 @@ def train(total_timesteps: int, scenario_profile: str) -> Path:
 
     model.save(model_path)
     train_env.save(vecnorm_path)
-    write_training_spec(run_dir, scenario_profile)
+    write_training_spec(
+        run_dir,
+        scenario_profile,
+        decision_interval_s,
+        observation_window_s,
+        delta_window_s,
+    )
     print(f"\nModel saved to {model_path}.zip")
     print(f"Normalisation stats saved to {vecnorm_path}")
 
@@ -227,15 +265,33 @@ def train(total_timesteps: int, scenario_profile: str) -> Path:
     return run_dir
 
 
-def evaluate_and_plot(run_dir: Path):
+def evaluate_and_plot(
+    run_dir: Path,
+    decision_interval_s: float,
+    observation_window_s: float | None,
+    delta_window_s: float | None,
+):
     model_path = str(run_dir / "model")
     vecnorm_path = str(run_dir / "vecnormalize_stats.pkl")
     eval_log_dir = str(run_dir / "eval_logs")
     plot_dir = run_dir / "plots"
     plot_dir.mkdir(exist_ok=True)
 
-    env = IstioRetryBudgetMetastableEnv(YAML_PATH, decision_interval_s=2.0, randomize_scenarios=True)
-    obs_normalizer = DummyVecEnv([lambda: IstioRetryBudgetMetastableEnv(YAML_PATH, decision_interval_s=2.0)])
+    env = IstioRetryBudgetMetastableEnv(
+        YAML_PATH,
+        decision_interval_s=decision_interval_s,
+        observation_window_s=observation_window_s,
+        delta_window_s=delta_window_s,
+        randomize_scenarios=True,
+    )
+    obs_normalizer = DummyVecEnv([
+        lambda: IstioRetryBudgetMetastableEnv(
+            YAML_PATH,
+            decision_interval_s=decision_interval_s,
+            observation_window_s=observation_window_s,
+            delta_window_s=delta_window_s,
+        )
+    ])
     obs_normalizer = VecNormalize.load(vecnorm_path, obs_normalizer)
     obs_normalizer.training = False
     obs_normalizer.norm_reward = False
@@ -282,11 +338,40 @@ if __name__ == "__main__":
     )
     parser.add_argument("--skip-training", action="store_true", help="Skip training, only evaluate")
     parser.add_argument("--run-dir", type=str, default=None, help="Path to a specific run directory for evaluation")
+    parser.add_argument(
+        "--decision-interval-s",
+        type=float,
+        default=2.0,
+        help="Seconds between retry-budget decisions/actions.",
+    )
+    parser.add_argument(
+        "--observation-window-s",
+        type=float,
+        default=None,
+        help="Metrics window in seconds for observations/reward. Defaults to the decision interval.",
+    )
+    parser.add_argument(
+        "--delta-window-s",
+        type=float,
+        default=None,
+        help="Metrics window in seconds for delta features. Defaults to the observation metrics window.",
+    )
     args = parser.parse_args()
 
     if args.skip_training:
         run_dir = Path(args.run_dir) if args.run_dir else _latest_run_dir()
     else:
-        run_dir = train(args.timesteps, args.scenario_profile)
+        run_dir = train(
+            args.timesteps,
+            args.scenario_profile,
+            args.decision_interval_s,
+            args.observation_window_s,
+            args.delta_window_s,
+        )
 
-    evaluate_and_plot(run_dir)
+    evaluate_and_plot(
+        run_dir,
+        args.decision_interval_s,
+        args.observation_window_s,
+        args.delta_window_s,
+    )

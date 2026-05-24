@@ -4,12 +4,16 @@ from gymnasium import spaces
 
 from simulator.config.schema import LoadSpikeConfig, PartialFailureConfig
 from simulator.policies.istio_retry_budget import IstioRetryBudget
-from simulator.rl.metastable_fairness_env import MetastableFairnessSimEnv
+from simulator.rl.metastable_fairness_env import (
+    MetastableFairnessSimEnv,
+    metastable_client_window_metrics,
+)
 from simulator.rl.random_scenario_env import (
     failure_rates_and_fractions,
     latency_pressure_from_metrics,
     stabilize_window_observation,
 )
+from simulator.utils.time import s_to_ns
 
 
 PERCENT_MAP = [5.0, 10.0, 20.0, 30.0, 50.0]
@@ -33,9 +37,9 @@ def build_istio_metastable_observation_vector(
     obs_dict: dict,
     queue_capacity: int,
     attempt_timeout_ms: float,
-    decision_interval_ns: float,
-    prev_success_rate: float,
-    prev_window_load_amplification: float,
+    metrics_window_ns: float,
+    delta_success_agg: float,
+    delta_window_load_amplification: float,
     budget_utilization: float,
     retry_concurrency_limit: float,
     percent: float,
@@ -53,11 +57,7 @@ def build_istio_metastable_observation_vector(
     failure_stats = failure_rates_and_fractions(obs_dict, total_requests)
     queue_util = obs_dict["queue_avg"] / queue_capacity
     p95_latency_pressure = client_window_metrics["p95_ms"] / max(float(attempt_timeout_ms), 1.0)
-    delta_success_agg = client_window_metrics["agg_success"] - prev_success_rate
-    delta_window_load_amplification = (
-        client_window_metrics["load_amplification"] - prev_window_load_amplification
-    )
-    window_s = max(float(decision_interval_ns) / 1e9, 1e-9)
+    window_s = max(float(metrics_window_ns) / 1e9, 1e-9)
     retry_rps = float(obs_dict["retries"]) / window_s
     effective_limit = max(float(retry_concurrency_limit), 1.0)
 
@@ -86,32 +86,49 @@ def build_istio_metastable_observation_vector(
 def istio_retry_budget_reward(
     *,
     success_rate: float,
+    retry_ratio: float,
     deadline_rate: float,
     queue_fail_rate: float,
+    server_fail_rate: float,
     latency_pressure: float,
-    client_window_metrics: dict[str, float],
+    queue_utilization: float,
+    budget_utilization: float,
+    retry_pressure_vs_limit: float,
+    delta_success: float,
+    delta_retry_pressure: float,
+    action_distance: float,
+    action_reversal: bool,
 ) -> float:
-    """Simple reward for concurrency-based retry-budget control.
+    """Server-side reward for concurrency-based retry-budget control.
 
-    The goal is intentionally small and interpretable:
-    1. keep user-level success high,
-    2. avoid retry amplification,
-    3. avoid queues, deadlines, and high tail latency.
-
-    This gives PPO a clean learning signal without encoding a large collection
-    of hand-tuned heuristics.
+    This reward intentionally avoids client/root-level benchmark metrics. It
+    teaches the controller to preserve attempt success, suppress retries during
+    overload, and avoid oscillating between retry-budget settings.
     """
-    amp_excess = max(0.0, client_window_metrics["load_amplification"] - 1.0)
-    tail_pressure = min(latency_pressure, 3.0)
+    tail_pressure = min(float(latency_pressure), 3.0)
+    retry_pressure = min(float(retry_pressure_vs_limit), 3.0)
+    queue_pressure = min(max(float(queue_utilization), 0.0), 3.0)
+    overload = max(deadline_rate, queue_fail_rate, tail_pressure / 3.0, queue_pressure)
+    retry_storm = retry_ratio * overload
+    budget_saturation = max(0.0, budget_utilization - 0.85)
+
+    recovery_progress = max(delta_success, 0.0)
+    retry_pressure_growth = max(delta_retry_pressure, 0.0)
 
     return float(
-        2.0 * client_window_metrics["agg_success"]
-        + 0.5 * client_window_metrics["retry_efficiency"]
-        - 0.7 * amp_excess
-        - 0.3 * deadline_rate
-        - 0.2 * queue_fail_rate
-        - 0.1 * tail_pressure
-        + 0.2 * success_rate
+        2.2 * success_rate
+        + 0.35 * recovery_progress
+        - 0.45 * retry_ratio
+        - 0.85 * retry_storm
+        - 0.65 * deadline_rate
+        - 0.50 * queue_fail_rate
+        - 0.20 * server_fail_rate
+        - 0.25 * tail_pressure
+        - 0.25 * queue_pressure
+        - 0.20 * budget_saturation
+        - 0.08 * retry_pressure_growth
+        - 0.05 * action_distance
+        - 0.04 * float(action_reversal)
     )
 
 
@@ -144,14 +161,17 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
         "[1, 2, 3, 5, 8]."
     )
     REWARD_DESCRIPTION = (
-        "Simple reward: maximize user success and useful retries, while "
-        "penalizing retry amplification, deadlines, queue drops, and tail pressure."
+        "Server-side reward: maximize attempt success and recovery progress, "
+        "while penalizing retry pressure during overload, deadlines, queue drops, "
+        "tail/queue pressure, budget saturation, and action oscillation."
     )
 
     def __init__(
         self,
         yaml_path: str,
         decision_interval_s: float = 2.0,
+        observation_window_s: float | None = None,
+        delta_window_s: float | None = None,
         randomize_scenarios: bool = True,
         scenario_profile: str = "metastable_fairness",
     ):
@@ -161,6 +181,18 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
             randomize_scenarios=randomize_scenarios,
             scenario_profile=scenario_profile,
         )
+        if observation_window_s is None:
+            self.observation_window_ns = self.decision_interval_ns
+        elif observation_window_s <= 0:
+            raise ValueError("observation_window_s must be positive.")
+        else:
+            self.observation_window_ns = s_to_ns(observation_window_s)
+        if delta_window_s is None:
+            self.delta_window_ns = self.observation_window_ns
+        elif delta_window_s <= 0:
+            raise ValueError("delta_window_s must be positive.")
+        else:
+            self.delta_window_ns = s_to_ns(delta_window_s)
         self.action_space = spaces.MultiDiscrete([5, 5])
         self.percent_map = list(PERCENT_MAP)
         self.min_retry_concurrency_map = list(MIN_RETRY_CONCURRENCY_MAP)
@@ -169,6 +201,11 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
         self.previous_percent = self.percent_map[self.current_percent_idx]
         self.previous_min_retry_concurrency = self.min_retry_concurrency_map[self.current_min_idx]
         self.prev_window_load_amplification = 1.0
+        self.prev_delta_success_rate = 1.0
+        self.prev_delta_window_load_amplification = 1.0
+        self.prev_reward_success_rate = 1.0
+        self.prev_reward_retry_pressure = 0.0
+        self.last_action_delta = (0, 0)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(18,), dtype=np.float32)
 
     @classmethod
@@ -196,6 +233,61 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
             )
         return 0.0, 1.0, 20.0, 3
 
+    def _metrics_window_ns(self) -> int:
+        return int(getattr(self, "observation_window_ns", self.decision_interval_ns))
+
+    def _delta_window_ns(self) -> int:
+        return int(getattr(self, "delta_window_ns", self._metrics_window_ns()))
+
+    def _observation_for_window(
+        self,
+        window_ns: int,
+        *,
+        fallback_success_rate: float,
+        fallback_retry_ratio: float,
+    ) -> dict:
+        return stabilize_window_observation(
+            self.service.live_buffer.get_observation(self.sim.timestep, window_ns),
+            fallback_success_rate=fallback_success_rate,
+            fallback_retry_ratio=fallback_retry_ratio,
+        )
+
+    def _window_observation(self) -> dict:
+        return self._observation_for_window(
+            self._metrics_window_ns(),
+            fallback_success_rate=self.prev_success_rate,
+            fallback_retry_ratio=self.prev_retry_ratio,
+        )
+
+    def _client_metrics_for_window(self, obs_dict: dict, window_ns: int) -> dict[str, float]:
+        window_end = self.sim.timestep
+        window_start = max(0, window_end - window_ns)
+        return metastable_client_window_metrics(
+            clients=self.clients,
+            workloads=self.workloads,
+            window_start_ns=window_start,
+            window_end_ns=window_end,
+            now_ns=self.sim.timestep,
+            fallback_success_rate=obs_dict["success_rate"],
+            fallback_retry_ratio=obs_dict["retry_ratio"],
+        )
+
+    def _client_window_metrics(self, obs_dict: dict) -> dict[str, float]:
+        return self._client_metrics_for_window(obs_dict, self._metrics_window_ns())
+
+    def _delta_features(self) -> tuple[float, float, dict[str, float]]:
+        delta_obs = self._observation_for_window(
+            self._delta_window_ns(),
+            fallback_success_rate=self.prev_delta_success_rate,
+            fallback_retry_ratio=self.prev_retry_ratio,
+        )
+        delta_client_metrics = self._client_metrics_for_window(delta_obs, self._delta_window_ns())
+        delta_success_agg = delta_client_metrics["agg_success"] - self.prev_delta_success_rate
+        delta_load_amplification = (
+            delta_client_metrics["load_amplification"] - self.prev_delta_window_load_amplification
+        )
+        return delta_success_agg, delta_load_amplification, delta_client_metrics
+
     def _sync_action_memory_from_service(self) -> None:
         limiter = self.service.cfg.load_limiter
         if isinstance(limiter, IstioRetryBudget):
@@ -213,6 +305,11 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
             self.previous_percent = self.percent_map[self.current_percent_idx]
             self.previous_min_retry_concurrency = self.min_retry_concurrency_map[self.current_min_idx]
         self.prev_window_load_amplification = 1.0
+        self.prev_delta_success_rate = 1.0
+        self.prev_delta_window_load_amplification = 1.0
+        self.prev_reward_success_rate = 1.0
+        self.prev_reward_retry_pressure = 0.0
+        self.last_action_delta = (0, 0)
 
     def _build_istio_config_from_params(
         self,
@@ -384,11 +481,21 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
         _, _, previous_percent, previous_min_retry_concurrency = self._current_istio_budget_state()
         self.previous_percent = previous_percent
         self.previous_min_retry_concurrency = previous_min_retry_concurrency
+        previous_percent_idx = self.current_percent_idx
+        previous_min_idx = self.current_min_idx
 
         percent = self.percent_map[int(action[0])]
         min_retry_concurrency = self.min_retry_concurrency_map[int(action[1])]
         self.current_percent_idx = int(action[0])
         self.current_min_idx = int(action[1])
+        percent_delta = self.current_percent_idx - previous_percent_idx
+        min_delta = self.current_min_idx - previous_min_idx
+        action_distance = float(abs(percent_delta) + abs(min_delta))
+        last_percent_delta, last_min_delta = self.last_action_delta
+        action_reversal = (
+            (percent_delta != 0 and last_percent_delta != 0 and percent_delta * last_percent_delta < 0)
+            or (min_delta != 0 and last_min_delta != 0 and min_delta * last_min_delta < 0)
+        )
 
         self.service.update_istio_retry_budget(
             percent=percent,
@@ -401,20 +508,36 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
         self.sim.run(until=self.next_decision_time)
 
         obs = self._get_obs()
-        obs_dict = stabilize_window_observation(
-            self.service.live_buffer.get_observation(self.sim.timestep, self.decision_interval_ns),
-            fallback_success_rate=self.prev_success_rate,
-            fallback_retry_ratio=self.prev_retry_ratio,
-        )
+        obs_dict = self._window_observation()
         fault_active, recovery_active = self._phase_flags(self.sim.timestep)
         client_metrics = self._client_window_metrics(obs_dict)
+        total_requests = max(1, int(obs_dict["total_requests"]))
+        failure_stats = failure_rates_and_fractions(obs_dict, total_requests)
+        queue_utilization = obs_dict["queue_avg"] / self.queue_capacity
+        retry_pressure = float(obs[13])
+        delta_success = obs_dict["success_rate"] - self.prev_reward_success_rate
+        delta_retry_pressure = retry_pressure - self.prev_reward_retry_pressure
 
         reward = istio_retry_budget_reward(
             success_rate=obs_dict["success_rate"],
-            deadline_rate=obs_dict["fail_deadline"] / max(1, int(obs_dict["total_requests"])),
-            queue_fail_rate=obs_dict["fail_queue_full"] / max(1, int(obs_dict["total_requests"])),
+            retry_ratio=obs_dict["retry_ratio"],
+            deadline_rate=failure_stats["deadline_rate"],
+            queue_fail_rate=failure_stats["queue_fail_rate"],
+            server_fail_rate=failure_stats["server_fail_rate"],
             latency_pressure=latency_pressure_from_metrics(obs_dict, self._attempt_timeout_ms()),
-            client_window_metrics=client_metrics,
+            queue_utilization=queue_utilization,
+            budget_utilization=float(obs[12]),
+            retry_pressure_vs_limit=retry_pressure,
+            delta_success=delta_success,
+            delta_retry_pressure=delta_retry_pressure,
+            action_distance=action_distance,
+            action_reversal=action_reversal,
+        )
+        self.prev_reward_success_rate = obs_dict["success_rate"]
+        self.prev_reward_retry_pressure = retry_pressure
+        self.last_action_delta = (
+            percent_delta if percent_delta != 0 else last_percent_delta,
+            min_delta if min_delta != 0 else last_min_delta,
         )
 
         done = self.sim.timestep >= self.episode_end
@@ -440,25 +563,24 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
             "reward": reward,
             "action_percent": percent,
             "action_min_retry_concurrency": min_retry_concurrency,
+            "action_distance": action_distance,
+            "action_reversal": int(action_reversal),
             "retry_concurrency_limit": retry_limit,
         })
         return obs, reward, done, False, {"metrics": obs_dict, "client_metrics": client_metrics}
 
     def _get_obs(self):
-        obs_dict = stabilize_window_observation(
-            self.service.live_buffer.get_observation(self.sim.timestep, self.decision_interval_ns),
-            fallback_success_rate=self.prev_success_rate,
-            fallback_retry_ratio=self.prev_retry_ratio,
-        )
+        obs_dict = self._window_observation()
         budget_util, retry_limit, percent, min_retry_concurrency = self._current_istio_budget_state()
         client_metrics = self._client_window_metrics(obs_dict)
+        delta_success_agg, delta_window_load_amplification, delta_client_metrics = self._delta_features()
         obs = build_istio_metastable_observation_vector(
             obs_dict=obs_dict,
             queue_capacity=self.queue_capacity,
             attempt_timeout_ms=self._attempt_timeout_ms(),
-            decision_interval_ns=self.decision_interval_ns,
-            prev_success_rate=self.prev_success_rate,
-            prev_window_load_amplification=self.prev_window_load_amplification,
+            metrics_window_ns=self._metrics_window_ns(),
+            delta_success_agg=delta_success_agg,
+            delta_window_load_amplification=delta_window_load_amplification,
             budget_utilization=budget_util,
             retry_concurrency_limit=retry_limit,
             percent=percent,
@@ -470,4 +592,6 @@ class IstioRetryBudgetMetastableEnv(MetastableFairnessSimEnv):
         self.prev_success_rate = client_metrics["agg_success"]
         self.prev_retry_ratio = obs_dict["retry_ratio"]
         self.prev_window_load_amplification = client_metrics["load_amplification"]
+        self.prev_delta_success_rate = delta_client_metrics["agg_success"]
+        self.prev_delta_window_load_amplification = delta_client_metrics["load_amplification"]
         return obs

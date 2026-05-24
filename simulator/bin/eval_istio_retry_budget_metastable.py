@@ -27,7 +27,13 @@ from simulator.config.loader import ConfigLoader
 from simulator.rl.istio_retry_budget_env import IstioRetryBudgetMetastableEnv
 
 
-def _load_obs_normalizer(model_path: str, yaml_path: str, decision_interval_s: float) -> VecNormalize:
+def _load_obs_normalizer(
+    model_path: str,
+    yaml_path: str,
+    decision_interval_s: float,
+    observation_window_s: float | None,
+    delta_window_s: float | None,
+) -> VecNormalize:
     vecnorm_path = Path(model_path).resolve().parent / "vecnormalize_stats.pkl"
     if not vecnorm_path.exists():
         raise FileNotFoundError(f"Missing VecNormalize stats at {vecnorm_path}")
@@ -36,6 +42,8 @@ def _load_obs_normalizer(model_path: str, yaml_path: str, decision_interval_s: f
         return IstioRetryBudgetMetastableEnv(
             yaml_path=yaml_path,
             decision_interval_s=decision_interval_s,
+            observation_window_s=observation_window_s,
+            delta_window_s=delta_window_s,
             randomize_scenarios=False,
         )
 
@@ -72,13 +80,28 @@ def run_static_budget(yaml_path: str, seed: int = 42):
     return clients
 
 
-def run_rl_agent(yaml_path: str, model_path: str, decision_interval_s: float = 2.0, seed: int = 42):
+def run_rl_agent(
+    yaml_path: str,
+    model_path: str,
+    decision_interval_s: float = 2.0,
+    observation_window_s: float | None = None,
+    delta_window_s: float | None = None,
+    seed: int = 42,
+):
     env = IstioRetryBudgetMetastableEnv(
         yaml_path=yaml_path,
         decision_interval_s=decision_interval_s,
+        observation_window_s=observation_window_s,
+        delta_window_s=delta_window_s,
         randomize_scenarios=False,
     )
-    obs_normalizer = _load_obs_normalizer(model_path, yaml_path, decision_interval_s)
+    obs_normalizer = _load_obs_normalizer(
+        model_path,
+        yaml_path,
+        decision_interval_s,
+        observation_window_s,
+        delta_window_s,
+    )
     model = PPO.load(model_path, env=obs_normalizer)
 
     obs, _ = env.reset(seed=seed)
@@ -110,6 +133,9 @@ def evaluate_scenario(
     model_path: str,
     yaml_path: str,
     seed: int = 42,
+    decision_interval_s: float = 2.0,
+    observation_window_s: float | None = None,
+    delta_window_s: float | None = None,
     plot_path: str | None = None,
     artifacts_dir: str | None = None,
     print_table: bool = True,
@@ -129,7 +155,14 @@ def evaluate_scenario(
     st_clients = run_static_budget(yaml_path, seed=seed)
 
     print("[3/3] Running scenario with ISTIO RETRY-BUDGET RL AGENT ...")
-    rl_clients, rl_actions = run_rl_agent(yaml_path, model_path, seed=seed)
+    rl_clients, rl_actions = run_rl_agent(
+        yaml_path,
+        model_path,
+        decision_interval_s=decision_interval_s,
+        observation_window_s=observation_window_s,
+        delta_window_s=delta_window_s,
+        seed=seed,
+    )
 
     results = [
         compute_metrics(nb_clients, fault_windows, "No Budget"),
@@ -154,6 +187,24 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True, help="Path to saved PPO model (without .zip)")
     parser.add_argument("--yaml", required=True, help="Path to scenario YAML")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--decision-interval-s",
+        type=float,
+        default=2.0,
+        help="Seconds between retry-budget decisions/actions.",
+    )
+    parser.add_argument(
+        "--observation-window-s",
+        type=float,
+        default=None,
+        help="Metrics window in seconds for the RL observation/reward. Defaults to the decision interval.",
+    )
+    parser.add_argument(
+        "--delta-window-s",
+        type=float,
+        default=None,
+        help="Metrics window in seconds for delta features. Defaults to the observation metrics window.",
+    )
     parser.add_argument("--output", default="istio_retry_budget_eval.png", help="Output plot filename")
     args = parser.parse_args()
 
@@ -161,6 +212,9 @@ if __name__ == "__main__":
         model_path=args.model,
         yaml_path=args.yaml,
         seed=args.seed,
+        decision_interval_s=args.decision_interval_s,
+        observation_window_s=args.observation_window_s,
+        delta_window_s=args.delta_window_s,
         plot_path=args.output,
         print_table=True,
         show_plot=True,

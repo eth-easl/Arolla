@@ -43,6 +43,8 @@ def test_istio_retry_budget_env_reset_and_step():
 
     assert obs.shape == (18,)
     assert len(env.clients) == 3
+    assert env.observation_window_ns == s_to_ns(2)
+    assert env.delta_window_ns == s_to_ns(2)
 
     next_obs, reward, done, truncated, info = env.step(np.array([2, 2], dtype=np.int64))
 
@@ -54,6 +56,33 @@ def test_istio_retry_budget_env_reset_and_step():
     assert env.sim.timestep == s_to_ns(2)
     assert env.history[-1]["action_percent"] == 20.0
     assert env.history[-1]["action_min_retry_concurrency"] == 3
+
+    env.close()
+
+
+def test_istio_retry_budget_env_decouples_action_and_metrics_windows():
+    env = IstioRetryBudgetMetastableEnv(
+        TRAIN_YAML,
+        decision_interval_s=2.0,
+        observation_window_s=10.0,
+        delta_window_s=2.0,
+        randomize_scenarios=False,
+    )
+    obs, _ = env.reset(seed=123)
+
+    assert obs.shape == (18,)
+    assert env.decision_interval_ns == s_to_ns(2)
+    assert env.observation_window_ns == s_to_ns(10)
+    assert env.delta_window_ns == s_to_ns(2)
+
+    next_obs, reward, done, truncated, info = env.step(np.array([2, 2], dtype=np.int64))
+
+    assert next_obs.shape == (18,)
+    assert np.isfinite(reward)
+    assert done is False
+    assert truncated is False
+    assert "client_metrics" in info
+    assert env.sim.timestep == s_to_ns(2)
 
     env.close()
 

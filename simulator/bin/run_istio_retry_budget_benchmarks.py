@@ -43,6 +43,9 @@ def run_benchmark_suite(
     output_dir: str | None = None,
     seed: int = 42,
     scenario_names: list[str] | None = None,
+    decision_interval_s: float = 2.0,
+    observation_window_s: float | None = None,
+    delta_window_s: float | None = None,
 ) -> Path:
     model_path = str(Path(model_path).resolve())
     out_dir = Path(output_dir) if output_dir is not None else _default_output_dir(model_path)
@@ -62,6 +65,9 @@ def run_benchmark_suite(
             model_path=model_path,
             yaml_path=str(yaml_path),
             seed=seed,
+            decision_interval_s=decision_interval_s,
+            observation_window_s=observation_window_s,
+            delta_window_s=delta_window_s,
             plot_path=str(plot_path),
             artifacts_dir=str(scenario_dir),
             print_table=False,
@@ -111,6 +117,24 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default=None, help="Directory to save benchmark outputs")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--decision-interval-s",
+        type=float,
+        default=2.0,
+        help="Seconds between retry-budget decisions/actions.",
+    )
+    parser.add_argument(
+        "--observation-window-s",
+        type=float,
+        default=None,
+        help="Metrics window in seconds for the RL observation/reward. Defaults to the decision interval.",
+    )
+    parser.add_argument(
+        "--delta-window-s",
+        type=float,
+        default=None,
+        help="Metrics window in seconds for delta features. Defaults to the observation metrics window.",
+    )
+    parser.add_argument(
         "--scenario",
         action="append",
         dest="scenarios",
@@ -124,5 +148,8 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         seed=args.seed,
         scenario_names=args.scenarios,
+        decision_interval_s=args.decision_interval_s,
+        observation_window_s=args.observation_window_s,
+        delta_window_s=args.delta_window_s,
     )
     print(f"\nSaved benchmark suite to {output_dir}")
