@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from simulator.core.types import TimeDuration, TimePoint
@@ -27,6 +27,9 @@ class IstioRetryBudget(LoadLimiter):
     active_requests: int = 0
     pending_requests: int = 0
     active_retries: int = 0
+    admitted_retries: int = 0
+    rejected_retries: int = 0
+    _admission_events: list[tuple[int, str]] = field(default_factory=list)
 
     def update_params(
         self,
@@ -64,6 +67,31 @@ class IstioRetryBudget(LoadLimiter):
         # This limiter is concurrency-based, so completed attempts do not refill
         # tokens or alter a moving window.
         pass
+
+    def record_retry_admission(self, *, admitted: bool, now_ns: int) -> None:
+        """Track caller-side retry admissions/rejections for budget_reject_rate."""
+        if admitted:
+            self.admitted_retries += 1
+            kind = "admitted"
+        else:
+            self.rejected_retries += 1
+            kind = "rejected"
+        self._admission_events.append((int(now_ns), kind))
+
+    def window_admission_counts(
+        self,
+        window_start_ns: int,
+        window_end_ns: int,
+    ) -> tuple[int, int]:
+        rejected = 0
+        admitted = 0
+        for ts, kind in self._admission_events:
+            if window_start_ns <= ts <= window_end_ns:
+                if kind == "rejected":
+                    rejected += 1
+                else:
+                    admitted += 1
+        return rejected, admitted
 
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
         return self.active_retries < self.concurrency_limit, 0

@@ -211,7 +211,12 @@ class ServiceRuntime:
                 self._refresh_retry_budget_runtime_state()
                 check_ctx = RetryContext(attempt=1, now=sim.timestep)
                 allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
-                
+                if isinstance(self.cfg.load_limiter, IstioRetryBudget):
+                    self.cfg.load_limiter.record_retry_admission(
+                        admitted=allowed,
+                        now_ns=sim.timestep,
+                    )
+
                 if not allowed:
                     self._record_attempt_metrics(
                         timestamp_ns=sim.timestep,
