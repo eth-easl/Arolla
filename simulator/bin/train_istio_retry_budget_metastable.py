@@ -19,7 +19,11 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, sync_envs_normalization
 
-from simulator.rl.istio_retry_budget_env import IstioRetryBudgetMetastableEnv
+from simulator.rl.istio_retry_budget_env import (
+    IstioRetryBudgetMetastableEnv,
+    MIN_RETRY_CONCURRENCY_MAP,
+    PERCENT_MAP,
+)
 
 
 YAML_PATH = str(
@@ -153,12 +157,12 @@ def plot_episode(history: list, save_path: str):
 
     axes[4].step(df["time_s"], df["action_percent"], where="post", color="#2196F3", linewidth=2)
     axes[4].set_ylabel("Percent")
-    axes[4].set_yticks([5, 10, 20, 30, 50])
+    axes[4].set_yticks(PERCENT_MAP)
     axes[4].set_title("Agent Action: retryBudget.percent")
 
     axes[5].step(df["time_s"], df["action_min_retry_concurrency"], where="post", color="#9C27B0", linewidth=2)
     axes[5].set_ylabel("Min Retry")
-    axes[5].set_yticks([1, 2, 3, 5, 8])
+    axes[5].set_yticks(MIN_RETRY_CONCURRENCY_MAP)
     axes[5].set_xlabel("Time (s)")
     axes[5].set_title("Agent Action: minRetryConcurrency")
 

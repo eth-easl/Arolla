@@ -38,6 +38,7 @@ from simulator.config.loader import ConfigLoader
 from simulator.config.schema import ExperimentConfig
 from simulator.metrics.collector import Metrics
 from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.rl.istio_retry_budget_env import MIN_RETRY_CONCURRENCY_MAP, PERCENT_MAP
 from simulator.rl.random_scenario_env import (
     RandomScenarioSimEnv,
     build_observation_vector,
@@ -594,8 +595,8 @@ def plot_comparison(results, fault_windows, rl_actions_df=None,
                           where="post", color="#9C27B0", linewidth=2, label="Min Retry Concurrency")
             ax_left.set_ylabel("Retry Budget Percent", color="#2196F3")
             ax_right.set_ylabel("Min Retry Concurrency", color="#9C27B0")
-            ax_left.set_yticks([5, 10, 20, 30, 50])
-            ax_right.set_yticks([1, 2, 3, 5, 8])
+            ax_left.set_yticks(PERCENT_MAP)
+            ax_right.set_yticks(MIN_RETRY_CONCURRENCY_MAP)
         else:
             ax_left.step(rl_actions_df["time_s"], rl_actions_df["refill_rate"],
                          where="post", color="#2196F3", linewidth=2, label="Refill Rate")
