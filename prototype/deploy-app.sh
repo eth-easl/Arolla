@@ -136,7 +136,11 @@ upload_manifests() {
     # the loop below. Without this, a previously-uploaded rl-controller/ or
     # policies/ subdir would persist and get re-applied, failing on the
     # unsubstituted `__NAMESPACE__` placeholders.
-    eval "$(ssh_cmd "$MASTER_HOST")" "rm -rf ${REMOTE_MANIFESTS_DIR} && mkdir -p ${REMOTE_MANIFESTS_DIR}"
+    # Pre-existing quoting bug: when the command contains `&&`, eval splits
+    # it before ssh ever sees it, so the second half runs on localhost. Quote
+    # the whole remote command into a single string so the && is interpreted
+    # on the master.
+    eval "$(ssh_cmd "$MASTER_HOST")" "\"rm -rf ${REMOTE_MANIFESTS_DIR} && mkdir -p ${REMOTE_MANIFESTS_DIR}\""
 
     # Upload top-level yaml files (namespace/gateway/routes/etc.)
     local top_yaml_found=0

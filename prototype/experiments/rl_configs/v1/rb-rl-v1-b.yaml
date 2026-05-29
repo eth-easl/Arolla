@@ -32,6 +32,9 @@ experiment:
 controller:
   decision_interval_sec: 2       # fast decision cadence
   observation_window_sec: 2      # 2s rolling window (matches decision interval)
+  # Delta window for #11/#12 — v1 trained tick-to-tick, mirror obs window.
+  delta_window_sec: 2
+  attempt_timeout_ms: 3000       # production loader timeout_s = 3.0
   startup_hold_off_sec: 60       # wait for real load data before first patch
   default_retry_budget:
     percent: 20.0

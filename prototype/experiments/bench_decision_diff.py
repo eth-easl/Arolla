@@ -50,7 +50,12 @@ OBSERVATION_FIELDS_DEFAULT = (
     "window_retry_efficiency",
     "retry_fairness_gap",
     "p95_latency_pressure",
-    "queue_utilization",
+    # Slot 7 was renamed from "queue_utilization" to "budget_reject_rate"
+    # per obs.md. The slot position is unchanged so older
+    # rl-observations.jsonl files (which still carry "queue_utilization"
+    # in `observation_fields`) match this default by position when
+    # `bench_decision_diff` reads the embedded field list.
+    "budget_reject_rate",
     "server_fail_rate",
     "deadline_rate",
     "delta_success_agg",

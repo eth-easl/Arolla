@@ -804,6 +804,13 @@ async def client_worker(
         "User-Agent": f"retry-study-client/{name}",
         "X-Retry-Client-Type": name,
         "X-Retry-Client-Worker": str(worker_idx),
+        # Promoted to a Prometheus metric dimension by the Istio
+        # Telemetry CR at manifests/istio/telemetry-rl-profile.yaml.
+        # The controller's Envoy parser splits counters per
+        # ``rl_profile`` label so #2 (min_client_success) and #6
+        # (retry_fairness_gap) can compute per-profile shares without
+        # going back to loader-side aggregation.
+        "x-rl-profile": name,
     }
 
     # One long-lived HTTP connection per worker. Reconnects on error.
@@ -953,6 +960,10 @@ async def open_loop_firer(
         "User-Agent": f"retry-study-client/{name}",
         "X-Retry-Client-Type": name,
         "X-Retry-Client-Worker": "open-loop",
+        # Promoted to a Prometheus metric dimension by the Istio
+        # Telemetry CR at manifests/istio/telemetry-rl-profile.yaml
+        # (see closed-loop worker for full rationale).
+        "x-rl-profile": name,
     }
 
     pool = ConnectionPool(target_host, target_port, pool_size, timeout_s)

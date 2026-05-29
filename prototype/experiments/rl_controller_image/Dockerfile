@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir \
  && pip install --no-cache-dir \
         "stable-baselines3>=2.0,<3" \
         "gymnasium>=1.0,<2" \
-        "kubernetes>=29" \
+        "kubernetes>=29,<36" \
         "numpy>=2.0" \
         "pyyaml" \
         "requests"

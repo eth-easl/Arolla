@@ -35,6 +35,8 @@ experiment:
 controller:
   decision_interval_sec: 2       # fast decision cadence (matches v1-b)
   observation_window_sec: 10     # long window (matches v1-a)
+  delta_window_sec: 10           # v3 trained on a 10s delta window
+  attempt_timeout_ms: 3000       # production loader timeout_s = 3.0
   startup_hold_off_sec: 60       # wait for full window to populate before first patch
   default_retry_budget:
     percent: 20.0

@@ -13,34 +13,37 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 
 # ---------- Node definitions ----------
 # Current CloudLab/Emulab allocation (d430 hardware, UBUNTU24-64-STD,
-# experiment latencymodel/lcresci-305912). Private fabric on 10.10.1.x.
+# experiment latencymodel/lcresci-306620). Private fabric on 10.10.1.x.
 #
 # Logical  | Emulab host         | Public IP        | Private IP   | Role
 # ---------+---------------------+------------------+--------------+-------------
-# node0    | pc831.emulab.net    | 155.98.36.131    | 10.10.1.1    | K8s master
-# node1    | pc824.emulab.net    | 155.98.36.124    | 10.10.1.2    | Worker 1
-# node2    | pc827.emulab.net    | 155.98.36.127    | 10.10.1.3    | Worker 2
-# node3    | pc834.emulab.net    | 155.98.36.134    | 10.10.1.4    | Worker 3
-# node4    | pc823.emulab.net    | 155.98.36.123    | 10.10.1.5    | Worker 4
-# node5    | pc829.emulab.net    | 155.98.36.129    | 10.10.1.6    | Load-gen client
+# node0    | pc726.emulab.net    | 155.98.36.26     | 10.10.1.1    | K8s master
+# node1    | pc720.emulab.net    | 155.98.36.20     | 10.10.1.2    | Worker 1
+# node2    | pc739.emulab.net    | 155.98.36.39     | 10.10.1.3    | Worker 2
+# node3    | pc718.emulab.net    | 155.98.36.18     | 10.10.1.4    | Worker 3
+# node4    | pc723.emulab.net    | 155.98.36.23     | 10.10.1.5    | Worker 4
+# node5    | pc738.emulab.net    | 155.98.36.38     | 10.10.1.6    | Load-gen client
 
 # Master node
-MASTER_HOST="pc831.emulab.net"      # SSH-reachable address
+MASTER_HOST="pc726.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
 MASTER_IP="10.10.1.1"               # Private Emulab fabric IP (canonical path)
 
 # Worker nodes — add more entries to scale out
-WORKER_HOSTS=("pc824.emulab.net" "pc827.emulab.net" "pc834.emulab.net" "pc823.emulab.net")
+WORKER_HOSTS=("pc720.emulab.net" "pc739.emulab.net" "pc718.emulab.net" "pc723.emulab.net")
 WORKER_HOSTNAMES=("worker01" "worker02" "worker03" "worker04")
 WORKER_IPS=("10.10.1.2" "10.10.1.3" "10.10.1.4" "10.10.1.5")                       # (optional) same length as WORKER_HOSTS, or leave empty
 
 # Calico autodetection: which host interface BGP should peer over.
-# enp6s0f1np1 is the experimental fabric NIC on this d430 allocation; verified
-# bidirectional ICMP between all nodes before deploying.
-CALICO_AUTODETECT_INTERFACE="enp6s0f1np1"
+# enp4s0f1np1 is the experimental fabric NIC on this d430 allocation (verified
+# bidirectional ICMP across all 6 nodes 2026-05-25). Prior allocations used
+# enp6s0f1np1 — always re-check with `ip -br a | awk '/10\.10\.1\./ {print $1}'`
+# on every fresh experiment, because Linux device-name enumeration depends on
+# the PCI slot the NIC happens to land in.
+CALICO_AUTODETECT_INTERFACE="enp4s0f1np1"
 
 # Client node (external load generator — not part of K8s cluster)
-CLIENT_HOST="pc829.emulab.net"      # SSH-reachable address
+CLIENT_HOST="pc738.emulab.net"      # SSH-reachable address
 CLIENT_IP="10.10.1.6"               # Private fabric IP — used by the
                                     # in-cluster RL controller to reach
                                     # traffic_gen.py's /window endpoint.

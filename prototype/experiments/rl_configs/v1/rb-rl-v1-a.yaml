@@ -25,6 +25,12 @@ experiment:
 controller:
   decision_interval_sec: 5
   observation_window_sec: 10
+  # Delta window for #11/#12. v1 was trained without an explicit delta
+  # window (tick-to-tick diff), so back-compat default = obs window.
+  delta_window_sec: 10
+  # Per-attempt deadline (ms). 3000 matches the production loader profiles
+  # used to train v1; v5 will likely revisit this once labmate aligns.
+  attempt_timeout_ms: 3000
   default_retry_budget:
     percent: 20.0
     minRetryConcurrency: 3

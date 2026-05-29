@@ -30,6 +30,8 @@ experiment:
 controller:
   decision_interval_sec: 5       # matches training delta
   observation_window_sec: 10     # matches training obs window
+  delta_window_sec: 10           # v4 trained on a 10s delta window
+  attempt_timeout_ms: 3000       # production loader timeout_s = 3.0
   startup_hold_off_sec: 60       # wait for full window + system warm-up before first patch
   default_retry_budget:
     percent: 20.0

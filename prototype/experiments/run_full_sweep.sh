@@ -36,6 +36,7 @@ RL_VARIANTS=(
   "rb-rl-v2:rl_configs/v2/rb-rl-v2.yaml:rl-controller-v2"
   "rb-rl-v3:rl_configs/v3/rb-rl-v3.yaml:rl-controller-v3"
   "rb-rl-v4:rl_configs/v4/rb-rl-v4.yaml:rl-controller-v4"
+  "rb-rl-v5:rl_configs/v5/rb-rl-v5.yaml:rl-controller-v5"
 )
 
 usage() {
@@ -46,7 +47,7 @@ Options:
   --output-root <dir>     Output root (default: ${OUTPUT_ROOT})
   --sweep-ts <ts>         Sweep timestamp dir (default: $(date +%Y%m%d_%H%M%S))
   --ids <S01,S02,...>     Subset of scenarios from sweep_scenarios.csv
-  --policies <a,b,...>    Subset of {${NON_RL_POLICIES},rb-rl-v1-a,rb-rl-v1-b,rb-rl-v2,rb-rl-v3,rb-rl-v4}
+  --policies <a,b,...>    Subset of {${NON_RL_POLICIES},rb-rl-v1-a,rb-rl-v1-b,rb-rl-v2,rb-rl-v3,rb-rl-v4,rb-rl-v5}
   --rl-image-tag <tag>    Image tag for in-cluster RL controllers (default: ${RL_IMAGE_TAG})
   --rl-port-base <n>      Loader /window port base (default: ${RL_LOADER_PORT_BASE})
   --skip-aggregate        Skip the aggregate_for_viewer.py step

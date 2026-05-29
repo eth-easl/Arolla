@@ -30,6 +30,8 @@ experiment:
 controller:
   decision_interval_sec: 10      # slow cadence (matches observation window)
   observation_window_sec: 10     # long window
+  delta_window_sec: 10           # v2 trained tick-to-tick on 10s window
+  attempt_timeout_ms: 3000       # production loader timeout_s = 3.0
   startup_hold_off_sec: 60       # wait for full window to populate before first patch
   default_retry_budget:
     percent: 20.0

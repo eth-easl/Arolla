@@ -1,0 +1,38 @@
+# Promote the loader's `x-rl-profile` header to a `rl_profile` dimension
+# on Envoy's `REQUEST_COUNT` series. The RL controller's Envoy parser
+# (prototype/experiments/rl_obs_envoy.py) consumes the labelled
+# counters to derive per-profile features #2 (min_client_success) and
+# #6 (retry_fairness_gap with first-attempt shares).
+#
+# Apply with:
+#   kubectl apply -f prototype/manifests/istio/telemetry-rl-profile.yaml
+#
+# Validation:
+#   1. Restart caller pods so they pick up the bootstrap re-render. The
+#      tag does not appear retroactively on already-running sidecars.
+#   2. Check `kubectl exec <caller-pod> -c istio-proxy -- curl -s
+#      localhost:15020/stats/prometheus | grep istio_requests_total`.
+#      Each row should now carry `rl_profile="<profile>"`.
+#
+# Note: this only adds the tag to istio_requests_total. The 18-feature
+# observation needs the same tag on `upstream_rq_*` counters; Envoy
+# emits those via the cluster manager so the dimension flows
+# automatically once the headers are present. If a future Istio
+# release drops the auto-emit, add an EnvoyFilter that explicitly
+# wires the cluster_stats path.
+---
+apiVersion: telemetry.istio.io/v1
+kind: Telemetry
+metadata:
+  name: rl-profile-dimension
+  namespace: online-boutique
+spec:
+  metrics:
+    - providers:
+        - name: prometheus
+      overrides:
+        - match:
+            metric: REQUEST_COUNT
+          tagOverrides:
+            rl_profile:
+              value: 'request.headers["x-rl-profile"]'

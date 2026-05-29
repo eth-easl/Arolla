@@ -64,9 +64,20 @@ expected = {}
 if policy_yaml:
     try:
         import yaml
+        # envoy-retry-budget.yaml is a multi-doc file (wildcard DR for the
+        # whole namespace + a cartservice-specific connection-pool DR);
+        # safe_load_all walks both documents and we keep the first one
+        # with retryBudget set, which is the one the controller patches.
         with open(policy_yaml) as f:
-            doc = yaml.safe_load(f)
-        rb = doc.get('spec', {}).get('trafficPolicy', {}).get('retryBudget', {})
+            docs = list(yaml.safe_load_all(f))
+        rb = {}
+        for doc in docs:
+            if not doc:
+                continue
+            candidate = doc.get('spec', {}).get('trafficPolicy', {}).get('retryBudget', {})
+            if candidate:
+                rb = candidate
+                break
         if 'percent' in rb:
             expected['budget_percent'] = float(rb['percent'])
         if 'minRetryConcurrency' in rb:
