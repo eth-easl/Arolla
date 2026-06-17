@@ -12,6 +12,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from eval_istio_retry_budget_metastable import evaluate_scenario
+from simulator.config.loader import ConfigLoader
 
 
 BENCHMARK_DIR = Path(__file__).parent.parent / "experiments" / "yaml" / "rl" / "istio_retry_budget_benchmarks"
@@ -60,6 +61,8 @@ def run_benchmark_suite(
         scenario_dir = out_dir / scenario_name
         scenario_dir.mkdir(parents=True, exist_ok=True)
         plot_path = scenario_dir / "comparison.png"
+        config = ConfigLoader.load_from_file(str(yaml_path))
+        budget = config.services[0].istio_retry_budget
 
         results, _, fault_windows = evaluate_scenario(
             model_path=model_path,
@@ -78,8 +81,8 @@ def run_benchmark_suite(
         summary_row = {
             "scenario": scenario_name,
             "yaml": str(yaml_path),
-            "static_percent": 20.0,
-            "static_min_retry_concurrency": 3,
+            "static_percent": budget.percent if budget is not None else None,
+            "static_min_retry_concurrency": budget.min_retry_concurrency if budget is not None else None,
             "fault_windows": "; ".join(f"{name} {start:.0f}-{end:.0f}s" for name, start, end, _ in fault_windows),
         }
         for label, prefix in [("No Budget", "no_budget"), ("Static Budget", "static_budget"), ("RL Agent", "rl_agent")]:
