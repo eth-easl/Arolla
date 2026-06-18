@@ -31,6 +31,15 @@ setup(
     
     # Optional dependencies
     extras_require={
+        # Reinforcement-learning extension (optional). Install with:
+        #   pip install -e ".[rl]"
+        # Version floors match the stack RB-RL.v5 was trained/served with.
+        "rl": [
+            "stable-baselines3>=2.8.0",
+            "gymnasium>=1.2.0",
+            "torch>=2.6.0",
+            "tensorboard>=2.18.0",
+        ],
         "dev": [
             "pytest>=7.0",
             "black>=23.0",

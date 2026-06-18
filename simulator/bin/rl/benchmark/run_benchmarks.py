@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Run the RL benchmark suite for a trained model and save artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # bin/rl for shared + sibling modules
+import _pathsetup  # noqa: F401  (adds simulator/src and RL script folders to sys.path)
+
+from eval_rl_scenario import evaluate_scenario
+from rl_paths import default_output_dir
+
+
+BENCHMARKS_DIR = Path(__file__).resolve().parents[3] / "experiments" / "yaml" / "rl" / "benchmarks"
+
+
+def _default_output_dir(model_path: str) -> Path:
+    return default_output_dir(model_path, "benchmarks")
+
+
+def run_benchmark_suite(model_path: str, output_dir: str | None = None, seed: int = 42) -> Path:
+    """Run all benchmark YAMLs and save summary files under output_dir."""
+    model_path = str(Path(model_path).resolve())
+    out_dir = Path(output_dir) if output_dir is not None else _default_output_dir(model_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    yaml_paths = sorted(BENCHMARKS_DIR.glob("*.yaml"))
+    if not yaml_paths:
+        raise FileNotFoundError(f"No benchmark YAMLs found in {BENCHMARKS_DIR}")
+
+    summary_rows = []
+    per_client_rows = []
+
+    for yaml_path in yaml_paths:
+        scenario_name = yaml_path.stem
+        scenario_dir = out_dir / scenario_name
+        scenario_dir.mkdir(parents=True, exist_ok=True)
+        plot_path = scenario_dir / "comparison.png"
+
+        results, _, fault_windows = evaluate_scenario(
+            model_path=model_path,
+            yaml_path=str(yaml_path),
+            seed=seed,
+            plot_path=str(plot_path),
+            artifacts_dir=str(scenario_dir),
+            print_table=False,
+            show_plot=False,
+        )
+
+        by_label = {result["label"]: result for result in results}
+        summary_row = {
+            "scenario": scenario_name,
+            "yaml": str(yaml_path),
+            "fault_windows": "; ".join(
+                f"{name} {start:.0f}-{end:.0f}s" for name, start, end, _ in fault_windows
+            ),
+        }
+        for label, prefix in [
+            ("No Budget", "no_budget"),
+            ("Static Budget", "static_budget"),
+            ("RL Agent", "rl_agent"),
+        ]:
+            result = by_label[label]
+            summary_row[f"{prefix}_sr_fault_agg"] = result["sr_fault_agg"]
+            summary_row[f"{prefix}_load_amp"] = result["load_amp"]
+            summary_row[f"{prefix}_retry_eff"] = result["retry_eff"]
+            summary_row[f"{prefix}_avg_recovery"] = result["avg_recovery"]
+            summary_row[f"{prefix}_p50"] = result["p50"]
+            summary_row[f"{prefix}_p95"] = result["p95"]
+            summary_row[f"{prefix}_p99"] = result["p99"]
+        summary_rows.append(summary_row)
+
+        all_clients = sorted({
+            client_name
+            for result in results
+            for client_name in result["sr_fault_per_client"].keys()
+        })
+        for client_name in all_clients:
+            row = {
+                "scenario": scenario_name,
+                "client": client_name,
+            }
+            for label, prefix in [
+                ("No Budget", "no_budget"),
+                ("Static Budget", "static_budget"),
+                ("RL Agent", "rl_agent"),
+            ]:
+                result = by_label[label]
+                row[f"{prefix}_sr_fault"] = result["sr_fault_per_client"].get(client_name)
+                row[f"{prefix}_retry_share"] = result["retry_share"].get(client_name, 0.0)
+            per_client_rows.append(row)
+
+    pd.DataFrame(summary_rows).to_csv(out_dir / "benchmark_summary.csv", index=False)
+    pd.DataFrame(per_client_rows).to_csv(out_dir / "benchmark_per_client.csv", index=False)
+    return out_dir
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run RL benchmark suite")
+    parser.add_argument("--model", required=True, help="Path to saved PPO model (without .zip)")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory to save benchmark outputs (default: <model_dir>/benchmarks)",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    output_dir = run_benchmark_suite(args.model, output_dir=args.output_dir, seed=args.seed)
+    print(f"\nSaved benchmark suite to {output_dir}")

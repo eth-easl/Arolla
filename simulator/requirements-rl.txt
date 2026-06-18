@@ -1,0 +1,9 @@
+# Optional dependencies for the reinforcement-learning extension.
+# The core simulator does NOT need these; only the scripts under bin/rl/ do.
+#
+# Preferred install (uses the canonical "rl" extra in setup.py):
+#   pip install -e ".[rl]"
+#
+# This file is provided for pip-only / CI workflows and simply pulls in that
+# extra so version floors live in one place (setup.py).
+-e .[rl]

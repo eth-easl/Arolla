@@ -229,3 +229,14 @@ best_model/
 eval_logs/
 model-dashboard/
 *.pdf
+
+# Committed reference RL model (for out-of-the-box inference + benchmarks).
+# These negations re-include the shipped model despite the global *.zip / *.csv
+# rules and the simulator/trained_models/ ignore above.
+!simulator/models/
+!simulator/models/**
+
+# RL documentation diagrams. Keep benchmark/training plots ignored globally, but
+# allow curated images that are referenced from README files.
+!simulator/docs/rl/assets/
+!simulator/docs/rl/assets/*.png
