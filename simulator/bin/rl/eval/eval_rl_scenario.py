@@ -39,7 +39,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from simulator.config.loader import ConfigLoader
 from simulator.config.schema import ExperimentConfig
 from simulator.metrics.collector import Metrics
-from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.retry_controls import GlobalRetryBudget
 from simulator.rl.istio_retry_budget_env import MIN_RETRY_CONCURRENCY_MAP, PERCENT_MAP
 from simulator.rl.random_scenario_env import (
     RandomScenarioSimEnv,

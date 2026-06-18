@@ -5,7 +5,7 @@ from gymnasium import spaces
 from simulator.config.loader import ConfigLoader
 from simulator.utils.time import s_to_ns
 from simulator.config.schema import PartialFailureConfig, LoadSpikeConfig
-from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.retry_controls import GlobalRetryBudget
 
 
 def token_bucket_indices_from_physical(

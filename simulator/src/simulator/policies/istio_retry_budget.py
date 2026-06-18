@@ -63,9 +63,10 @@ class IstioRetryBudget(LoadLimiter):
         limit = self.concurrency_limit
         return float(self.active_retries / limit) if limit > 0 else 0.0
 
-    def add_result(self, success: bool, now: Optional[TimePoint] = None) -> None:
+    def add_result(self, success: bool, now: Optional[TimePoint] = None, **kwargs) -> None:
         # This limiter is concurrency-based, so completed attempts do not refill
-        # tokens or alter a moving window.
+        # tokens or alter a moving window. Extra keyword args (tenant_id,
+        # is_retry) are accepted for LoadLimiterMiddleware compatibility.
         pass
 
     def record_retry_admission(self, *, admitted: bool, now_ns: int) -> None:
@@ -95,3 +96,8 @@ class IstioRetryBudget(LoadLimiter):
 
     def next_delay(self, context: RetryContext) -> Tuple[bool, TimeDuration]:
         return self.active_retries < self.concurrency_limit, 0
+
+    def applies_pre_queue_admission(self, is_retry: bool) -> bool:
+        # Istio budgets gate retries at admission, mirroring the other
+        # server-side retry budgets (global/AIMD/Arolla).
+        return is_retry

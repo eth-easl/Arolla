@@ -90,7 +90,7 @@ run_app_tests() {
     done
     if [[ $fault_count -gt 0 ]]; then
         echo -e "${YELLOW}⚠${NC} Fault injection detected: ${fault_count}/10 requests returned non-200"
-        echo -e "${GREEN}✓${NC} This is expected when fault-injection.yaml is applied"
+        echo -e "${GREEN}✓${NC} This is expected when a fault manifest (e.g. faults/productcatalog-fault.yaml) is applied"
     else
         echo -e "${GREEN}✓${NC} All 10 requests returned 200 (no fault injection active)"
     fi

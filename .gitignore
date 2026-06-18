@@ -218,6 +218,14 @@ calibration/configs/
 calibration/data/
 calibration/reports/
 
+# From main
+paper_figures/
+*.pdf
+simulator/experiments/yaml/aimd_vs_sysname/
+simulator/experiments/yaml/sysname/
+.vscode/
+*.sweep-backup
+
 # RL training artifacts
 simulator/trained_models/
 tb_logs/
@@ -228,7 +236,6 @@ simulator/eval_logs/
 best_model/
 eval_logs/
 model-dashboard/
-*.pdf
 
 # Committed reference RL model (for out-of-the-box inference + benchmarks).
 # These negations re-include the shipped model despite the global *.zip / *.csv

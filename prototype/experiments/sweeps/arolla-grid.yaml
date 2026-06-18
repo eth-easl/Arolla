@@ -1,0 +1,51 @@
+# ==========================================================================
+# Arolla 3D parameter grid sensitivity (5 x 5 x 5 = 125 runs)
+# ==========================================================================
+#
+# Full cartesian product over Arolla's three token-bucket parameters.
+# Reveals interactions that OPAT sweeps cannot: e.g. whether the r-sweep
+# plateau is robust to capacity C, or whether t compensates for small C.
+#
+# Parameter values were chosen to cover 2 orders of magnitude on each axis
+# while keeping the grid small enough (125 runs) to finish overnight.
+#
+# Runtime estimate: 125 runs * ~7 min/run (30s warmup + 60s prefault +
+# 10s fault + 300s recovery + 10s cooldown + overhead) ~= 14-15 hours.
+#
+# Output: outputs/prototype/arolla-grid/<ts>/<profile>/arolla-grid/
+#         r=<r>_t=<t>_capacity=<C>/summary.csv
+#
+# Running:
+#   cd prototype/experiments
+#   ./run_grid.sh sweeps/arolla-grid.yaml
+#
+# ==========================================================================
+
+defaults: &defaults
+  client_profile: post-cart-stress-open
+  fault_manifest: cartservice-100pct
+  warmup: 30
+  prefault: 60
+  fault: 10
+  recovery: 120
+  cooldown: 10
+
+sweeps:
+  - name: arolla-grid
+    description: "Arolla 5x5x5 grid over (r, t, capacity)"
+    policies: [arolla]
+    parameters:
+      - name: r
+        location: policy_yaml
+        field: pluginConfig.r
+        values: [0.01, 0.05, 0.1, 0.5, 1.0]
+      - name: t
+        location: policy_yaml
+        field: pluginConfig.t
+        values: [0.0, 0.5, 1.0, 2.0, 10.0]
+      - name: capacity
+        location: policy_yaml
+        field: pluginConfig.capacity
+        values: [1, 5, 20, 50, 100]
+    base:
+      <<: *defaults

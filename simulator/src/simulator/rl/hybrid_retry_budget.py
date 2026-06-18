@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from simulator.core.types import TimePoint
-from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.retry_controls import GlobalRetryBudget
 
 
 @dataclass

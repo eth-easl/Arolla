@@ -5,7 +5,6 @@ Research project studying retry amplification and global retry budgets in micros
 ## Repository Layout
 
 - `simulator/` — Python discrete-event simulator (M/G/c/K queues, retry policies, AIMD budgets)
-- `calibration/` — Pipeline to extract parameters from live Istio clusters and validate simulator accuracy
 - `prototype/` — Kubernetes/Istio deployment scripts and manifests (Emulab infrastructure)
 - `outputs/` — Experiment results (CSV metrics, plots)
 
@@ -21,7 +20,7 @@ Research project studying retry amplification and global retry budgets in micros
 - Single experiment: `python simulator/bin/workflow.py simulator/experiments/yaml/<config>.yaml`
 - Parameter sweep: `python simulator/bin/run_sweep.py simulator/experiments/yaml/<config>.yaml`
 - Batch run: `python simulator/bin/run_batch.py simulator/experiments/yaml/<dir>/`
-- Calibration pipeline: `cd calibration && ./pipeline.sh --wait 60 --duration 120`
+- Prototype experiments: `prototype/experiments/paper.sh` (dispatcher), `run_sweep.sh`, `run_grid.sh`
 
 ## Experiment Configs
 
@@ -43,7 +42,6 @@ Experiments are defined in YAML under `simulator/experiments/yaml/`. Configs spe
 ## Important Context
 
 - This is active research: multiple experiment branches exist (dev/*, prototype/*, simulator/*)
-- The simulator validates against real Kubernetes/Istio deployments on Emulab
-- Calibration uses lognormal fits from Envoy sidecar stats
-- Do NOT delete or overwrite files in `outputs/` or `calibration/data/` without asking — these may contain hard-to-reproduce experimental results
+- The simulator is cross-checked against real Kubernetes/Istio deployments on Emulab
+- Do NOT delete or overwrite files in `outputs/` without asking — these may contain hard-to-reproduce experimental results
 - When modifying simulator core (engine, runtime, policies), always run the test suite afterward

@@ -293,6 +293,4 @@ python -m pytest tests/ -v
 
 ## Documentation
 
-- [Queue Theory & Configuration](docs/queue_explained.md) - M/G/c/K model explanation
-- [Policy Analysis & Results](docs/policy_analysis.md) - Retry policy comparison and AIMD evaluation
 - [Reinforcement-learning extension](docs/rl/README.md) - RL retry-budget controller (training, inference, benchmarking)

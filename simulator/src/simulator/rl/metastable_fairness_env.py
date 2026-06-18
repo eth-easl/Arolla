@@ -5,7 +5,7 @@ from gymnasium import spaces
 from simulator.config.loader import ConfigLoader
 from simulator.config.schema import LoadSpikeConfig, PartialFailureConfig
 from simulator.core.models import RootRequest
-from simulator.policies.server_retry_budget import GlobalRetryBudget
+from simulator.policies.retry_controls import GlobalRetryBudget
 from simulator.rl.random_scenario_env import (
     action_transition_metrics,
     bucket_fill_ratio,

@@ -1,0 +1,146 @@
+# Post-mortem analysis - Scenario 3
+# "The Thundering Herd"
+#
+# Scenario description:
+# There is no failure, but at some point, a load spike happens (e.g. because
+# of a click day, or new feature release), and the provisioned hardware resources
+# cannot handle this correctly.
+#
+# Some real-life examples:
+# - GitHub, 2018-10-21, https://blog.github.com/2018-10-30-oct21-post-incident-analysis/
+# - Discord, 2017-03-20, https://status.discordapp.com/incidents/dj3l6lw926kl
+# - Amazon, 2011-04-29, https://aws.amazon.com/message/65648/
+#
+# How it is reproduced in the simulator:
+# - There are 5 identical services, one per retry policy (no retry, fixed retry, jittered, circuit breaker, retry budget).
+# - 20 client replicas target each service, each sending 30 rps (total 600 rps per service).
+# - In normal conditions, the utilization rate ρ is well below 1.
+# - At t=20s, a total failure (p_fail: 100%) hits all services for 3 seconds (until t=23s),
+#   simulating a brief but complete outage (e.g. a network interruption, a CPU lock, a DNS blip, or a restart).
+# - During the outage, all in-flight requests fail. After t=23s, services are fully healthy again.
+# - The 20 client replicas per service act as a "thundering herd": when the service recovers,
+#   all clients that accumulated failed requests retry simultaneously, creating a burst of traffic
+#   that can overwhelm the now-healthy service and prevent recovery.
+#
+
+name: s03__thundering_herd
+seed: 43232
+
+services:
+  - name: svc-no-retry
+    latency: &default_latency
+      median_ms: 15
+      lognorm_sigma: 0.5
+    workers: &default_workers 12
+    queue_capacity: &default_queue 1000
+    partial_failures: &default_partial_failures
+      - type: partial_failure
+        start_s: 20
+        end_s: 23
+        p_fail: 1
+
+  - name: svc-retry
+    latency: *default_latency
+    workers: *default_workers
+    queue_capacity: *default_queue
+    partial_failures: *default_partial_failures
+
+  - name: svc-jittered
+    latency: *default_latency
+    workers: *default_workers
+    queue_capacity: *default_queue
+    partial_failures: *default_partial_failures
+
+  - name: svc-cb-target
+    latency: *default_latency
+    workers: *default_workers
+    queue_capacity: *default_queue
+    partial_failures: *default_partial_failures
+
+  - name: svc-budget-target
+    latency: *default_latency
+    workers: *default_workers
+    queue_capacity: *default_queue
+    partial_failures: *default_partial_failures
+
+clients:
+  - name: no_retries
+    target_service: svc-no-retry
+    replicas: 20
+    retry:
+      type: fixed
+      max_attempts: 1
+      delay_ms: 0
+    timeout: &default_timeout
+      attempt_ms: 500
+    workload: &default_workload
+      base_rps: 30
+      duration_s: 70
+      rng_seed: 1
+
+  - name: three_retries
+    target_service: svc-retry
+    replicas: 20
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout: *default_timeout
+    workload: *default_workload
+
+  - name: jittered
+    target_service: svc-jittered
+    replicas: 20
+    retry:
+      type: jittered
+      max_attempts: 4
+      initial_delay_ms: 500
+      max_delay_ms: 2000
+      jitter_mode: full
+    timeout: *default_timeout
+    workload: *default_workload
+
+  - name: circuit_breaker
+    target_service: svc-cb-target
+    replicas: 20
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    circuit_breaker:
+      type: time_based
+      failure_threshold: 0.1
+      window_duration_ms: 1000
+      min_requests: 20
+      half_open_delay_ms: 500
+    timeout: *default_timeout
+    workload: *default_workload
+
+  - name: retry_budget
+    target_service: svc-budget-target
+    replicas: 20
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    retry_budget:
+      budget_ratio: 0.1
+      max_retries: 30
+    workload: *default_workload
+
+# Output configuration
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
+plotting_script: plotting/plot_all.py
+plotting_script_args:
+  smoothing_window: 3
+  font_size: 24
+  tick_size: 22
+  line_width: 3.0
+  no_legend_frame: true
+  legend_size: 18
+  figsize: "12,6"
+  legend_loc: "center left"
+  legend_bbox: "1.02, 0.5"
+  legend_order: "no_retries,three_retries,exponential_backoff_jitter,circuit_breaker,retry_budget"

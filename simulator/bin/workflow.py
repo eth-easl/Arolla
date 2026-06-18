@@ -17,10 +17,14 @@ script_dir = Path(__file__).parent.resolve()
 src_dir = script_dir.parent / "src"
 sys.path.append(str(src_dir))
 
+# Default output base: <repo-root>/outputs/simulation/ regardless of cwd.
+# workflow.py lives at <repo-root>/simulator/bin/workflow.py.
+DEFAULT_OUTPUT_BASE = str(script_dir.parent.parent / "outputs" / "simulation")
+
 from simulator.config.loader import ConfigLoader
 
 
-def run_workflow(yaml_file: str, output_base: str = "results", 
+def run_workflow(yaml_file: str, output_base: str = DEFAULT_OUTPUT_BASE,
                  verbose: bool = False, plot: bool = True,
                  time_range: str = None, plotting_script: str = None,
                  use_timestamp_subdir: bool = True):
@@ -304,7 +308,7 @@ def run_workflow(yaml_file: str, output_base: str = "results",
     return 0
 
 
-def run_batch(directory: str, max_workers: int = 4, output_base: str = "results", **kwargs):
+def run_batch(directory: str, max_workers: int = 4, output_base: str = DEFAULT_OUTPUT_BASE, **kwargs):
     """Run workflow for all YAMLs in directory."""
     dir_path = Path(directory)
     yamls = sorted(list(dir_path.glob("*.yaml")))
@@ -368,8 +372,8 @@ Examples:
     
     parser.add_argument('input', 
                        help='YAML file or Directory containing YAMLs')
-    parser.add_argument('-o', '--output', default='results',
-                       help='Base output directory (default: results/)')
+    parser.add_argument('-o', '--output', default=DEFAULT_OUTPUT_BASE,
+                       help=f'Base output directory (default: {DEFAULT_OUTPUT_BASE})')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose simulation output')
     parser.add_argument('--no-plot', action='store_true',

@@ -19,8 +19,7 @@ from simulator.core.types import DropReason
 from simulator.metrics.live_buffer import LiveMetricsBuffer
 from simulator.middleware.base import AttemptContext
 from simulator.middleware.load_limiter import LoadLimiterMiddleware
-from simulator.policies.server_retry_budget import GlobalRetryBudget
-from simulator.policies.retry import FixedBackoffRetryPolicy
+from simulator.policies.retry_controls import GlobalRetryBudget
 from simulator.rl.metastable_fairness_env import metastable_reward
 from simulator.rl.random_scenario_env import (
     build_observation_vector,
@@ -206,27 +205,28 @@ def test_submit_request_prechecks_only_client_managed_retries():
         is_retry=True,
     )
 
-    service_retry_limiter = CountingGlobalRetryBudget()
-    service_retry_service = ServiceRuntime(
+    # Initial (non-retry) requests are never pre-checked: a retry budget only
+    # gates retries, so applies_pre_queue_admission(is_retry=False) is False.
+    initial_request_limiter = CountingGlobalRetryBudget()
+    initial_request_service = ServiceRuntime(
         cfg=ServiceConfig(
-            name="service-retry-svc",
+            name="initial-request-svc",
             latency_median=ms_to_ns(10),
             latency_lognorm_sigma=0.1,
             workers=1,
-            load_limiter=service_retry_limiter,
-            retry=FixedBackoffRetryPolicy(max_attempts=2, delay=ms_to_ns(1)),
+            load_limiter=initial_request_limiter,
         )
     ).bind(seed=1)
 
-    service_retry_service.submit_request(
+    initial_request_service.submit_request(
         sim,
         on_attempt_done,
         on_root_done,
-        is_retry=True,
+        is_retry=False,
     )
 
     assert client_retry_limiter.calls == 1
-    assert service_retry_limiter.calls == 0
+    assert initial_request_limiter.calls == 0
 
 
 def test_budget_denial_is_recorded_in_live_buffer():
@@ -245,7 +245,8 @@ def test_budget_denial_is_recorded_in_live_buffer():
             workers=1,
             load_limiter=limiter,
         )
-    ).bind(seed=1, enable_live_buffer=True)
+    ).bind(seed=1)
+    service.enable_live_buffer()
 
     sim = Simulator(seed=1)
 

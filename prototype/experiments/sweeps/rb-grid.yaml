@@ -1,0 +1,48 @@
+# ==========================================================================
+# Envoy retry-budget 2D parameter grid sensitivity (5 x 5 = 25 runs)
+# ==========================================================================
+#
+# Full cartesian product over the retry-budget's two parameters. Only
+# 25 runs total since there are only two knobs.
+#
+# Expected interaction: at high load (1200 rps), budget_percent dominates
+# and min_retry_concurrency is irrelevant (10% of 1200 = 120 >> min=50).
+# The min floor only matters at low active-request counts, e.g. during
+# the recovery tail when traffic has drained. The grid lets us observe
+# this interaction directly.
+#
+# Runtime estimate: 25 * ~7 min ~= 3 hours.
+#
+# Output: outputs/prototype/rb-grid/<ts>/<profile>/rb-grid/
+#         budget_percent=<v>_min_retry_concurrency=<v>/summary.csv
+#
+# Running:
+#   cd prototype/experiments
+#   ./run_grid.sh sweeps/rb-grid.yaml
+#
+# ==========================================================================
+
+defaults: &defaults
+  client_profile: post-cart-stress-open
+  fault_manifest: cartservice-100pct
+  warmup: 30
+  prefault: 60
+  fault: 10
+  recovery: 120
+  cooldown: 10
+
+sweeps:
+  - name: rb-grid
+    description: "Retry budget 5x5 grid over (budget_percent, min_retry_concurrency)"
+    policies: [envoy-retry-budget]
+    parameters:
+      - name: budget_percent
+        location: policy_yaml
+        field: trafficPolicy.retryBudget.percent
+        values: [0.01, 0.1, 1.0, 2.0, 5.0, 10.0, 20.0]
+      - name: min_retry_concurrency
+        location: policy_yaml
+        field: trafficPolicy.retryBudget.minRetryConcurrency
+        values: [1, 2, 3, 4, 5]
+    base:
+      <<: *defaults

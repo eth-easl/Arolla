@@ -1,0 +1,21 @@
+defaults: &defaults
+  client_profile: post-cart-stress-open
+  fault_manifest: cartservice-100pct
+  warmup: 30
+  prefault: 60
+  fault: 10
+  recovery: 100
+  cooldown: 10
+
+sweeps:
+
+  - name: rps-sweep
+    description: "Vary offered load (rate_rps) across all policies"
+    policies: [no-control, circuit-breaker, envoy-retry-budget, arolla]
+    parameter:
+      name: rate_rps
+      location: client_profile
+      field: rate_rps
+      values: [600, 800, 1000, 1200, 1400, 1600, 1800]
+    base:
+      <<: *defaults

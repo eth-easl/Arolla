@@ -1,0 +1,15 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: slack-clone-retry-aggressive
+spec:
+  hosts:
+    - slack-clone-app-svc
+  http:
+    - route:
+        - destination:
+            host: slack-clone-app-svc
+      retries:
+        attempts: 50
+        perTryTimeout: 100ms
+        retryOn: "5xx,connect-failure,gateway-error,deadline-exceeded"

@@ -1,0 +1,39 @@
+# Arolla WasmPlugin attached to the ingress gateway.
+#
+# The main arolla.yaml targets sidecars (mesh retries). This companion
+# targets the gateway so arolla can reject client-level retries BEFORE
+# they establish a TCP connection to the frontend sidecar. Without this,
+# 429 rejections at the frontend sidecar still consume a gateway→frontend
+# connection, and at high retry volume (e.g. 4× amplification) the
+# connection overhead alone saturates the gateway.
+#
+# Uses targetRefs (Istio ≥ 1.22 / Gateway API) to attach specifically
+# to the boutique-gateway, leaving other gateways (if any) unaffected.
+#
+# The gateway Envoy does NOT strip X-Attempt-Number (custom header),
+# so arolla reads client retries via attempt_header_secondary. Mesh
+# retries never pass through the gateway, so attempt_header
+# (x-envoy-attempt-count) is unused here but kept for consistency.
+#
+# __MASTER_IP__ is substituted by deploy-policy.sh at apply time.
+---
+apiVersion: extensions.istio.io/v1alpha1
+kind: WasmPlugin
+metadata:
+  name: arolla-gateway
+  namespace: online-boutique
+spec:
+  targetRefs:
+    - kind: Gateway
+      group: gateway.networking.k8s.io
+      name: boutique-gateway
+  phase: AUTHN
+  url: http://__MASTER_IP__:8000/arolla_filter.wasm
+  failStrategy: FAIL_CLOSE
+  pluginConfig:
+    r: 0.1
+    capacity: 20.0
+    t: 1.0
+    attempt_header: "x-envoy-attempt-count"
+    attempt_header_secondary: "X-Attempt-Number"
+    reject_status: 429

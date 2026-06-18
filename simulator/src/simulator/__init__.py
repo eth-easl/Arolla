@@ -22,12 +22,19 @@ from .middleware.retry import RetryMiddleware, NoRetryMiddleware
 from .middleware.load_limiter import LoadLimiterMiddleware
 from .middleware.metrics import MetricsMiddleware, MetricsSink
 
-# Configuration
-from .config.schema import ExperimentConfig
-from .config.loader import ConfigLoader
+# Configuration (optional dependency: pydantic)
+try:
+    from .config.schema import ExperimentConfig
+    from .config.loader import ConfigLoader
+except ModuleNotFoundError:  # pragma: no cover - import-time fallback for partial installs
+    ExperimentConfig = None
+    ConfigLoader = None
 
-# Metrics
-from .metrics.collector import Metrics
+# Metrics (optional deps: numpy/pandas)
+try:
+    from .metrics.collector import Metrics
+except ModuleNotFoundError:  # pragma: no cover - import-time fallback for partial installs
+    Metrics = None
 
 # Utilities
 from .utils.time import s_to_ns, ms_to_ns, ns_to_s, ns_to_ms
