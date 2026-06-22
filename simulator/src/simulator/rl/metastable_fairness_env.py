@@ -669,10 +669,18 @@ class MetastableFairnessSimEnv(gym.Env):
 
     def _phase_flags(self, now_ns: int) -> tuple[bool, bool]:
         now_s = now_ns / 1e9
-        active = any(start_s <= now_s <= end_s for _, start_s, end_s in self.fault_windows)
-        if active or not self.fault_windows:
+        # Metastable fault/recovery phases follow service partial failures only.
+        # Load spikes are separate stress events and must not suppress the
+        # post-fault recovery window used by the reward function.
+        failure_windows = [
+            (name, start_s, end_s)
+            for name, start_s, end_s in self.fault_windows
+            if name == "Partial Failure"
+        ]
+        active = any(start_s <= now_s <= end_s for _, start_s, end_s in failure_windows)
+        if active or not failure_windows:
             return active, False
-        past_ends = [end_s for _, _, end_s in self.fault_windows if end_s <= now_s]
+        past_ends = [end_s for _, _, end_s in failure_windows if end_s <= now_s]
         if not past_ends:
             return False, False
         recent_end = max(past_ends)
