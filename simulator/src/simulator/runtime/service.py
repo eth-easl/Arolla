@@ -157,6 +157,21 @@ class ServiceRuntime(
     def live_buffer(self) -> Optional[LiveMetricsBuffer]:
         return self._live_buffer
 
+    @property
+    def _rl_retry_tracking_active(self) -> bool:
+        """Whether RL retry telemetry/control is engaged for this service.
+
+        When False (the default for normal, non-RL runs) the service ignores the
+        caller-supplied ``external_is_retry`` flag so that retry classification —
+        and therefore every pre-existing load-limiter admission decision — is
+        identical to a run without the RL extension. It only turns True when an RL
+        env has enabled the live buffer or when an Istio-style retry budget (a new
+        feature, not a pre-existing code path) is configured.
+        """
+        return self._live_buffer is not None or isinstance(
+            self.cfg.load_limiter, IstioRetryBudget
+        )
+
     def enable_live_buffer(self) -> None:
         """Activate the live metrics buffer (used by RL envs). No-op if already active."""
         if self._live_buffer is None:

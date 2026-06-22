@@ -46,7 +46,10 @@ class _ServiceMiddlewareMixin:
             drop_reason=drop_reason,
             queue_size=queue_size,
             attempt_num=ctx.attempt,
-            is_retry=(ctx.external_is_retry or ctx.attempt > 1),
+            is_retry=(
+                (ctx.external_is_retry and self._rl_retry_tracking_active)
+                or ctx.attempt > 1
+            ),
         )
 
         ctx.on_attempt_done(

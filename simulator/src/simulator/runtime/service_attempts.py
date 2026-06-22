@@ -97,12 +97,15 @@ class _ServiceAttemptMixin:
         on_done = partial(
             self._on_single_attempt_done, sim, ctx, begin_time, attempt_deadline
         )
-        # RL: a client-managed retry stays a retry across its whole lifecycle.
+        # RL: a client-managed retry stays a retry across its whole lifecycle,
+        # but only when RL retry tracking is active. For normal runs this falls
+        # back to the original (attempt > 1) classification.
+        external_retry = ctx.external_is_retry and self._rl_retry_tracking_active
         self.submit_attempt(
             sim,
             on_done,
             attempt_deadline=attempt_deadline,
-            is_retry=(ctx.external_is_retry or ctx.attempt > 1),
+            is_retry=(external_retry or ctx.attempt > 1),
             retry_budget_remaining=ctx.retry_budget_remaining,
             tenant_id=ctx.tenant_id,
         )
