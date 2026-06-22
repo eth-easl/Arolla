@@ -1,0 +1,92 @@
+name: benchmark_metastable_recovery_with_spike_fairness
+seed: 42
+
+# Non-stationary benchmark designed so that no single static retry-budget
+# setting can be simultaneously optimal across all phases:
+#
+#   phase 1  (0-20s)   calm / baseline load
+#   phase 2  (20-35s)  partial failure  -> want TIGHT budget (throttle retries)
+#   phase 3  (35-50s)  recovery / calm  -> want moderate budget
+#   phase 4  (50-65s)  3x load spike    -> want LOOSE budget (admit legit load)
+#   phase 5  (65-90s)  cooldown
+#
+# The fault phase wants fewer retries (retrying a failing service just amplifies
+# load); the spike phase wants more bucket headroom so legitimate transient
+# retries aren't starved. These two phases are adjacent but point in opposite
+# directions, so an optimally-tuned static bucket must compromise on both.
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 60
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 1500
+    timeout:
+      attempt_ms: 192
+    # A "reasonable default" static that a deployer might pick if they didn't
+    # know the load profile ahead of time. Lives in the RL's action grid.
+    global_retry_budget:
+      target_rps: 30
+      max_burst: 20
+    partial_failures:
+      - type: partial_failure
+        start_s: 20
+        end_s: 35
+        p_fail: 0.5
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 90
+      duration_s: 90
+      load_spikes:
+        - type: load_spike
+          start_s: 50
+          end_s: 65
+          rps_multiplier: 3.0
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 60
+      duration_s: 90
+      load_spikes:
+        - type: load_spike
+          start_s: 50
+          end_s: 65
+          rps_multiplier: 2.6
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 4
+      delay_ms: 0
+    timeout:
+      attempt_ms: 192
+    workload:
+      base_rps: 38
+      duration_s: 90
+      load_spikes:
+        - type: load_spike
+          start_s: 50
+          end_s: 65
+          rps_multiplier: 2.2
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

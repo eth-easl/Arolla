@@ -37,6 +37,21 @@ class _ServiceMiddlewareMixin:
                 )
             )
 
+        # RL: mirror the finished attempt into the live buffer (no-op unless an RL
+        # env enabled it). A client-managed retry stays a retry for telemetry.
+        self._record_live_metrics(
+            timestamp_ns=end_time,
+            latency_ns=svc_time,
+            success=success,
+            drop_reason=drop_reason,
+            queue_size=queue_size,
+            attempt_num=ctx.attempt,
+            is_retry=(
+                (ctx.external_is_retry and self._rl_retry_tracking_active)
+                or ctx.attempt > 1
+            ),
+        )
+
         ctx.on_attempt_done(
             success,
             svc_time,
@@ -65,6 +80,9 @@ class _ServiceMiddlewareMixin:
 
         if self._middleware_chain is None:
             self._middleware_chain = self._build_middleware_chain()
+
+        # RL: keep Istio-style budget concurrency fresh before the chain decides.
+        self._refresh_retry_budget_runtime_state()
 
         chain = self._middleware_chain
 

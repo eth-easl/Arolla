@@ -124,6 +124,12 @@ class GlobalRetryBudgetConfig(BaseModel):
     max_burst: int = Field(default=10, ge=1, description="Maximum burst of retries allowed at once")
 
 
+class IstioRetryBudgetConfig(BaseModel):
+    """Configuration for server-side Istio/Envoy retry budget"""
+    percent: float = Field(default=20.0, ge=0, description="Retry concurrency as percent of active + pending requests")
+    min_retry_concurrency: int = Field(default=3, ge=0, description="Minimum retry concurrency floor")
+
+
 class AIMDGlobalRetryBudgetConfig(BaseModel):
     """Configuration for AIMD adaptive global retry budget"""
     min_rps: int = Field(ge=1, description="Minimum RPS floor")
@@ -241,6 +247,7 @@ class ServiceConfigYAML(BaseModel):
     rate_limiter: Optional[RateLimiterConfig] = None
     retry_budget: Optional[RetryBudgetConfig] = None
     global_retry_budget: Optional[GlobalRetryBudgetConfig] = None
+    istio_retry_budget: Optional[IstioRetryBudgetConfig] = None
     aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig] = None
     arolla_retry_budget: Optional[ArollaRetryBudgetConfig] = None
 

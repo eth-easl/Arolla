@@ -7,6 +7,7 @@ from typing import Callable, Dict, Optional
 
 from simulator.core.engine import Simulator
 from simulator.core.types import DropReason, TimeDuration, TimePoint
+from simulator.policies.istio_retry_budget import IstioRetryBudget
 from simulator.policies.retry import RetryContext
 
 
@@ -27,15 +28,38 @@ class _ServiceAttemptMixin:
         retry_budget_remaining: Optional[list] = None,
         tenant_id: Optional[str] = None,
     ):
-        if self.cfg.load_limiter is not None:
-            should_check = self.cfg.load_limiter.applies_pre_queue_admission(is_retry)
+        limiter = self.cfg.load_limiter
+        if limiter is not None:
+            should_check = limiter.applies_pre_queue_admission(is_retry)
             if should_check:
                 tenant = tenant_id or '__global__'
                 self._admission_requested[tenant] += 1
 
+                # RL: Istio-style budgets decide based on live concurrency, so
+                # refresh active/pending/retry counters before asking.
+                if isinstance(limiter, IstioRetryBudget):
+                    self._refresh_retry_budget_runtime_state()
+
                 check_ctx = RetryContext(attempt=1, now=sim.timestep, tenant_id=tenant_id)
-                allowed, _ = self.cfg.load_limiter.next_delay(check_ctx)
+                allowed, _ = limiter.next_delay(check_ctx)
+
+                # RL: record the admission outcome for budget_reject_rate telemetry.
+                if isinstance(limiter, IstioRetryBudget):
+                    limiter.record_retry_admission(admitted=allowed, now_ns=sim.timestep)
+
                 if not allowed:
+                    # RL: mirror the rejected retry into the live buffer (no-op
+                    # unless an RL env enabled it). The static event log is
+                    # intentionally left untouched.
+                    self._record_live_metrics(
+                        timestamp_ns=sim.timestep,
+                        latency_ns=0,
+                        success=False,
+                        drop_reason=DropReason.SERVER_FAILURE,
+                        queue_size=len(self.queue),
+                        attempt_num=2 if is_retry else 1,
+                        is_retry=is_retry,
+                    )
                     on_attempt_done(
                         False,
                         0,
@@ -56,6 +80,7 @@ class _ServiceAttemptMixin:
             on_root_done=on_root_done,
             retry_budget_remaining=retry_budget_remaining,
             tenant_id=tenant_id,
+            external_is_retry=is_retry,
         )
         self._start_attempt(sim, ctx)
 
@@ -72,11 +97,15 @@ class _ServiceAttemptMixin:
         on_done = partial(
             self._on_single_attempt_done, sim, ctx, begin_time, attempt_deadline
         )
+        # RL: a client-managed retry stays a retry across its whole lifecycle,
+        # but only when RL retry tracking is active. For normal runs this falls
+        # back to the original (attempt > 1) classification.
+        external_retry = ctx.external_is_retry and self._rl_retry_tracking_active
         self.submit_attempt(
             sim,
             on_done,
             attempt_deadline=attempt_deadline,
-            is_retry=(ctx.attempt > 1),
+            is_retry=(external_retry or ctx.attempt > 1),
             retry_budget_remaining=ctx.retry_budget_remaining,
             tenant_id=ctx.tenant_id,
         )
@@ -84,6 +113,8 @@ class _ServiceAttemptMixin:
     def _start_next(self, sim: Simulator):
         while self.in_flight < self.cfg.workers and self.queue:
             item = heapq.heappop(self.queue)
+            if item.is_retry:
+                self.queued_retries = max(0, self.queued_retries - 1)
             item.start()
 
     def submit_attempt(
@@ -123,8 +154,10 @@ class _ServiceAttemptMixin:
 
         heapq.heappush(
             self.queue,
-            QItem(enqueued_at=sim.timestep, seq=seq, start=start_cb),
+            QItem(enqueued_at=sim.timestep, seq=seq, start=start_cb, is_retry=is_retry),
         )
+        if is_retry:
+            self.queued_retries += 1
 
     def _begin_service(
         self,
@@ -140,6 +173,8 @@ class _ServiceAttemptMixin:
             return
 
         self.in_flight += 1
+        if is_retry:
+            self.in_flight_retries += 1
 
         if self.dependencies:
             start_t = sim.timestep
@@ -148,6 +183,8 @@ class _ServiceAttemptMixin:
                 if not all_success:
                     total_time = sim.timestep - start_t
                     self.in_flight -= 1
+                    if is_retry:
+                        self.in_flight_retries = max(0, self.in_flight_retries - 1)
                     on_done(False, total_time, worst_reason, len(self.queue))
                     self._start_next(sim)
                     return
@@ -167,6 +204,8 @@ class _ServiceAttemptMixin:
                     )
 
                     self.in_flight -= 1
+                    if is_retry:
+                        self.in_flight_retries = max(0, self.in_flight_retries - 1)
                     if timed_out:
                         on_done(False, total_time, DropReason.DEADLINE, len(self.queue))
                     elif local_failed:
@@ -211,7 +250,10 @@ class _ServiceAttemptMixin:
             else sim.timestep + service_time
         )
         sim.schedule(
-            expiry, partial(self._finish_service, sim, on_done, service_time, attempt_deadline)
+            expiry,
+            partial(
+                self._finish_service, sim, on_done, service_time, attempt_deadline, is_retry
+            ),
         )
 
     def _finish_service(
@@ -220,8 +262,11 @@ class _ServiceAttemptMixin:
         on_done: Callable[[bool, TimeDuration, DropReason, int], None],
         service_time: TimeDuration,
         attempt_deadline: Optional[TimePoint],
+        is_retry: bool = False,
     ):
         self.in_flight -= 1
+        if is_retry:
+            self.in_flight_retries = max(0, self.in_flight_retries - 1)
 
         if attempt_deadline is not None and sim.timestep >= attempt_deadline:
             on_done(False, service_time, DropReason.DEADLINE, len(self.queue))

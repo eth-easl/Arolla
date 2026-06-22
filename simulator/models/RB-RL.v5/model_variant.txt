@@ -1,0 +1,9 @@
+model_family=istio_retry_budget_metastable
+env_class=IstioRetryBudgetMetastableEnv
+action_type=absolute_discrete_selection
+scenario_profile=metastable_fairness
+server_side_budget=istio_retry_budget
+knobs=percent,minRetryConcurrency
+decision_interval_s=5.0
+observation_window_s=10.0
+delta_window_s=5.0

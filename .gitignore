@@ -214,9 +214,36 @@ outputs/
 *.DS_Store
 results*/
 .k8s-deploy-logs/
+calibration/configs/
+calibration/data/
+calibration/reports/
+
+# From main
 paper_figures/
 *.pdf
 simulator/experiments/yaml/aimd_vs_sysname/
 simulator/experiments/yaml/sysname/
 .vscode/
 *.sweep-backup
+
+# RL training artifacts
+simulator/trained_models/
+tb_logs/
+*.zip
+fault_events.json
+simulator/vecnormalize_stats.pkl
+simulator/eval_logs/
+best_model/
+eval_logs/
+model-dashboard/
+
+# Committed reference RL model (for out-of-the-box inference + benchmarks).
+# These negations re-include the shipped model despite the global *.zip / *.csv
+# rules and the simulator/trained_models/ ignore above.
+!simulator/models/
+!simulator/models/**
+
+# RL documentation diagrams. Keep benchmark/training plots ignored globally, but
+# allow curated images that are referenced from README files.
+!simulator/docs/rl/assets/
+!simulator/docs/rl/assets/*.png

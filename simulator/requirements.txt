@@ -1,4 +1,6 @@
-# Python 3.12 compatible
+# Core simulator dependencies (Python 3.10-3.12 recommended).
+# The optional RL extension has its own deps; see requirements-rl.txt
+# or install with: pip install -e ".[rl]"
 matplotlib>=3.7
 pandas>=2.0
 numpy>=1.24

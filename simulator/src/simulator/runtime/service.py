@@ -17,6 +17,13 @@ from .service_dependencies import _ServiceDependencyMixin
 from .service_middleware import _ServiceMiddlewareMixin
 from .service_timing import _ServiceTimingMixin
 
+# RL extension: live telemetry + runtime controls consumed by the RL environments.
+# These are inert unless an RL env enables the live buffer or mutates a policy.
+from simulator.metrics.live_buffer import LiveMetricsBuffer
+from simulator.policies.istio_retry_budget import IstioRetryBudget
+from simulator.policies.retry import FixedBackoffRetryPolicy
+from simulator.policies.retry_controls import GlobalRetryBudget, LimiterRetryBudgetPolicy
+
 
 @dataclass(frozen=True)
 class ServiceConfig:
@@ -49,6 +56,9 @@ class QItem:
     enqueued_at: TimePoint
     seq: int
     start: Callable[[], None] = field(compare=False)
+    # RL: track whether the queued attempt is a retry so the service can expose
+    # retry concurrency to Istio-style budgets.
+    is_retry: bool = field(default=False, compare=False)
 
 
 @dataclass
@@ -61,6 +71,9 @@ class _SrvRetryCtx:
     on_root_done: Callable[[], None]
     retry_budget_remaining: Optional[List[int]] = None  # Arolla Level 2: shared mutable [B]
     tenant_id: Optional[str] = None
+    # RL: a caller-supplied (client-managed) retry stays a "retry" for its whole
+    # service-side lifecycle, even though its local attempt counter starts at 1.
+    external_is_retry: bool = False
 
 
 @dataclass
@@ -72,6 +85,9 @@ class ServiceRuntime(
 ):
     cfg: ServiceConfig
     in_flight: int = 0
+    # RL: retry concurrency counters used to drive Istio-style retry budgets.
+    in_flight_retries: int = 0
+    queued_retries: int = 0
     queue: List[QItem] = field(default_factory=list)
     _seq: int = 0
 
@@ -87,6 +103,9 @@ class ServiceRuntime(
     _events: List[tuple] = field(default_factory=list, init=False, repr=False)
     _record_events: bool = field(default=False, init=False, repr=False)
 
+    # RL: per-service live metrics buffer for real-time aggregation (off by default).
+    _live_buffer: Optional[LiveMetricsBuffer] = field(default=None, init=False, repr=False)
+
     @property
     def dependency(self) -> Optional["ServiceRuntime"]:
         return self.dependencies[0] if self.dependencies else None
@@ -95,11 +114,15 @@ class ServiceRuntime(
         from collections import defaultdict
 
         self.in_flight = 0
+        self.in_flight_retries = 0
+        self.queued_retries = 0
         self.queue.clear()
         self._seq = 0
         self._middleware_chain = self._build_middleware_chain()
         self._record_events = record_events
         self._events = []
+        # RL: live buffer starts disabled; RL envs call enable_live_buffer() after bind.
+        self._live_buffer = None
         self._rng = random.Random(seed if seed is not None else 0)
         # Pre-queue admission counters (used by _ServiceAttemptMixin.submit_request)
         self._admission_requested = defaultdict(int)
@@ -126,3 +149,119 @@ class ServiceRuntime(
                 'admitted': self._admission_admitted.get(tenant, 0),
             }
         return result
+
+    # ------------------------------------------------------------------
+    # RL extension: live telemetry
+    # ------------------------------------------------------------------
+    @property
+    def live_buffer(self) -> Optional[LiveMetricsBuffer]:
+        return self._live_buffer
+
+    @property
+    def _rl_retry_tracking_active(self) -> bool:
+        """Whether RL retry telemetry/control is engaged for this service.
+
+        When False (the default for normal, non-RL runs) the service ignores the
+        caller-supplied ``external_is_retry`` flag so that retry classification —
+        and therefore every pre-existing load-limiter admission decision — is
+        identical to a run without the RL extension. It only turns True when an RL
+        env has enabled the live buffer or when an Istio-style retry budget (a new
+        feature, not a pre-existing code path) is configured.
+        """
+        return self._live_buffer is not None or isinstance(
+            self.cfg.load_limiter, IstioRetryBudget
+        )
+
+    def enable_live_buffer(self) -> None:
+        """Activate the live metrics buffer (used by RL envs). No-op if already active."""
+        if self._live_buffer is None:
+            self._live_buffer = LiveMetricsBuffer()
+
+    def _record_live_metrics(
+        self,
+        timestamp_ns: TimePoint,
+        latency_ns: TimeDuration,
+        success: bool,
+        drop_reason: DropReason,
+        queue_size: int,
+        attempt_num: int,
+        is_retry: bool,
+    ) -> None:
+        """Record a finished or admission-rejected attempt into the live buffer.
+
+        This is RL-only telemetry and is independent of the static ``_events``
+        log consumed by the metrics collector.
+        """
+        if self._live_buffer is not None:
+            self._live_buffer.record_event(
+                timestamp_ns,
+                latency_ns,
+                success,
+                drop_reason,
+                queue_size,
+                attempt_num,
+                is_retry,
+            )
+
+    def _refresh_retry_budget_runtime_state(self) -> None:
+        """Expose current service concurrency to Istio-style retry budgets."""
+        limiter = self.cfg.load_limiter
+        if isinstance(limiter, IstioRetryBudget):
+            limiter.update_runtime_state(
+                active_requests=self.in_flight,
+                pending_requests=len(self.queue),
+                active_retries=self.in_flight_retries + self.queued_retries,
+            )
+
+    # ------------------------------------------------------------------
+    # RL extension: runtime policy controls (mutated by RL envs between steps)
+    # ------------------------------------------------------------------
+    def update_retry_config(
+        self,
+        max_attempts: Optional[int] = None,
+        delay_ns: Optional[TimeDuration] = None,
+        budget_ratio: Optional[float] = None,
+        budget_max_retries: Optional[int] = None,
+    ):
+        """Swap policy objects in the middleware chain at runtime."""
+        if self._middleware_chain is None:
+            return
+
+        from simulator.middleware.load_limiter import LoadLimiterMiddleware
+        from simulator.middleware.retry import RetryMiddleware
+
+        for mw in self._middleware_chain.middlewares:
+            if isinstance(mw, RetryMiddleware) and (max_attempts is not None or delay_ns is not None):
+                old = mw.policy
+                if isinstance(old, FixedBackoffRetryPolicy):
+                    mw.policy = FixedBackoffRetryPolicy(
+                        max_attempts=max_attempts if max_attempts is not None else old.max_attempts,
+                        delay=delay_ns if delay_ns is not None else old.delay,
+                    )
+
+            if isinstance(mw, LoadLimiterMiddleware) and (budget_ratio is not None or budget_max_retries is not None):
+                old = mw.limiter
+                if isinstance(old, LimiterRetryBudgetPolicy):
+                    mw.limiter = LimiterRetryBudgetPolicy(
+                        budget_ratio=budget_ratio if budget_ratio is not None else old.budget_ratio,
+                        max_retries=budget_max_retries if budget_max_retries is not None else old.max_retries,
+                    )
+
+    def update_token_bucket(self, refill_rate=None, bucket_capacity=None):
+        """Update the token bucket parameters at runtime."""
+        limiter = self.cfg.load_limiter
+        if isinstance(limiter, GlobalRetryBudget):
+            if refill_rate is not None:
+                limiter.refill_rate = refill_rate
+            if bucket_capacity is not None:
+                limiter.max_tokens = bucket_capacity
+                limiter._tokens = min(limiter._tokens, float(bucket_capacity))
+
+    def update_istio_retry_budget(self, percent=None, min_retry_concurrency=None):
+        """Update Istio-style retry budget parameters at runtime."""
+        limiter = self.cfg.load_limiter
+        if isinstance(limiter, IstioRetryBudget):
+            limiter.update_params(
+                percent=percent,
+                min_retry_concurrency=min_retry_concurrency,
+            )

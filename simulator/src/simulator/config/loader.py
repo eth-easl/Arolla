@@ -14,6 +14,7 @@ from simulator.config.schema import (
     DependencyConfig,
     ExperimentConfig,
     GlobalRetryBudgetConfig,
+    IstioRetryBudgetConfig,
     LatencyInjectionConfig,
     LoadSpikeConfig,
     PartialFailureConfig,
@@ -128,6 +129,11 @@ class ConfigLoader:
     def build_global_retry_budget(cfg: Optional[GlobalRetryBudgetConfig]) -> Optional[LoadLimiter]:
         """Build server-side global retry budget from configuration"""
         return policy_builders.build_global_retry_budget(cfg)
+
+    @staticmethod
+    def build_istio_retry_budget(cfg: Optional[IstioRetryBudgetConfig]) -> Optional[LoadLimiter]:
+        """Build server-side Istio/Envoy retry budget from configuration"""
+        return policy_builders.build_istio_retry_budget(cfg)
     
     @staticmethod
     def build_aimd_global_retry_budget(cfg: Optional[AIMDGlobalRetryBudgetConfig]) -> Optional[LoadLimiter]:
@@ -140,12 +146,13 @@ class ConfigLoader:
         rate_limiter: Optional[RateLimiterConfig],
         retry_budget: Optional[RetryBudgetConfig],
         global_retry_budget: Optional[GlobalRetryBudgetConfig],
+        istio_retry_budget: Optional[IstioRetryBudgetConfig],
         aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig]
     ) -> Optional[LoadLimiter]:
         """
         Build load limiter from configuration.
         
-        Priority: circuit_breaker > aimd > global > retry_budget > rate_limiter
+        Priority: circuit_breaker > aimd > istio > global > retry_budget > rate_limiter
         """
         return policy_builders.build_load_limiter(
             circuit_breaker=circuit_breaker,
@@ -153,6 +160,7 @@ class ConfigLoader:
             retry_budget=retry_budget,
             global_retry_budget=global_retry_budget,
             aimd_global_retry_budget=aimd_global_retry_budget,
+            istio_retry_budget=istio_retry_budget,
         )
     
     # ========================================================================

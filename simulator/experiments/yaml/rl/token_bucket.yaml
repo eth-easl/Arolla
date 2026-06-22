@@ -1,0 +1,77 @@
+# RL Token Bucket Experiment
+#
+# Server-side retry admission control using a token bucket.
+# The RL agent dynamically tunes two parameters:
+#   - target_rps   (refill_rate)   : sustained retries allowed per second
+#   - max_burst    (bucket_capacity): maximum retries in a sudden spike
+#
+# Client retry policy is FIXED — the agent only controls the server side.
+# The token bucket sits in the server's sidecar and selectively admits or
+# rejects retry requests. First attempts always pass through.
+
+name: rl_token_bucket
+seed: 43232
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 20
+      lognorm_sigma: 0.5
+    workers: 16
+    queue_capacity: 20
+
+    # Client-side retry policy (FIXED — not tuned by RL)
+    # Clients retry up to 3 times with 100ms fixed backoff.
+    # This is intentionally more aggressive than default (2 attempts)
+    # so the server-side budget has meaningful work to do.
+    retry:
+      type: fixed
+      max_attempts: 3
+      delay_ms: 100
+
+    # Server-side timeout per attempt
+    timeout:
+      attempt_ms: 50
+
+    # Server-side retry admission: token bucket
+    # These are the INITIAL values — the RL agent will override them at runtime.
+    # target_rps = 30 means the bucket refills 30 tokens per second.
+    # max_burst  = 60 means the bucket can hold up to 60 tokens (2x rate).
+    global_retry_budget:
+      target_rps: 30
+      max_burst: 60
+
+    # Fault injection: multiple scenarios for the agent to learn from
+    partial_failures:
+      # Moderate failure: 30% of requests fail for 20 seconds
+      - type: partial_failure
+        start_s: 40
+        end_s: 60
+        p_fail: 0.3
+      # Severe failure: 70% of requests fail for 15 seconds
+      - type: partial_failure
+        start_s: 120
+        end_s: 135
+        p_fail: 0.7
+
+workload:
+  base_rps: 300
+  duration_s: 300
+
+  # Two load spikes to test different conditions
+  load_spikes:
+    # Early spike: 2x load
+    - type: load_spike
+      start_s: 15
+      end_s: 35
+      rps_multiplier: 2.0
+    # Late spike during recovery from severe failure
+    - type: load_spike
+      start_s: 140
+      end_s: 160
+      rps_multiplier: 1.5
+
+# Output
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0

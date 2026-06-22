@@ -16,6 +16,7 @@ from simulator.config.schema import (
     RetryConfig,
     RetryPolicyType,
     ArollaRetryBudgetConfig,
+    IstioRetryBudgetConfig,
     TimeoutConfig,
     GlobalRetryBudgetConfig,
     ClientConfigYAML,
@@ -47,6 +48,7 @@ from simulator.policies.load_limiter import (
     BurstyRateLimiterPolicy,
     FixedWindowBurstyLimiterPolicy,
 )
+from simulator.policies.istio_retry_budget import IstioRetryBudget
 
 
 def build_retry_policy(
@@ -182,6 +184,17 @@ def build_global_retry_budget(cfg: Optional[GlobalRetryBudgetConfig]) -> Optiona
     )
 
 
+def build_istio_retry_budget(
+    cfg: Optional[IstioRetryBudgetConfig],
+) -> Optional[LoadLimiter]:
+    if cfg is None:
+        return None
+    return IstioRetryBudget(
+        percent=cfg.percent,
+        min_retry_concurrency=cfg.min_retry_concurrency,
+    )
+
+
 def build_aimd_global_retry_budget(
     cfg: Optional[AIMDGlobalRetryBudgetConfig],
 ) -> Optional[LoadLimiter]:
@@ -222,14 +235,17 @@ def build_load_limiter(
     global_retry_budget: Optional[GlobalRetryBudgetConfig],
     aimd_global_retry_budget: Optional[AIMDGlobalRetryBudgetConfig],
     arolla_retry_budget: Optional[ArollaRetryBudgetConfig] = None,
+    istio_retry_budget: Optional[IstioRetryBudgetConfig] = None,
 ) -> Optional[LoadLimiter]:
-    # Priority: arolla > circuit breaker > AIMD > global > local > rate limiter
+    # Priority: arolla > circuit breaker > AIMD > istio > global > local > rate limiter
     if arolla_retry_budget is not None:
         return build_arolla_retry_budget(arolla_retry_budget)
     if circuit_breaker is not None:
         return build_circuit_breaker(circuit_breaker)
     if aimd_global_retry_budget is not None:
         return build_aimd_global_retry_budget(aimd_global_retry_budget)
+    if istio_retry_budget is not None:
+        return build_istio_retry_budget(istio_retry_budget)
     if global_retry_budget is not None:
         return build_global_retry_budget(global_retry_budget)
     if retry_budget is not None:

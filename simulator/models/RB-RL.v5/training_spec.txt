@@ -1,0 +1,14 @@
+IstioRetryBudgetMetastableEnv training spec
+
+Model family: istio_retry_budget_metastable
+YAML template: /home/jstaszewicz/globalRetryBudget/simulator/experiments/yaml/rl/istio_retry_budget_metastable.yaml
+Scenario profile: metastable_fairness
+Decision interval: 5.0s
+Observation metrics window: 10.0s
+Delta metrics window: 5.0s
+
+Observation vector: success_rate_agg, min_client_success, retry_ratio, window_load_amplification, window_retry_efficiency, retry_fairness_gap, p95_latency_pressure, budget_reject_rate, server_fail_rate, deadline_rate, delta_success_agg, delta_window_load_amplification, budget_utilization, retry_pressure_vs_limit, current_percent_norm, current_min_retry_concurrency_norm, previous_percent_norm, previous_min_retry_concurrency_norm
+
+MultiDiscrete([6, 6]): action[0] selects retryBudget.percent from [0, 5, 10, 20, 35, 50]; action[1] selects minRetryConcurrency from [0, 1, 2, 3, 5, 8].
+
+Server-side reward: maximize attempt success and recovery progress, while penalizing retry pressure during overload, deadlines, budget rejections, tail pressure, budget saturation, and action oscillation.

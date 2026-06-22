@@ -70,27 +70,31 @@ simulator/
 │   ├── run_experiment.py         # Single experiment runner
 │   ├── run_sweep.py              # Parameter sweep runner
 │   ├── run_batch.py              # Batch execution
-│   └── compare_runs.py           # Compare multiple experiments
+│   ├── compare_runs.py           # Compare multiple experiments
+│   └── rl/                       # RL extension scripts (train/eval/benchmark/analyze)
 │
 ├── src/simulator/                # Core library
 │   ├── core/                     # Engine, models, types
 │   ├── runtime/                  # Service, client, workload
-│   ├── policies/                 # Retry, load limiters, budgets
+│   ├── policies/                 # Retry, load limiters, budgets (incl. istio_retry_budget)
 │   ├── middleware/               # Composable policy chain
 │   ├── faults/                   # Fault injection
 │   ├── config/                   # YAML schema & loader
 │   ├── metrics/                  # Results collection
+│   ├── rl/                       # RL Gymnasium environments
 │   └── utils/                    # Time conversion helpers
 │
 ├── experiments/yaml/             # Experiment configurations
 │   ├── default.yaml
 │   ├── load_spike_metastable_failure/
 │   ├── partial_failure_metastable_failure/
-│   └── diversity/
+│   ├── diversity/
+│   └── rl/                       # RL scenario & benchmark configs
 │
+├── models/RB-RL.v5/              # Committed trained RL model (inference/benchmarks)
 ├── plotting/                     # Visualization scripts
 ├── tests/                        # Unit & integration tests
-└── docs/                         # Detailed documentation
+└── docs/                         # Detailed documentation (incl. docs/rl/)
 ```
 
 ## Configuration
@@ -250,3 +254,43 @@ For lognormal latency: `Mean = median * e^(sigma^2 / 2)`
 **Example:** 16 workers, 20ms median, sigma=0.5:
 - Mean = 20ms x 1.133 = 22.66ms
 - RPS_max = 16 / 0.02266 = 706 RPS
+
+## Reinforcement-learning extension (optional)
+
+This branch adds **DIRB** (**Dynamic Istio Retry Budget**), the final/report RL
+controller that tunes a server-side Istio/Envoy retry budget online to recover
+faster from metastable retry amplification. The committed DIRB checkpoint is
+`models/RB-RL.v5/`. **RL is off by default**: every command above runs the
+simulator statically. RL is only active when you run the scripts under `bin/rl/`.
+
+The RL dependencies (`stable-baselines3`, `gymnasium`, `torch`, `tensorboard`)
+are an optional extra, so the core install above stays lightweight:
+
+```bash
+pip install -e ".[rl]"    # adds the RL stack on top of the core simulator
+```
+
+```bash
+# RL off: ordinary static run (retry budget held fixed by the YAML)
+python bin/workflow.py experiments/yaml/rl/istio_retry_budget_metastable.yaml
+
+# RL on: evaluate DIRB (the committed RB-RL.v5 model) on the same scenario
+python bin/rl/eval/eval_istio_retry_budget_metastable.py \
+  --model models/RB-RL.v5/model \
+  --yaml experiments/yaml/rl/istio_retry_budget_metastable.yaml \
+  --decision-interval-s 5 --observation-window-s 10 --delta-window-s 5
+```
+
+Full guide (install, training, inference, benchmarking, model catalog):
+[docs/rl/README.md](docs/rl/README.md).
+
+## Testing
+
+```bash
+cd simulator
+python -m pytest tests/ -v
+```
+
+## Documentation
+
+- [Reinforcement-learning extension](docs/rl/README.md) - RL retry-budget controller (training, inference, benchmarking)

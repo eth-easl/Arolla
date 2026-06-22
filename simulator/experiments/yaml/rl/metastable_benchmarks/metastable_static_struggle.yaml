@@ -1,0 +1,90 @@
+name: benchmark_metastable_static_struggle
+seed: 42
+
+# Purpose:
+# A deliberately harsh regime where a single fixed retry budget should struggle
+# to recover cleanly across phases. The scenario combines:
+# - a long severe partial-failure window
+# - a small queue and tight timeouts
+# - a later heavy, long load spike
+# - aggressive zero-delay retries
+#
+# This is intended as a stress benchmark for comparing:
+# - one fixed static retry budget
+# - no budget
+# - adaptive RL control
+
+services:
+  - name: svc-A
+    latency:
+      median_ms: 75
+      lognorm_sigma: 0.65
+    workers: 16
+    queue_capacity: 80
+    timeout:
+      attempt_ms: 96
+    # Moderate fixed baseline that is unlikely to be ideal for all phases.
+    global_retry_budget:
+      target_rps: 25
+      max_burst: 20
+    partial_failures:
+      - type: partial_failure
+        start_s: 12
+        end_s: 48
+        p_fail: 0.92
+
+clients:
+  - name: client-gold
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 6
+      delay_ms: 0
+    timeout:
+      attempt_ms: 96
+    workload:
+      base_rps: 126
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 44
+          end_s: 84
+          rps_multiplier: 5.0
+
+  - name: client-silver
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 6
+      delay_ms: 0
+    timeout:
+      attempt_ms: 96
+    workload:
+      base_rps: 81
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 44
+          end_s: 84
+          rps_multiplier: 4.4
+
+  - name: client-bronze
+    target_service: svc-A
+    retry:
+      type: fixed
+      max_attempts: 6
+      delay_ms: 0
+    timeout:
+      attempt_ms: 96
+    workload:
+      base_rps: 49.4
+      duration_s: 100
+      load_spikes:
+        - type: load_spike
+          start_s: 44
+          end_s: 84
+          rps_multiplier: 3.8
+
+output_csv: output.csv
+fault_events_json: fault_events.json
+granularity_s: 1.0
