@@ -68,11 +68,11 @@ CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 # Per-run output goes under outputs/prototype/<profile>/<profile>_<timestamp>/
 # at the repo root. The profile subfolder groups runs by workload type so
 # cart-stress and checkout-stress results don't intermingle.
-# When -o is passed (e.g. from run_sweep.sh), that path is used directly
-# as the run directory — no profile/timestamp subdirectory is appended.
-# Base output directory. paper.sh (and any other caller) can override by
-# exporting OUTPUT_BASE — e.g. `OUTPUT_BASE=.../outputs/nsdi` routes
-# everything under outputs/nsdi/<profile>/… instead of outputs/prototype/.
+# When -o is passed, that path is used directly as the run directory —
+# no profile/timestamp subdirectory is appended.
+# Base output directory. Callers can override by exporting OUTPUT_BASE —
+# e.g. `OUTPUT_BASE=.../outputs/nsdi` routes everything under
+# outputs/nsdi/<profile>/… instead of outputs/prototype/.
 OUTPUT_ROOT="${OUTPUT_BASE:-${REPO_ROOT}/outputs/prototype}"
 OUTPUT_EXPLICIT=false
 DRY_RUN=false
@@ -587,7 +587,7 @@ else
   _profile_slug="${_joined_names}"
 fi
 if "${OUTPUT_EXPLICIT}"; then
-  # -o was passed (e.g. from run_sweep.sh) — use it directly.
+  # -o was passed — use it directly.
   RUN_DIR="${OUTPUT_ROOT}"
 else
   if [[ -n "${_common_dir}" ]]; then

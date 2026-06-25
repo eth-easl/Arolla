@@ -1,5 +1,0 @@
-{
-  "scenario": "sustained-failure",
-  "policies": ["no-control", "rb-rl-v3"],
-  "policies_spec": []
-}
