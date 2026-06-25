@@ -1,0 +1,6 @@
+id,client_profile,fault_manifest,rate_rps,fault_duration,fault_rate,num_spikes,inter_spike_gap,rl_callee,rl_caller_labels,default_label
+MS1,post-cart-stress-open,cartservice-75pct,1200,20,75,2,60,cartservice,"frontend,checkoutservice",Recovered
+MS2,post-cart-stress-open,cartservice-90pct,1200,30,90,2,60,cartservice,"frontend,checkoutservice",Recovered
+MS3,post-cart-stress-open,cartservice-75pct,1400,45,75,2,60,cartservice,"frontend,checkoutservice",Ambiguous
+AS1,browse-stress-open,productcatalogservice-75pct,800,30,75,1,0,productcatalogservice,"frontend,checkoutservice,recommendationservice",Ambiguous
+AS2,checkout-stress-open,paymentservice-90pct,500,30,90,1,0,paymentservice,checkoutservice,Ambiguous

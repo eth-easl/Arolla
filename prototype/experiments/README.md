@@ -1,210 +1,225 @@
 # Prototype experiments
 
 End-to-end orchestrator for running retry-policy experiments on the
-Online Boutique prototype. One command drives the full lifecycle:
+Online Boutique prototype. Supports both single-run comparisons and a
+30-scenario Phase-B sweep that benchmarks the RL-boosted retry-budget
+policy (`rb-rl-v5`) against three baselines.
 
-1. **Switch policy** (via [../deploy-policy.sh](../deploy-policy.sh))
-2. **Start load** on the external client host (via [../clients/online-boutique/run-clients.sh](../clients/online-boutique/run-clients.sh))
-3. **Wait through the phases** — warmup, pre-fault, fault, recovery, cooldown
-4. **Inject and remove fault** at the configured times
-5. **Collect metrics** — client CSVs + Envoy sidecar `/stats` dumps
-6. **Aggregate and plot** via [analyze.py](analyze.py)
+---
 
 ## Files
 
 ```
 prototype/experiments/
-├── run-experiment.sh           ← main orchestrator
-├── analyze.py                  ← metrics aggregator + plotter
-└── scenarios/
-    ├── sustained-failure.conf  ← paper §6.2.1
-    ├── recovery-overload.conf  ← paper §6.2.2
-    └── transient.conf          ← paper §6.3 (single-burst approx)
-
-outputs/prototype/runs/         ← output: one subdir per invocation
-└── <timestamp>/                ← (sits at the repo root, not under prototype/)
-        ├── experiment.json
-        ├── summary.csv
-        ├── plots/
-        │   ├── goodput.pdf
-        │   ├── amplification.pdf
-        │   ├── retry-efficiency.pdf
-        │   └── recovery-time.pdf
-        ├── no-control/
-        │   ├── timeline.json
-        │   ├── client-metrics/*.csv
-        │   ├── sidecar-stats/*.stats
-        │   └── traffic_gen.log
-        ├── circuit-breaker/
-        ├── envoy-retry-budget/
-        └── arolla/
+│
+├── run-experiment.sh        ← single-run orchestrator (all policy phases)
+├── run_full_sweep.sh        ← 30-scenario batch driver (Phase-B sweep)
+├── run_rl.sh                ← dev/debug: one RL run + comparison plots
+│
+├── scenarios/               ← .conf files for named single-run scenarios
+│   ├── sustained-failure.conf   (paper §6.2.1 — 50% abort for 60 s)
+│   ├── recovery-overload.conf   (paper §6.2.2 — product-catalog fault)
+│   └── transient.conf           (single burst approximation)
+│
+├── sweep_scenarios.csv      ← canonical 25 S-series scenarios (Phase-B)
+├── sweep_scenarios_ext.csv  ← 5 extended scenarios: MS1–MS3, AS1–AS2
+│
+├── rl/                      ← RL controller implementation
+│   ├── rl_controller.py         ← RL agent (policy gradient, in-process)
+│   ├── rl_obs_envoy.py          ← Envoy /stats scraper for observations
+│   ├── rl_obs_schema.py         ← observation field schema
+│   ├── rl_configs/v{1..5}/      ← versioned training configs + model zips
+│   ├── rl_controller_image/     ← Dockerfile + build/distribute scripts
+│   ├── ensure_rl_configmaps.sh  ← idempotent RL ConfigMap setup
+│   └── envoy_stats_sample.prom  ← test fixture for rl_obs_envoy
+│
+├── analyze.py               ← per-run metrics aggregator + plotter
+├── classify_runs.py         ← label outcomes (Recovered / Metastable / …)
+├── sustained_recovery.py    ← "sustained recovery" metric implementation
+├── plot_rl_comparison.py    ← multi-policy RL comparison figures
+│
+├── bench_decision_diff.py   ← offline comparison of two RL decision traces
+├── bench_summarize.py       ← summarise bench_decision_diff output
+├── measure_overhead.sh      ← CPU/memory overhead measurement sweep
+├── resource_sampler.py      ← in-experiment resource sampler (kubectl top)
+│
+└── tests/
+    ├── test_sustained_recovery.py
+    └── test_classify_decision.py
 ```
 
-## Prerequisites
-
-Everything that [../arolla-filter/README.md](../arolla-filter/README.md) lists, plus:
-
-- `kubectl` context pointed at the Emulab cluster
-- Online Boutique deployed (`../deploy-app.sh online-boutique`)
-- Arolla wasm built, uploaded, and served (`../deploy-policy.sh build-wasm upload-wasm serve-wasm`)
-- `python3` with `pandas`, `numpy`, `matplotlib` (for `analyze.py`)
+---
 
 ## Quick start
 
-Run the paper §6.2.1 experiment across all four policies:
+### Single-run comparison (all four policies)
 
     prototype/experiments/run-experiment.sh
 
-That's it — defaults match the paper: 60s warmup, 30s pre-fault, 60s fault,
-60s recovery, 30s cooldown = 4 minutes per policy × 4 policies = ~16 minutes.
+Defaults match the paper §6.2.1 scenario: 60 s warmup, 30 s pre-fault,
+60 s fault, 60 s recovery, 30 s cooldown = ~16 minutes for four policies.
 
-### See the timeline without touching the cluster
+```bash
+# Dry-run: print schedule and exit
+prototype/experiments/run-experiment.sh --dry-run
 
-    prototype/experiments/run-experiment.sh --dry-run
+# One policy only
+prototype/experiments/run-experiment.sh --policies arolla
 
-Prints the per-policy schedule and the grand-total runtime estimate, then
-exits.
-
-### Test just one policy
-
-    prototype/experiments/run-experiment.sh --policies arolla
-
-### Override phase durations
-
-    prototype/experiments/run-experiment.sh \
-        --warmup 30 --prefault 15 --fault 90 --recovery 120
-
-CLI flags take precedence over scenario config, which takes precedence over
-the built-in defaults.
-
-### Switch scenario
-
-    prototype/experiments/run-experiment.sh --scenario recovery-overload
-
-Valid scenarios are the `.conf` files under `scenarios/`. Add a new one by
-dropping in a new `.conf` that sets `SCENARIO_FAULT_MANIFEST` and any phase
-overrides.
-
-### Analyze a previous run
-
-    prototype/experiments/analyze.py outputs/prototype/runs/20260406_200000
-
-Regenerates `summary.csv` and `plots/*.pdf` in place from the already-collected
-data.
-
-## Experiment timeline
-
-For each policy, the orchestrator walks through this schedule with drift-free
-absolute timestamps (not cumulative `sleep`):
-
-```
-        0s ────────────────── start load generator
-                [warmup      ]   (default 60s)
-     +60s ────────────────── baseline begins
-                [pre-fault   ]   (default 30s)
-     +90s ────────────────── kubectl apply <fault>
-                [fault       ]   (default 60s)
-    +150s ────────────────── kubectl delete <fault>
-                [recovery    ]   (default 60s)
-    +210s ────────────────── stop load generator
-                [cooldown    ]   (default 30s)
-    +240s ────────────────── collect metrics → next policy
+# Override scenario and fault duration
+prototype/experiments/run-experiment.sh --scenario recovery-overload --fault 90
 ```
 
-Between policies, the orchestrator:
+### 30-scenario Phase-B sweep
 
-1. Deletes any lingering fault manifest
-2. Clears the remote client workspace (`/tmp/online-boutique-clients/`)
-3. Runs `deploy-policy.sh switch <next>` to tear down the previous policy
-   and apply the new one
-4. Sleeps `--settle` seconds (default 5) so the new `WasmPlugin` /
-   `EnvoyFilter` / `DestinationRule` has time to propagate via xDS
+Run all 30 scenarios (25 canonical + 5 extended) against
+`no-control`, `envoy-retry-budget`, `arolla`, and `rb-rl-v5`:
 
-## What gets collected
+```bash
+prototype/experiments/run_full_sweep.sh
+```
 
-### Client side (primary data source)
+Output lands in `outputs/prototype/<sweep_ts>/run1/<scenario_label>/<policy>/`.
 
-`<policy>/client-metrics/*.csv` — every row is one request attempt, with:
+Subset options:
+```bash
+# Only canonical scenarios, two policies
+prototype/experiments/run_full_sweep.sh \
+  --ids S01,S02,S05 \
+  --policies no-control,rb-rl-v5
 
-    timestamp, profile, worker, request_id, path, attempt, is_retry, status, ok, latency_s
+# Three repeats
+prototype/experiments/run_full_sweep.sh --repeats 3
+```
 
-This is the end-user view: "what did the client actually observe?" The
-analyzer uses these rows to compute goodput-over-time, amplification, and
-retry efficiency.
+### RL-only dev run
 
-### Sidecar stats (cross-check + Arolla internal counters)
+```bash
+# Single scenario + RL controller + comparison plots
+prototype/experiments/run_rl.sh \
+  --config rl/rl_configs/v5/rb-rl-v5.yaml \
+  --scenario sustained-failure
+```
 
-`<policy>/sidecar-stats/<service>.stats` — Envoy admin `/stats` dump from one
-pod per service. Includes:
+### Analyze a completed run
 
-- `envoy_cluster_upstream_rq_total` — per-upstream request counts
-- `envoy_cluster_upstream_rq_retry` — retries Envoy saw (per upstream)
-- `envoy_arolla_retries_admitted_total` — Arolla-specific
-- `envoy_arolla_retries_rejected_total` — Arolla-specific
-- `envoy_arolla_bucket_tokens` — gauge, current `B_agg`
+```bash
+prototype/experiments/analyze.py outputs/prototype/runs/20260406_200000
+```
 
-Use these to sanity-check the client-side numbers and (for the Arolla run)
-to verify the bucket actually drained and refilled as expected.
+Regenerates `summary.csv` and `plots/*.pdf` in place.
 
-### Timeline
+---
 
-`<policy>/timeline.json` — absolute wall-clock timestamps for every phase
-boundary. `analyze.py` uses these to slice the CSV into pre-fault / fault /
-recovery windows.
+## Policy directory layout
 
-## Metrics computed
+Every experiment produces one subdirectory per policy:
 
-`analyze.py` writes `summary.csv` with one row per policy:
+```
+<run_dir>/
+├── experiment.json          ← phase timestamps + config snapshot
+├── summary.csv              ← one row per policy: goodput, recovery, …
+├── plots/
+│   ├── goodput.pdf
+│   ├── amplification.pdf
+│   ├── retry-efficiency.pdf
+│   └── recovery-time.pdf
+├── no-control/
+│   ├── timeline.json
+│   ├── client-metrics/*.csv
+│   ├── sidecar-stats/*.stats
+│   └── traffic_gen.log
+├── circuit-breaker/
+├── envoy-retry-budget/
+├── arolla/
+└── rb-rl-v5/                ← RL variant (run_full_sweep.sh) or
+                             ← envoy-retry-budget/ (run_rl.sh dev runs)
+                                 └── rl-controller/
+                                         ├── rl-decisions.csv
+                                         └── resource-usage.csv
+```
 
-| Column                 | Meaning                                              |
-|------------------------|------------------------------------------------------|
-| `amplification`        | total attempts / first attempts during fault         |
-| `retry_efficiency_pct` | (retries that ended `ok`) / total retries × 100      |
-| `avg_goodput_prefault` | mean successful requests/s during pre-fault baseline |
-| `avg_goodput_fault`    | mean successful requests/s during fault window       |
-| `recovery_sec`         | seconds from fault-end until goodput ≥ 95% pre-fault |
-| `arolla_admitted`      | sum of `arolla_retries_admitted_total` (all sidecars)|
-| `arolla_rejected`      | sum of `arolla_retries_rejected_total` (all sidecars)|
+`plot_rl_comparison.py` discovers both `rb-rl-v5/` and `envoy-retry-budget/`
+automatically.
 
-and renders four plots under `plots/`:
+---
 
-- `goodput.pdf` — goodput vs time, one line per policy, shaded fault region
-- `amplification.pdf` — bar chart across policies
-- `retry-efficiency.pdf` — bar chart across policies
-- `recovery-time.pdf` — bar chart across policies
+## Scenario CSVs
 
-## Cleanup semantics
+**`sweep_scenarios.csv`** — 25 canonical scenarios (S01–S25).
 
-The orchestrator installs a TERM/INT trap that:
+Columns: `id, rate_rps, fault_duration, fault_rate, default_label`
 
-- Deletes the fault manifest (if still applied)
-- Kills the remote `traffic_gen.py` PID (if still running)
+All canonical scenarios fault `cartservice` with `post-cart-stress-open` load.
+`fault_rate` is the abort percentage; `fault_manifest` is
+`cartservice-<fault_rate>pct.yaml`.
 
-So Ctrl-C at any point leaves the cluster in a clean state. If the script
-crashes or is killed with SIGKILL, you may need to run:
+**`sweep_scenarios_ext.csv`** — 5 extended scenarios (MS1–MS3 multi-spike,
+AS1–AS2 alternate-service).
 
-    kubectl delete --ignore-not-found -f <fault manifest>
-    prototype/clients/online-boutique/run-clients.sh stop
-    prototype/deploy-policy.sh switch none
+Columns: `id, client_profile, fault_manifest, rate_rps, fault_duration,
+fault_rate, num_spikes, inter_spike_gap, rl_callee, rl_caller_labels,
+default_label`
 
-by hand.
+`rl_callee` / `rl_caller_labels` retarget the RL observation to the faulted
+service rather than the default `cartservice`.
+
+---
+
+## RL controller versions
+
+| Version | Config | Notes |
+|---------|--------|-------|
+| v1 | `rl/rl_configs/v1/` | Initial policy-gradient prototype |
+| v2–v4 | `rl/rl_configs/v2–4/` | Observation-space and reward tuning |
+| v5 | `rl/rl_configs/v5/rb-rl-v5.yaml` | **Phase-B baseline** — normalized observations, 30-scenario sweep |
+
+Build and distribute the v5 controller image:
+
+```bash
+cd prototype/experiments/rl/rl_controller_image
+./build.sh v5
+./distribute.sh v5    # pushes to all worker nodes
+```
+
+---
+
+## Prerequisites
+
+- `kubectl` context pointed at the Emulab cluster (see `CLAUDE.md`)
+- Online Boutique deployed: `prototype/deploy-app.sh online-boutique`
+- Arolla wasm built and served (see `prototype/arolla-filter/README.md`)
+- RL controller image built and distributed for Phase-B sweeps (see above)
+- `python3` with `pandas`, `numpy`, `matplotlib`, `scipy`
+
+---
+
+## Metrics in `summary.csv`
+
+| Column                  | Meaning |
+|-------------------------|---------|
+| `amplification`         | total attempts / first attempts during fault |
+| `retry_efficiency_pct`  | retries that succeeded / total retries × 100 |
+| `avg_goodput_prefault`  | mean successful req/s during pre-fault |
+| `avg_goodput_fault`     | mean successful req/s during fault |
+| `recovery_sec`          | seconds to sustained goodput ≥ 95% pre-fault |
+| `sustained_recovered`   | bool — met goodput + success-rate threshold for full window |
+| `arolla_admitted`       | sum of `arolla_retries_admitted_total` across sidecars |
+| `arolla_rejected`       | sum of `arolla_retries_rejected_total` across sidecars |
+
+Recovery is measured with the **sustained-recovery** criterion
+(`sustained_recovery.py`): goodput and success-rate must exceed their
+respective thresholds continuously for a configurable window (default 5 s),
+not just at a single crossing point.
+
+---
 
 ## Known gaps
 
-- **Recovery-overload scenario uses `faults/productcatalog-fault.yaml`**,
-  which is 50% abort + 30% delay on productcatalog — not the "fully offline"
-  100% outage described in paper §6.2.2. Add a new manifest for an exact
-  match.
-- **Transient scenario is a single-burst approximation** of the multi-burst
-  pattern in §6.3. To reproduce the paper's 5-burst timeline, extend
-  `run-experiment.sh` with a burst-loop mode or run this scenario repeatedly.
-- **§6.2.3 chain-depth amplification** is not yet wrapped as a scenario — it
-  needs per-hop retry-rate queries against Istio Prometheus, which the
-  current analyzer doesn't implement.
-- **§6.4 fairness** is blocked on the per-tenant layer of the Arolla filter
-  (not yet implemented; see `arolla-filter/README.md` "Known limitations").
-- **§6.5 sensitivity sweeps** are not yet orchestrated — they'd need a loop
-  that re-templates the Arolla `pluginConfig` (varying `r`, `capacity`) and
-  re-runs §6.2.1 for each value.
-- **gRPC trailer handling** in the Arolla filter treats all HTTP 200s as
-  success; see `arolla-filter/README.md` "Known limitations".
+- **§6.2.2 recovery-overload** uses 50% abort + 30% delay on productcatalog,
+  not the "fully offline" 100% outage in the paper. Add a new manifest for
+  an exact match.
+- **§6.2.3 chain-depth amplification** is not scripted — needs per-hop
+  retry-rate queries against Istio Prometheus.
+- **gRPC trailer handling** in the Arolla filter treats HTTP 200s as success;
+  see `arolla-filter/README.md` "Known limitations".

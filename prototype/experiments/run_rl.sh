@@ -8,7 +8,7 @@ PROTO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${PROTO_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-CONFIG_PATH="${SCRIPT_DIR}/rl_configs/v1/rb-rl-v1-a.yaml"
+CONFIG_PATH="${SCRIPT_DIR}/rl/rl_configs/v1/rb-rl-v1-a.yaml"
 SCENARIO_SET="core"
 SCENARIO_IDS=""
 OUTPUT_ROOT=""
@@ -314,11 +314,6 @@ if [[ "${SKIP_PLOTS}" == "false" && "${DRY_RUN}" == "false" ]]; then
   echo "[rl-v1] plot command: ${plot_cmd[*]}"
   "${plot_cmd[@]}" || echo "[rl-v1] comparison plotting failed" >&2
 
-  # Generate RL comparison heatmap
-  python3 "${SCRIPT_DIR}/plot_sweep_heatmap.py" \
-    --mode rl-comparison \
-    "${RUN_ROOT}" \
-    --out "${RUN_ROOT}/heatmap/heatmap_summary.pdf" || echo "[rl-v1] heatmap generation failed" >&2
 fi
 
 echo "[rl-v1] done: ${RUN_ROOT}"

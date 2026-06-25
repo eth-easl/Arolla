@@ -286,7 +286,7 @@ Retrain and ship a new `vecnormalize_stats.pkl` with any new `model.zip`.
 ## Live-prototype derivations (Envoy obs transport)
 
 When `--obs-transport envoy` is used, the in-cluster controller
-(`prototype/experiments/rl_controller.py`) derives the 18-vector from
+(`prototype/experiments/rl/rl_controller.py`) derives the 18-vector from
 two sidecar fetches per tick:
 
 1. **Envoy admin `/stats/prometheus`** on every caller pod — gives

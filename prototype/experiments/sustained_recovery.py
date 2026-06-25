@@ -13,8 +13,8 @@ recovery time. This module adds a robust, additive metric:
   hold continuously. None if no such window exists in the captured span.
 
 It is framework-agnostic: callers pass plain ``{bin: value}`` maps (bins are
-integer seconds relative to some t_ref), so both ``analyze.py`` (pandas Series
-via ``.to_dict()``) and the HTML report builder can share one implementation.
+integer seconds relative to some t_ref), so ``analyze.py`` (pandas Series
+via ``.to_dict()``) and any other consumer can share one implementation.
 """
 
 from __future__ import annotations

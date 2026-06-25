@@ -39,7 +39,7 @@ RL_LOADER_PORT_BASE="8765"
 
 NON_RL_POLICIES="no-control,envoy-retry-budget,arolla"
 RL_VARIANTS=(
-  "rb-rl-v5:rl_configs/v5/rb-rl-v5.yaml:rl-controller-v5"
+  "rb-rl-v5:rl/rl_configs/v5/rb-rl-v5.yaml:rl-controller-v5"
 )
 
 usage() {
@@ -80,10 +80,10 @@ SWEEP_DIR="${OUTPUT_ROOT}/${SWEEP_TS}"
 mkdir -p "${SWEEP_DIR}"
 
 # In-cluster RL Jobs mount ConfigMaps (e.g. rl-controller-v5). One-shot cluster
-# setup may only have created a subset — apply all variants from rl_configs/ so
+# setup may only have created a subset — apply all variants from rl/rl_configs/ so
 # FailedMount does not surface mid-sweep.
 if ! "${DRY_RUN}"; then
-  "${SCRIPT_DIR}/ensure_rl_configmaps.sh"
+  "${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh"
 fi
 
 SCENARIOS_CSV="${SCRIPT_DIR}/sweep_scenarios.csv"

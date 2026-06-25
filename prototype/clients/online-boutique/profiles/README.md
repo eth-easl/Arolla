@@ -215,8 +215,8 @@ To run just a few profiles, set the `PROFILES` env var when invoking
 `run-clients.sh`:
 
 ```bash
-PROFILES=browse,checkout \
+PROFILES=post-cart-stress-open,browse-stress-open \
     prototype/clients/online-boutique/run-clients.sh start
 ```
 
-Or pass `--profiles browse,checkout` to `traffic_gen.py` directly.
+Or pass `--profiles post-cart-stress-open,browse-stress-open` to `traffic_gen.py` directly.

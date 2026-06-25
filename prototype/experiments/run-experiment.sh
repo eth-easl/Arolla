@@ -426,7 +426,7 @@ if "${RL_IN_CLUSTER}"; then
     fi
   done
   if ! kubectl -n "${NAMESPACE}" get configmap "${RL_CONFIGMAP}" >/dev/null 2>&1; then
-    err "ConfigMap '${RL_CONFIGMAP}' not found in '${NAMESPACE}'. Apply RL bundles with: ${SCRIPT_DIR}/ensure_rl_configmaps.sh"
+    err "ConfigMap '${RL_CONFIGMAP}' not found in '${NAMESPACE}'. Apply RL bundles with: ${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh"
   fi
   log "rl-in-cluster: loader=${RL_LOADER_HOST} ports=${RL_LOADER_PORTS_CSV} image=rl-controller:${RL_IMAGE_TAG} configmap=${RL_CONFIGMAP}"
 fi
@@ -1004,7 +1004,7 @@ run_single() {
       # in-process Laptop-side controller (legacy path).
       phase "[${policy}] start RL controller ($(basename "${RL_CONTROLLER_CONFIG}"))"
       controller_args=(
-        python3 "${SCRIPT_DIR}/rl_controller.py"
+        python3 "${SCRIPT_DIR}/rl/rl_controller.py"
         --config "${RL_CONTROLLER_CONFIG}"
         --out-dir "${rl_controller_dir}"
         --namespace "${NAMESPACE}"

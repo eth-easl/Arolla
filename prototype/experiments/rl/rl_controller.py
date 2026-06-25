@@ -35,8 +35,8 @@ import yaml
 # Shared schema with the loader (prototype/clients/online-boutique/traffic_gen.py).
 # Both sides import from rl_obs_schema.py so the histogram edges and the
 # WindowBucket field order are defined in exactly one place. The bare import
-# works because the file sits next to rl_controller.py in the experiments
-# directory (and inside the container both files land at /app/).
+# works because both files sit in the same rl/ subdirectory
+# (and inside the container both files land at /app/).
 from rl_obs_schema import (  # noqa: E402
     LATENCY_HISTOGRAM_EDGES_S,
     LATENCY_HISTOGRAM_NUM_BUCKETS,
@@ -62,8 +62,8 @@ from rl_obs_envoy import (  # noqa: E402
 # budget_reject_rate per obs.md: fraction of retries the Envoy retry
 # budget rejected in the window. Rename is purely cosmetic — the slot
 # remains the 8th element of the vector and the model can't tell the
-# difference. Downstream JSONL consumers (bench_decision_diff.py and
-# plot_heatmaps.py) were updated in lockstep.
+# difference. Downstream consumers (bench_decision_diff.py) must stay
+# in sync with this list.
 OBSERVATION_FIELDS = [
     "success_rate_agg",
     "min_client_success",

@@ -4,8 +4,11 @@ Generate multi-policy retry-budget comparison plots.
 
 Each policy is a "policy-timestamped" run root that contains a flat list
 of scenario subdirectories with the standard
-``<scenario>/envoy-retry-budget/{client-metrics,sidecar-stats,rl-controller}/``
-layout (matches both rb-mega-fault-sweep and run_rl_v1.sh outputs).
+``<scenario>/<policy-dir>/{client-metrics,sidecar-stats,rl-controller}/``
+layout. Two directory names are recognized:
+
+  - ``rb-rl-v5/``          produced by ``run_full_sweep.sh`` (Phase-B)
+  - ``envoy-retry-budget/`` produced by ``run_rl.sh`` (legacy / dev runs)
 
 CLI:
     --policy <path> "<label>"   (repeat for each policy)
@@ -49,7 +52,22 @@ from classify_runs import classify_policy  # noqa: E402
 # ---------------------------------------------------------------------------
 # Policy registry
 # ---------------------------------------------------------------------------
-POLICY = "envoy-retry-budget"  # underlying Istio policy name
+# The underlying Istio mechanism name — used for experiment.json policy_spec lookups.
+POLICY = "envoy-retry-budget"
+
+# Policy subdirectory candidates for filesystem discovery, in preference order.
+# run_full_sweep.sh renames the RL output dir to "rb-rl-v5/";
+# run_rl.sh keeps the Istio name "envoy-retry-budget/".
+_RL_POLICY_DIRS = ("rb-rl-v5", "envoy-retry-budget")
+
+
+def _find_policy_dir(scenario_dir: Path) -> Path:
+    """Return the RL policy subdir under *scenario_dir*, trying rb-rl-v5 first."""
+    for name in _RL_POLICY_DIRS:
+        d = scenario_dir / name
+        if d.is_dir():
+            return d
+    return scenario_dir / _RL_POLICY_DIRS[0]  # fallback (may not exist)
 
 # Palette assigned in --policy declaration order. Calm blue + good green
 # preserve the original two-policy look so existing figures still read
@@ -253,7 +271,7 @@ def default_retry_budget_from_experiment(experiment: dict) -> tuple[float, float
     """Envoy DestinationRule baseline (same as static mega-fault-sweep RB). Fallback 20%/3."""
     fallback = (20.0, 3.0)
     for spec in experiment.get("policies_spec") or []:
-        if spec.get("name") != POLICY:
+        if spec.get("name") not in _RL_POLICY_DIRS:
             continue
         manifest = spec.get("manifest") or {}
         spec_inner = manifest.get("spec") or {}
@@ -760,7 +778,7 @@ def plot_resource_comparison(
         scen_dir = scenario_paths.get(p.key)
         if scen_dir is None:
             continue
-        csv_path = scen_dir / POLICY / "resource-usage.csv"
+        csv_path = _find_policy_dir(scen_dir) / "resource-usage.csv"
         res = read_resources(csv_path)
         if res:
             policy_resources[p.key] = res
@@ -1116,17 +1134,21 @@ def _canonical_scenario_label(label: Path | str) -> str:
 def locate_scenario_policy_dir(policy_root: Path, scenario_label: str) -> Path | None:
     """Find the ``envoy-retry-budget`` directory for *scenario_label* under *policy_root*.
 
-    Tries:
-      • ``policy_root / scenario_label / POLICY``  (flat layout, current)
-      • ``policy_root / post-cart-stress-open / <sweep> / scenario_label / POLICY``
+    Tries (in order for each candidate policy-dir name in ``_RL_POLICY_DIRS``):
+      • ``policy_root / scenario_label / <pol>``  (flat layout, current)
+      • ``policy_root / * / * / scenario_label / <pol>``
         (legacy nested layout — kept for stragglers that haven't been flattened)
     """
-    direct = policy_root / scenario_label / POLICY
-    if (direct / "client-metrics").exists():
-        return direct
+    for pol in _RL_POLICY_DIRS:
+        direct = policy_root / scenario_label / pol
+        if (direct / "client-metrics").exists():
+            return direct
 
-    # Legacy nested layout: <root>/<profile>/<sweep>/<scenario>/<POLICY>/
-    candidates = list(policy_root.glob(f"*/*/{scenario_label}/{POLICY}/client-metrics"))
+    # Legacy nested layout: try both policy dir names.
+    candidates = [
+        c for pol in _RL_POLICY_DIRS
+        for c in policy_root.glob(f"*/*/{scenario_label}/{pol}/client-metrics")
+    ]
     if candidates:
         return candidates[0].parent
     return None
@@ -1153,7 +1175,10 @@ def discover_scenarios(policies: list[PolicyRun]) -> list[dict[str, Any]]:
         if not p.path.exists():
             print(f"[plot-rl] WARN: policy path missing: {p.path}", file=sys.stderr)
             continue
-        for metrics_dir in sorted(p.path.rglob(f"{POLICY}/client-metrics")):
+        for metrics_dir in sorted(
+            m for pol in _RL_POLICY_DIRS
+            for m in p.path.rglob(f"{pol}/client-metrics")
+        ):
             policy_dir = metrics_dir.parent
             scenario_dir = policy_dir.parent
             try:
@@ -1208,7 +1233,12 @@ def write_comparison_health(
         if scen_dir is None:
             continue
         summary_path = scen_dir / "summary.csv"
-        row = _classification_row_for_policy(summary_path, POLICY)
+        row = next(
+            (_classification_row_for_policy(summary_path, pol)
+             for pol in _RL_POLICY_DIRS
+             if _classification_row_for_policy(summary_path, pol) is not None),
+            None,
+        )
         if row is None:
             continue
         cls = classify_policy(scen_dir, row)
@@ -1250,7 +1280,7 @@ def plot_rl_only_for_policy(
     ``action_analysis`` and ``action_scatter`` only if the policy run
     contains rl-controller data; otherwise silently no-ops.
     """
-    policy_dir = scenario_dir / POLICY
+    policy_dir = _find_policy_dir(scenario_dir)
     rl_dir = policy_dir / "rl-controller"
     if not rl_dir.exists():
         return
@@ -1299,7 +1329,7 @@ def compare_scenario(
         scen_dir = scenario_paths.get(p.key)
         if scen_dir is None:
             continue
-        data = analyze.process_policy(scen_dir / POLICY, experiment)
+        data = analyze.process_policy(_find_policy_dir(scen_dir), experiment)
         if data:
             runs[p.key] = data
 
@@ -1369,7 +1399,7 @@ def plot_retry_budget_for_policy(
     experiment: dict,
 ) -> bool:
     """Regenerate only ``selected_retry_budget.png`` for one policy."""
-    policy_dir = scenario_dir / POLICY
+    policy_dir = _find_policy_dir(scenario_dir)
     timeline = analyze.load_timeline(policy_dir)
     t_warmup_end = float(timeline["t_warmup_end"]) if timeline and "t_warmup_end" in timeline else None
     decisions = read_decisions(
