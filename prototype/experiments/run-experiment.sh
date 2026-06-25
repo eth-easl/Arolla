@@ -100,8 +100,8 @@ RL_SHADOW=false
 # Observations come from the loader's /window HTTP endpoint, patches go
 # through the in-cluster apiserver.
 RL_IN_CLUSTER=false
-RL_IMAGE_TAG="v3"
-RL_CONFIGMAP="rl-controller-v3"
+RL_IMAGE_TAG="v5"
+RL_CONFIGMAP="rl-controller-v5"
 RL_LOADER_PORT_BASE=8765
 RL_LOADER_HOST=""               # default: derived from CLIENT_IP (k8s-config.sh)
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the rb-rl-v1 shadow controller over selected scenarios from scenarios_rl.md.
+# Run the rb-rl-v1 shadow controller over the scenarios embedded in the
+# chosen rl_configs/*/rb-rl-*.yaml (see the `scenarios:` block in that file).
 
 set -euo pipefail
 
@@ -39,8 +40,8 @@ Options:
   --shadow               Run the controller in shadow mode (no DestinationRule patches)
   --skip-plots           Skip final RL-vs-default comparison plotting
   --rl-in-cluster        Run the RL controller as an in-cluster Job
-  --rl-image-tag <tag>   Image tag for in-cluster mode (default: v3)
-  --rl-configmap <name>  ConfigMap name (default: rl-controller-v3)
+  --rl-image-tag <tag>   Image tag for in-cluster mode (default: v5)
+  --rl-configmap <name>  ConfigMap name (default: rl-controller-v5)
   --rl-loader-port-base <n>  /window port base on the loader (default: 8765)
   --rl-loader-host <ip>  Address pods use to reach the loader (default: \$CLIENT_IP)
   --obs-mode <mode>      Observation transport. auto|envoy|buckets|rows
