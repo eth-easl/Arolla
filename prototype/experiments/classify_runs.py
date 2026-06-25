@@ -25,6 +25,9 @@ from typing import Iterable
 
 import pandas as pd
 
+from analyze import goodput_timeseries, success_rate_timeseries
+from sustained_recovery import per_spike_recovery
+
 
 FINAL_WINDOW_SEC = 30.0
 LATENCY_ABS_THRESHOLD_MS = 500.0
@@ -33,12 +36,28 @@ GOODPUT_RECOVERY_RATIO = 0.90
 SUCCESS_RECOVERY_PCT = 95.0
 
 
+def decide_label(*, sustained_recovered: bool, latency_recovered: bool) -> str:
+    """Scenario label keyed on sustained recovery.
+
+    Sustained recovery already requires goodput and success rate to hold above
+    their relative thresholds for a continuous window, so it subsumes the old
+    final-window goodput/success guards. Latency is the only extra gate.
+    """
+    if not sustained_recovered:
+        return "metastable"
+    if latency_recovered:
+        return "recovered"
+    return "ambiguous"
+
+
 @dataclass
 class Classification:
     summary: Path
     policy: str
     label: str
     recovery_sec: float | None
+    sustained_recovery_sec: float | None
+    sustained_label: str
     final_goodput_ratio: float
     final_success_pct: float
     prefault_p95_ms: float
@@ -147,9 +166,38 @@ def classify_policy(run_dir: Path, row: dict[str, str]) -> Classification:
     )
     latency_recovered = math.isnan(cooldown_p95_ms) or cooldown_p95_ms <= latency_limit
 
+    # Sustained recovery (the new recovery leg). Per-second success-rate /
+    # goodput series relative to t_warmup_end, with relative thresholds keyed on
+    # the pre-fault baselines. Replaces the old first-crossing recovery_sec.
+    sustained_recovery_sec: float | None = None
+    sustained_label = "never"
+    if not df.empty and t_cooldown_end > t_prefault_start:
+        sr = success_rate_timeseries(df, t_prefault_start, t_cooldown_end)
+        gp = goodput_timeseries(df, t_prefault_start, t_cooldown_end)
+        pre_end_bin = round(t_fault_start - t_prefault_start)
+        prefault_sr_pct = float(sr.loc[0:pre_end_bin - 1].mean()) if not sr.empty else 0.0
+        prefault_goodput = float(gp.loc[0:pre_end_bin - 1].mean()) if not gp.empty else 0.0
+        if math.isnan(prefault_sr_pct):
+            prefault_sr_pct = 0.0
+        if math.isnan(prefault_goodput):
+            prefault_goodput = 0.0
+        sustained = per_spike_recovery(
+            timeline,
+            sr.to_dict(),
+            gp.to_dict(),
+            prefault_sr_pct=prefault_sr_pct,
+            prefault_goodput=prefault_goodput,
+            t_ref=t_prefault_start,
+        )
+        sustained_label = sustained["label"]
+        per_spike = sustained["per_spike_sec"]
+        sustained_recovery_sec = per_spike[0] if per_spike else None
+
+    sustained_recovered = sustained_recovery_sec is not None
+
     reasons = []
-    if recovery_sec is None:
-        reasons.append("no success-rate recovery")
+    if not sustained_recovered:
+        reasons.append("no sustained recovery (30s)")
     if final_goodput_ratio < GOODPUT_RECOVERY_RATIO:
         reasons.append(f"final goodput {final_goodput_ratio:.2f}x prefault")
     if final_success_pct < SUCCESS_RECOVERY_PCT:
@@ -157,29 +205,24 @@ def classify_policy(run_dir: Path, row: dict[str, str]) -> Classification:
     if not latency_recovered:
         reasons.append(f"cooldown p95 {cooldown_p95_ms:.0f}ms > {latency_limit:.0f}ms")
 
-    hard_fail = recovery_sec is None or final_goodput_ratio < 0.50 or final_success_pct < 80.0
-    clean_recovery = (
-        recovery_sec is not None
-        and final_goodput_ratio >= GOODPUT_RECOVERY_RATIO
-        and final_success_pct >= SUCCESS_RECOVERY_PCT
-        and latency_recovered
+    label = decide_label(
+        sustained_recovered=sustained_recovered,
+        latency_recovered=latency_recovered,
     )
-
-    if clean_recovery:
-        label = "recovered"
-        reason = "all recovery criteria passed"
-    elif hard_fail:
-        label = "metastable"
-        reason = "; ".join(reasons)
+    if label == "recovered":
+        reason = f"sustained recovery at {sustained_recovery_sec:.0f}s; latency recovered"
+    elif label == "metastable":
+        reason = "; ".join(reasons) or "no sustained recovery"
     else:
-        label = "ambiguous"
-        reason = "; ".join(reasons) if reasons else "mixed recovery signals"
+        reason = "; ".join(reasons) if reasons else "sustained recovery but elevated latency"
 
     return Classification(
         summary=run_dir / "summary.csv",
         policy=policy,
         label=label,
         recovery_sec=recovery_sec,
+        sustained_recovery_sec=sustained_recovery_sec,
+        sustained_label=sustained_label,
         final_goodput_ratio=final_goodput_ratio,
         final_success_pct=final_success_pct,
         prefault_p95_ms=prefault_p95_ms,
@@ -264,15 +307,16 @@ def main() -> int:
         return 1
 
     header = (
-        f"{'label':<11} {'policy':<20} {'recovery':>8} {'goodput':>8} "
+        f"{'label':<11} {'policy':<20} {'sustain':>8} {'old_rec':>8} {'goodput':>8} "
         f"{'success':>8} {'pre_p95':>8} {'cool_p95':>9}  run"
     )
     print(header)
     print("-" * len(header))
     for row in rows:
         recovery = "NaN" if row.recovery_sec is None else f"{row.recovery_sec:.0f}s"
+        sustain = "NaN" if row.sustained_recovery_sec is None else f"{row.sustained_recovery_sec:.0f}s"
         print(
-            f"{row.label:<11} {row.policy:<20} {recovery:>8} "
+            f"{row.label:<11} {row.policy:<20} {sustain:>8} {recovery:>8} "
             f"{row.final_goodput_ratio:>7.2f}x {row.final_success_pct:>7.1f}% "
             f"{row.prefault_p95_ms:>7.0f}ms {row.cooldown_p95_ms:>8.0f}ms  "
             f"{row.summary.parent}"
@@ -289,6 +333,8 @@ def main() -> int:
                     "policy",
                     "label",
                     "recovery_sec",
+                    "sustained_recovery_sec",
+                    "sustained_label",
                     "final_goodput_ratio",
                     "final_success_pct",
                     "prefault_p95_ms",
@@ -304,6 +350,8 @@ def main() -> int:
                         "policy": row.policy,
                         "label": row.label,
                         "recovery_sec": "" if row.recovery_sec is None else row.recovery_sec,
+                        "sustained_recovery_sec": "" if row.sustained_recovery_sec is None else row.sustained_recovery_sec,
+                        "sustained_label": row.sustained_label,
                         "final_goodput_ratio": row.final_goodput_ratio,
                         "final_success_pct": row.final_success_pct,
                         "prefault_p95_ms": row.prefault_p95_ms,
