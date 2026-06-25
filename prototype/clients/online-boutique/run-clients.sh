@@ -21,9 +21,8 @@ NUM_LOADERS="${NUM_LOADERS:-1}"
 
 # When RL_WINDOW_PORT_BASE > 0, each shard exposes an aiohttp /window
 # endpoint on port_base + shard_id so the in-cluster RL controller can
-# pull recent attempt rows over HTTP instead of SSH-cat. 0 (default)
-# leaves the legacy SSH-cat path in charge — safe to set on every run,
-# traffic_gen.py no-ops the server when the value is 0.
+# pull recent attempt rows over HTTP. 0 (default) disables the server —
+# safe for non-RL runs; traffic_gen.py no-ops when the value is 0.
 RL_WINDOW_PORT_BASE="${RL_WINDOW_PORT_BASE:-0}"
 RL_WINDOW_KEEP_SEC="${RL_WINDOW_KEEP_SEC:-60}"
 
@@ -98,10 +97,9 @@ start_clients() {
   # Ensure the loader's optional aiohttp dependency is present when the
   # in-cluster RL controller is active (RL_WINDOW_PORT_BASE > 0). Without
   # aiohttp, traffic_gen.py silently no-ops the /window+/buckets HTTP
-  # servers (see _start_window_server), and the in-cluster controller —
-  # which has no SSH-cat fallback — observes 0-traffic windows for the
-  # entire run. The check is a no-op when aiohttp is already installed
-  # and when RL_WINDOW_PORT_BASE=0 (legacy SSH-cat path).
+  # servers (see _start_window_server), and the in-cluster controller
+  # observes 0-traffic windows for the entire run. The check is a no-op
+  # when aiohttp is already installed and when RL_WINDOW_PORT_BASE=0.
   if [[ "${RL_WINDOW_PORT_BASE:-0}" != "0" ]]; then
     ${SSH} "bash -lc '
       set -e

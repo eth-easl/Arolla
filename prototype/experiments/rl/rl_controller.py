@@ -168,11 +168,8 @@ def load_config(path: Path) -> ControllerConfig:
     if raw_model:
         candidate = Path(raw_model)
         config_dir = path.parent
-        # Resolve relative to the script directory (where run-experiment.sh
-        # lives) — the original laptop-side path. The in-cluster Job also
-        # has to handle the ConfigMap layout (`/etc/rl/{model.zip,config.yaml}`),
-        # where the model sits next to the config under a fixed name. Try
-        # several locations in order before giving up.
+        # Resolve relative to the config directory and the in-cluster
+        # ConfigMap layout (`/etc/rl/{model.zip,config.yaml}`).
         script_dir = Path(__file__).parent
         search = []
         if candidate.is_absolute():
@@ -355,57 +352,12 @@ def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProces
     )
 
 
-def ssh_cat_metrics(
-    client_host: str,
-    ssh_user: str,
-    ssh_opts: str,
-    remote_metrics_dir: str,
-    timeout: float = 8.0,
-    since_ts: float | None = None,
-) -> str:
-    """Fetch client_attempts*.csv rows newer than `since_ts` from CLIENT_HOST.
-
-    When `since_ts` is provided, the remote shell runs an awk pre-filter so
-    only rows whose timestamp (column 1) is ≥ since_ts are sent over the
-    wire. At 1.6k RPS × 2 s decision interval that is ~3 KB per tick
-    instead of multiple MB, which both shrinks the SCP-style copy and keeps
-    parse_client_rows from re-doing the timestamp filter on millions of stale
-    rows. Falls back to a full cat when since_ts is None (legacy callers)."""
-    target = f"{ssh_user}@{client_host}"
-    cmd = ["ssh"]
-    if ssh_opts:
-        cmd.extend(ssh_opts.split())
-    if since_ts is None:
-        remote = f"cat {remote_metrics_dir}/client_attempts*.csv 2>/dev/null || true"
-    else:
-        # `awk -F,` with `$1+0 >= s` does a numeric compare on the timestamp
-        # column. The header line is dropped because parse_client_rows
-        # already skips it; the `2>/dev/null || true` keeps the call quiet
-        # when no shard files exist yet (e.g. first tick after start).
-        # Pass since_ts via -v to avoid quoting headaches in the SSH command.
-        remote = (
-            f"awk -F, -v s={since_ts:.6f} '$1+0 >= s' "
-            f"{remote_metrics_dir}/client_attempts*.csv 2>/dev/null || true"
-        )
-    cmd.extend([target, remote])
-    try:
-        proc = run_cmd(cmd, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return ""
-    if proc.returncode != 0:
-        return ""
-    return proc.stdout
-
-
 # ---------------------------------------------------------------------------
-# Observation fetch — HTTP path (in-cluster) and SSH-cat path (legacy laptop)
+# Observation fetch — HTTP path (loader /window and /buckets endpoints)
 #
 # The HTTP path fans out across `loader_ports` (one per loader shard), reuses
 # a single requests.Session so HTTP keep-alive + connection pooling apply,
-# and feeds the same `parse_client_rows` consumer as the SSH path. That
-# keeps the `build_metrics → build_observation` chain identical regardless
-# of which transport is in use, which is what makes cross-transport
-# decision-drift checks meaningful.
+# and feeds the same `parse_client_rows` consumer for the rows transport.
 # ---------------------------------------------------------------------------
 
 _HTTP_SESSION: Any = None
@@ -434,7 +386,7 @@ def http_fetch_window(
     CSV-ish text so `parse_client_rows` doesn't change.
 
     Returns "" on transport failure. The caller treats that the same way as
-    a stale SSH read (degenerate metrics → controller's startup hold-off
+    a stale read (degenerate metrics → controller's startup hold-off
     keeps it from acting on garbage)."""
     session = _get_http_session()
     if session is None:
@@ -1441,9 +1393,7 @@ def stub_policy(current: RetryBudget, cfg: ControllerConfig) -> RetryBudget:
 #
 # Lazy singleton — the TLS handshake and config load happen the first time
 # we need to patch, then the HTTP/2 PATCH stream is reused for every later
-# tick. We try in-cluster config first so the same controller binary runs
-# unmodified inside a Job; falling back to a kubeconfig file is the
-# laptop-side path (KUBECONFIG=~/.kube/config-emulab).
+# tick. We try in-cluster config first; kubeconfig is a dev-only fallback.
 # ---------------------------------------------------------------------------
 
 _K8S_API: Any = None
@@ -1664,35 +1614,19 @@ def main() -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--namespace", default="online-boutique")
-    # Laptop-side SSH path: client-host + ssh-user are required.
-    # In-cluster Job: pass --loader-url-template + --loader-ports and skip
-    # the SSH args. We can't mark either set as required at parse time
-    # because both paths share this script; we validate after parsing.
-    parser.add_argument("--client-host", default="")
-    parser.add_argument("--ssh-user", default="")
-    parser.add_argument("--ssh-opts", default="")
-    parser.add_argument("--remote-metrics-dir", default="/tmp/online-boutique-clients/metrics")
     parser.add_argument(
-        "--loader-url-template", default="",
+        "--loader-url-template", required=True,
         help=(
-            "In-cluster obs path. e.g. 'http://10.10.1.6:{port}/window'. "
+            "Loader obs endpoint, e.g. 'http://10.10.1.6:{port}/window'. "
             "Combined with --loader-ports, the controller fans out across "
             "shards per tick and assembles a single observation window."
         ),
     )
     parser.add_argument(
-        "--loader-ports", default="",
+        "--loader-ports", required=True,
         help=(
             "Comma-separated shard ports for --loader-url-template (e.g. "
-            "8765,8766,8767,8768). Required when the URL template is set."
-        ),
-    )
-    parser.add_argument(
-        "--legacy-ssh-obs", action="store_true",
-        help=(
-            "Force the SSH-cat observation path even when --loader-url-template "
-            "is provided. Used for side-by-side decision-drift checks against "
-            "the in-cluster path."
+            "8765,8766,8767,8768)."
         ),
     )
     parser.add_argument(
@@ -1758,77 +1692,30 @@ def main() -> int:
         "--legacy-patch-kubectl", action="store_true",
         help=(
             "Bypass the persistent kubernetes Python client and shell out "
-            "to `kubectl patch` per tick (legacy measurement baseline)."
-        ),
-    )
-    parser.add_argument(
-        "--legacy-full-cat", action="store_true",
-        help=(
-            "Skip the server-side awk pre-filter in ssh_cat_metrics and "
-            "transfer every CSV byte each tick (legacy measurement baseline)."
+            "to `kubectl patch` per tick (measurement baseline only)."
         ),
     )
     args = parser.parse_args()
 
-    # Resolve the observation transport. The HTTP path is the in-cluster
-    # default; the SSH path is the laptop-side fallback. We pick exactly
-    # one so the per-tick code is uniform.
-    #
-    # The `envoy` path doesn't need the loader URL/ports at all — it
-    # talks directly to caller-pod sidecars — but the in-cluster Job
-    # manifest still passes them through for the `auto` cascade
-    # (envoy → buckets → rows). The fall-back to buckets/rows only
-    # works when the loader endpoint info is configured; without it the
-    # envoy path is the only available source and a controller stalled
-    # on `/stats` failures will fail loud after 5 empty ticks.
-    use_http_obs = bool(args.loader_url_template) and not args.legacy_ssh_obs
-    loader_ports: list[int] = []
-    if use_http_obs:
-        if not args.loader_ports:
-            print(
-                "[rl_controller] --loader-url-template requires --loader-ports",
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            loader_ports = [int(p) for p in args.loader_ports.split(",") if p.strip()]
-        except ValueError:
-            print(
-                f"[rl_controller] bad --loader-ports={args.loader_ports!r}",
-                file=sys.stderr,
-            )
-            return 2
-    elif args.obs_mode == "envoy":
-        # `envoy` mode is in-cluster by construction (it needs pod IPs
-        # on the worker fabric) but doesn't require loader plumbing.
-        pass
-    else:
-        # SSH path (laptop-side, or in-cluster with --legacy-ssh-obs).
-        if not args.client_host or not args.ssh_user:
-            print(
-                "[rl_controller] SSH-obs path requires --client-host and --ssh-user "
-                "(or pass --loader-url-template + --loader-ports for HTTP, "
-                "or --obs-mode envoy for the sidecar path)",
-                file=sys.stderr,
-            )
-            return 2
+    try:
+        loader_ports = [int(p) for p in args.loader_ports.split(",") if p.strip()]
+    except ValueError:
+        print(
+            f"[rl_controller] bad --loader-ports={args.loader_ports!r}",
+            file=sys.stderr,
+        )
+        return 2
+    if not loader_ports:
+        print("[rl_controller] --loader-ports must list at least one port", file=sys.stderr)
+        return 2
 
-    # Derive the buckets URL template from the configured /window template.
-    # The loader serves both endpoints from the same aiohttp app, so the
-    # only difference is the path suffix; the controller stays oblivious
-    # to whether the loader's port assignment is hard-coded or dynamic.
-    if use_http_obs:
-        obs_mode = args.obs_mode
-    elif args.obs_mode == "envoy":
-        obs_mode = "envoy"
-    else:
-        obs_mode = "rows"
+    # Resolve the observation transport. The in-cluster Job always passes
+    # loader URL/ports; envoy mode can cascade to buckets/rows over HTTP.
+    use_http_obs = True
+    obs_mode = args.obs_mode
     # `use_envoy_obs` is the boolean for "we will or might use the envoy
     # /stats source on at least one tick" — controls whether to spin up
-    # the pod-discovery cache. It must reflect the *resolved* obs_mode
-    # (e.g. legacy-ssh-obs forces obs_mode=rows even if the operator
-    # passed --obs-mode=auto, in which case there's no point in starting
-    # the pod cache).
+    # the pod-discovery cache.
     use_envoy_obs = obs_mode in ("envoy", "auto")
     buckets_url_template = ""
     if use_http_obs:
@@ -1924,10 +1811,8 @@ def main() -> int:
             f"envoy(initial_pods={len(pod_cache.get()) if pod_cache else 0}, "
             f"mode={obs_mode})"
         )
-    elif use_http_obs:
-        obs_path_label = f"http({len(loader_ports)} shards, mode={obs_mode})"
     else:
-        obs_path_label = "ssh_cat"
+        obs_path_label = f"http({len(loader_ports)} shards, mode={obs_mode})"
     print(
         f"[rl_controller] mode={effective_mode}  apply={apply_enabled}  "
         f"model={'loaded' if model else 'none'}  "
@@ -2197,25 +2082,13 @@ def main() -> int:
                         )
 
             # Rows path — either the operator pinned --obs-mode=rows, or
-            # `auto` fell back to it because no shard served /buckets,
-            # or the SSH-cat (laptop-side) path is the only one configured.
+            # `auto` fell back to it because no shard served /buckets.
             # Skip when envoy mode owns this tick.
-            if effective_obs_mode != "envoy" and (
-                not use_http_obs or effective_obs_mode == "rows"
-            ):
+            if effective_obs_mode != "envoy" and effective_obs_mode == "rows":
                 t = time.perf_counter()
-                if use_http_obs:
-                    raw = http_fetch_window(
-                        args.loader_url_template, loader_ports, since_ts,
-                    )
-                else:
-                    raw = ssh_cat_metrics(
-                        args.client_host, args.ssh_user, args.ssh_opts,
-                        args.remote_metrics_dir,
-                        # Legacy baseline: --legacy-full-cat disables the awk
-                        # pre-filter so every byte is shipped each tick.
-                        since_ts=None if args.legacy_full_cat else since_ts,
-                    )
+                raw = http_fetch_window(
+                    args.loader_url_template, loader_ports, since_ts,
+                )
                 timing.obs_fetch_ms = (time.perf_counter() - t) * 1000.0
 
                 t = time.perf_counter()

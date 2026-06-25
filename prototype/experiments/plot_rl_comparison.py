@@ -2,27 +2,23 @@
 """
 Generate multi-policy retry-budget comparison plots.
 
-Each policy is a "policy-timestamped" run root that contains a flat list
-of scenario subdirectories with the standard
-``<scenario>/<policy-dir>/{client-metrics,sidecar-stats,rl-controller}/``
-layout. Two directory names are recognized:
+Two input layouts are supported:
 
-  - ``rb-rl-v5/``          produced by ``run_full_sweep.sh`` (Phase-B)
-  - ``envoy-retry-budget/`` produced by ``run_rl.sh`` (legacy / dev runs)
+**run_full_sweep layout** (``--sweep``) — all policies under one scenario dir::
 
-CLI:
-    --policy <path> "<label>"   (repeat for each policy)
+    <sweep_ts>/run1/<scenario>/{no-control,envoy-retry-budget,arolla,rb-rl-v5}/
 
-The first ``--policy`` is the "current" run: its per-scenario ``plots/``
-directories are overwritten with the multi-policy comparison plots
-(success-rate, latency-cdf, rps, retry breakdowns, etc).
+**Legacy cross-run layout** (repeat ``--policy``) — one RL policy dir per run root::
 
-RL-specific plots (selected_retry_budget, action_analysis, resource_breakdown)
-are written for every policy whose scenario contains an ``rl-controller/``
-directory, into that policy's own ``<scenario>/plots/`` folder.
+    <run_root>/<scenario>/{rb-rl-v5|envoy-retry-budget}/
 
-Scenario set is the *union* over policies: a scenario only present in some
-policies is still plotted, with fewer lines.
+CLI::
+
+    --sweep <path>              run_full_sweep output (auto-discovers policies)
+    --policy <path> "<label>"   legacy: repeat per run root to compare
+
+Comparison plots are written into each scenario's ``plots/`` directory.
+RL-specific plots go there too when an ``rl-controller/`` subtree exists.
 """
 
 from __future__ import annotations
@@ -55,18 +51,55 @@ from classify_runs import classify_policy  # noqa: E402
 # The underlying Istio mechanism name — used for experiment.json policy_spec lookups.
 POLICY = "envoy-retry-budget"
 
-# Policy subdirectory candidates for filesystem discovery, in preference order.
-# run_full_sweep.sh renames the RL output dir to "rb-rl-v5/";
-# run_rl.sh keeps the Istio name "envoy-retry-budget/".
+# RL policy subdirectory names used by run_rl.sh (legacy) and run_full_sweep.sh.
 _RL_POLICY_DIRS = ("rb-rl-v5", "envoy-retry-budget")
 
 
+def _is_policy_data_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "client-metrics").is_dir()
+
+
+def _policy_dirs_in_scenario(scenario_dir: Path) -> dict[str, Path]:
+    """Return ``{policy_slug: policy_dir}`` for children with client-metrics."""
+    return {
+        child.name: child
+        for child in sorted(scenario_dir.iterdir())
+        if _is_policy_data_dir(child)
+    }
+
+
+def _is_scenario_dir(path: Path) -> bool:
+    return bool(_policy_dirs_in_scenario(path))
+
+
+def _scenario_children(run_dir: Path) -> list[Path]:
+    return sorted(d for d in run_dir.iterdir() if d.is_dir() and _is_scenario_dir(d))
+
+
+def _order_policy_slugs(slugs: list[str]) -> list[str]:
+    """Stable policy order: analyze.POLICY_ORDER, then rb-rl-*, then the rest."""
+    slug_set = set(slugs)
+    ordered = [s for s in analyze.POLICY_ORDER if s in slug_set]
+    ordered.extend(sorted(s for s in slugs if s.startswith("rb-rl-") and s not in ordered))
+    ordered.extend(sorted(s for s in slugs if s not in ordered))
+    return ordered
+
+
+def _rl_variant_label(slug: str) -> str:
+    if slug.startswith("rb-rl-"):
+        return f"RB-RL {slug.removeprefix('rb-rl-')}"
+    return slug
+
+
 def _find_policy_dir(scenario_dir: Path) -> Path:
-    """Return the RL policy subdir under *scenario_dir*, trying rb-rl-v5 first."""
+    """Return the RL policy subdir under *scenario_dir* (legacy helper)."""
     for name in _RL_POLICY_DIRS:
         d = scenario_dir / name
         if d.is_dir():
             return d
+    for child in sorted(scenario_dir.iterdir()):
+        if child.is_dir() and child.name.startswith("rb-rl-"):
+            return child
     return scenario_dir / _RL_POLICY_DIRS[0]  # fallback (may not exist)
 
 # Palette assigned in --policy declaration order. Calm blue + good green
@@ -125,14 +158,40 @@ def build_policies(pairs: list[tuple[str, str]]) -> list[PolicyRun]:
     return out
 
 
+def build_policies_from_slugs(slugs: list[str], run_dir: Path) -> list[PolicyRun]:
+    """Build PolicyRun objects from policy subdirectory names (sweep mode)."""
+    out: list[PolicyRun] = []
+    palette_i = 0
+    for slug in slugs:
+        label = analyze.POLICY_LABELS.get(slug) or _rl_variant_label(slug)
+        if slug in analyze.POLICY_COLORS:
+            color = analyze.POLICY_COLORS[slug]
+            fill = analyze.POLICY_COLORS_FILL[slug]
+            ls = analyze.POLICY_LINESTYLES[slug]
+            mk = analyze.POLICY_MARKERS[slug]
+        else:
+            color, fill, ls, mk = _PALETTE[palette_i % len(_PALETTE)]
+            palette_i += 1
+        out.append(PolicyRun(
+            path=run_dir.resolve(),
+            label=label,
+            key=slug,
+            color=color,
+            fill_color=fill,
+            linestyle=ls,
+            marker=mk,
+        ))
+    return out
+
+
 def _patch_analyze(policies: list[PolicyRun]) -> None:
     """Inject the active policy set into analyze.py's module-level style dicts."""
-    analyze.POLICY_LABELS    = {p.key: p.label       for p in policies}
-    analyze.POLICY_COLORS    = {p.key: p.color       for p in policies}
+    analyze.POLICY_LABELS = {p.key: p.label for p in policies}
+    analyze.POLICY_COLORS = {p.key: p.color for p in policies}
     analyze.POLICY_COLORS_FILL = {p.key: p.fill_color for p in policies}
-    analyze.POLICY_MARKERS   = {p.key: p.marker      for p in policies}
-    analyze.POLICY_LINESTYLES = {p.key: p.linestyle  for p in policies}
-    analyze.POLICY_ORDER     = [p.key for p in policies]
+    analyze.POLICY_MARKERS = {p.key: p.marker for p in policies}
+    analyze.POLICY_LINESTYLES = {p.key: p.linestyle for p in policies}
+    analyze.POLICY_ORDER = [p.key for p in policies]
 
 
 # ---------------------------------------------------------------------------
@@ -753,7 +812,7 @@ def plot_resource_breakdown(
 # ---------------------------------------------------------------------------
 
 def plot_resource_comparison(
-    scenario_paths: dict[str, Path],
+    policy_dirs: dict[str, Path],
     policies: list[PolicyRun],
     out_path: Path,
     experiment: dict | None = None,
@@ -775,10 +834,10 @@ def plot_resource_comparison(
     # Read resources for every policy that has a resource-usage.csv.
     policy_resources: dict[str, dict[str, dict[str, list[float]]]] = {}
     for p in policies:
-        scen_dir = scenario_paths.get(p.key)
-        if scen_dir is None:
+        pol_dir = policy_dirs.get(p.key)
+        if pol_dir is None:
             continue
-        csv_path = _find_policy_dir(scen_dir) / "resource-usage.csv"
+        csv_path = pol_dir / "resource-usage.csv"
         res = read_resources(csv_path)
         if res:
             policy_resources[p.key] = res
@@ -1132,43 +1191,71 @@ def _canonical_scenario_label(label: Path | str) -> str:
 
 
 def locate_scenario_policy_dir(policy_root: Path, scenario_label: str) -> Path | None:
-    """Find the ``envoy-retry-budget`` directory for *scenario_label* under *policy_root*.
-
-    Tries (in order for each candidate policy-dir name in ``_RL_POLICY_DIRS``):
-      • ``policy_root / scenario_label / <pol>``  (flat layout, current)
-      • ``policy_root / * / * / scenario_label / <pol>``
-        (legacy nested layout — kept for stragglers that haven't been flattened)
-    """
+    """Find an RL policy data dir for *scenario_label* under *policy_root* (legacy)."""
     for pol in _RL_POLICY_DIRS:
         direct = policy_root / scenario_label / pol
         if (direct / "client-metrics").exists():
             return direct
 
-    # Legacy nested layout: try both policy dir names.
     candidates = [
         c for pol in _RL_POLICY_DIRS
         for c in policy_root.glob(f"*/*/{scenario_label}/{pol}/client-metrics")
     ]
     if candidates:
         return candidates[0].parent
+
+    nested = policy_root / scenario_label
+    if nested.is_dir():
+        return _find_policy_dir(nested)
     return None
 
 
+def resolve_sweep_run_dir(sweep_root: Path, repeat: int = 1) -> Path:
+    """Resolve a ``run_full_sweep`` output path to the run directory with scenarios."""
+    sweep_root = sweep_root.resolve()
+    if _scenario_children(sweep_root):
+        return sweep_root
+
+    run_dir = sweep_root / f"run{repeat}"
+    if run_dir.is_dir() and _scenario_children(run_dir):
+        return run_dir.resolve()
+
+    for candidate in sorted(sweep_root.glob("run*")):
+        if candidate.is_dir() and _scenario_children(candidate):
+            return candidate.resolve()
+
+    raise FileNotFoundError(
+        f"no scenario directories found under {sweep_root} "
+        f"(expected runN/<scenario>/{{policy}}/client-metrics layout)"
+    )
+
+
+def discover_sweep_scenarios(
+    run_dir: Path,
+    policy_filter: set[str] | None = None,
+) -> tuple[list[PolicyRun], list[dict[str, Any]]]:
+    """Discover scenarios and policies from a ``run_full_sweep`` run directory."""
+    all_slugs: set[str] = set()
+    scenarios: list[dict[str, Any]] = []
+
+    for scen_dir in _scenario_children(run_dir):
+        policy_dirs = _policy_dirs_in_scenario(scen_dir)
+        if policy_filter is not None:
+            policy_dirs = {k: v for k, v in policy_dirs.items() if k in policy_filter}
+        if not policy_dirs:
+            continue
+        all_slugs.update(policy_dirs)
+        scenarios.append({
+            "label": _canonical_scenario_label(scen_dir.relative_to(run_dir)),
+            "policy_dirs": policy_dirs,
+        })
+
+    policies = build_policies_from_slugs(_order_policy_slugs(sorted(all_slugs)), run_dir)
+    return policies, scenarios
+
+
 def discover_scenarios(policies: list[PolicyRun]) -> list[dict[str, Any]]:
-    """Walk every policy and bucket its scenario directories by canonical label.
-
-    Returns a list of dicts (preserving discovery order across policies):
-        [
-          {
-            "label": "rate_rps=...__fault_duration=...__fault_rate=cartservice-...pct",
-            "paths": {policy_key: scenario_dir_path, ...},
-          },
-          ...
-        ]
-
-    A scenario only present in some policies is included; the missing
-    policies are simply absent from its ``paths`` dict.
-    """
+    """Walk legacy ``--policy`` roots and bucket RL dirs by canonical scenario label."""
     seen: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for p in policies:
@@ -1188,10 +1275,10 @@ def discover_scenarios(policies: list[PolicyRun]) -> list[dict[str, Any]]:
             canon = _canonical_scenario_label(rel)
             entry = seen.get(canon)
             if entry is None:
-                entry = {"label": canon, "paths": {}}
+                entry = {"label": canon, "policy_dirs": {}}
                 seen[canon] = entry
                 order.append(canon)
-            entry["paths"][p.key] = scenario_dir
+            entry["policy_dirs"][p.key] = policy_dir
     return [seen[k] for k in order]
 
 
@@ -1219,29 +1306,19 @@ def _classification_row_for_policy(summary_path: Path, policy_name: str) -> dict
 
 def write_comparison_health(
     out_dir: Path,
-    scenario_paths: dict[str, Path],
+    policy_dirs: dict[str, Path],
     policies: list[PolicyRun],
 ) -> None:
-    """Write a per-policy classification snapshot to *out_dir*.
-
-    Each policy contributes one row; the JSON is keyed by policy key so
-    downstream tooling can pick out specific policies by their slug.
-    """
+    """Write a per-policy classification snapshot to *out_dir*."""
     rows: dict[str, dict[str, Any]] = {}
+    summary_path = out_dir / "summary.csv"
     for p in policies:
-        scen_dir = scenario_paths.get(p.key)
-        if scen_dir is None:
+        if p.key not in policy_dirs:
             continue
-        summary_path = scen_dir / "summary.csv"
-        row = next(
-            (_classification_row_for_policy(summary_path, pol)
-             for pol in _RL_POLICY_DIRS
-             if _classification_row_for_policy(summary_path, pol) is not None),
-            None,
-        )
+        row = _classification_row_for_policy(summary_path, p.key)
         if row is None:
             continue
-        cls = classify_policy(scen_dir, row)
+        cls = classify_policy(out_dir, row)
         rows[p.key] = {
             "label": p.label,
             "classification": cls.label,
@@ -1271,6 +1348,7 @@ def _cleanup_stale_pngs(plots_dir: Path) -> None:
 
 def plot_rl_only_for_policy(
     policy: PolicyRun,
+    policy_dir: Path,
     scenario_dir: Path,
     experiment: dict,
 ) -> None:
@@ -1280,7 +1358,6 @@ def plot_rl_only_for_policy(
     ``action_analysis`` and ``action_scatter`` only if the policy run
     contains rl-controller data; otherwise silently no-ops.
     """
-    policy_dir = _find_policy_dir(scenario_dir)
     rl_dir = policy_dir / "rl-controller"
     if not rl_dir.exists():
         return
@@ -1313,23 +1390,18 @@ def plot_rl_only_for_policy(
 
 
 def compare_scenario(
-    scenario_paths: dict[str, Path],
+    policy_dirs: dict[str, Path],
     policies: list[PolicyRun],
     experiment: dict,
     out_scenario_dir: Path,
 ) -> None:
-    """Generate multi-policy comparison plots into ``<out_scenario_dir>/plots/``.
-
-    Only policies that contributed to *scenario_paths* are plotted. The
-    output location is the FIRST policy's scenario folder (so the current
-    run's per-scenario ``plots/`` are replaced with the comparison view).
-    """
+    """Generate multi-policy comparison plots into ``<out_scenario_dir>/plots/``."""
     runs: dict[str, dict] = {}
     for p in policies:
-        scen_dir = scenario_paths.get(p.key)
-        if scen_dir is None:
+        pol_dir = policy_dirs.get(p.key)
+        if pol_dir is None:
             continue
-        data = analyze.process_policy(_find_policy_dir(scen_dir), experiment)
+        data = analyze.process_policy(pol_dir, experiment)
         if data:
             runs[p.key] = data
 
@@ -1340,7 +1412,7 @@ def compare_scenario(
     plots_dir = out_scenario_dir / "plots"
     plots_dir.mkdir(exist_ok=True)
 
-    write_comparison_health(out_scenario_dir, scenario_paths, policies)
+    write_comparison_health(out_scenario_dir, policy_dirs, policies)
 
     _cleanup_stale_pngs(plots_dir)
 
@@ -1389,17 +1461,17 @@ def compare_scenario(
     )
 
     plot_resource_comparison(
-        scenario_paths, policies, plots_dir / "resource_comparison", experiment,
+        policy_dirs, policies, plots_dir / "resource_comparison", experiment,
     )
 
 
 def plot_retry_budget_for_policy(
     policy: PolicyRun,
+    policy_dir: Path,
     scenario_dir: Path,
     experiment: dict,
 ) -> bool:
     """Regenerate only ``selected_retry_budget.png`` for one policy."""
-    policy_dir = _find_policy_dir(scenario_dir)
     timeline = analyze.load_timeline(policy_dir)
     t_warmup_end = float(timeline["t_warmup_end"]) if timeline and "t_warmup_end" in timeline else None
     decisions = read_decisions(
@@ -1407,7 +1479,7 @@ def plot_retry_budget_for_policy(
         t_ref=t_warmup_end,
     )
     if not decisions["t"]:
-        print(f"  [warn] no rl-controller decisions for {scenario_dir}", flush=True)
+        print(f"  [warn] no rl-controller decisions for {policy_dir}", flush=True)
         return False
     plots_dir = scenario_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -1427,10 +1499,10 @@ def plot_retry_budget_for_policy(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _load_experiment_for_scenario(scenario_paths: dict[str, Path]) -> dict:
+def _load_experiment_for_scenario(policy_dirs: dict[str, Path]) -> dict:
     """Load the first available ``experiment.json`` for a scenario."""
-    for scen_dir in scenario_paths.values():
-        exp_json = scen_dir / "experiment.json"
+    for pol_dir in policy_dirs.values():
+        exp_json = pol_dir.parent / "experiment.json"
         if exp_json.exists():
             try:
                 with exp_json.open() as f:
@@ -1444,21 +1516,38 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Multi-policy retry-budget comparison plots. "
-            "Pass --policy <path> <label> once per policy; the first policy "
-            "is the 'current' run whose per-scenario plots/ are replaced "
-            "with the comparison view."
+            "Use --sweep for run_full_sweep output, or repeat --policy for "
+            "legacy cross-run RL-vs-baseline comparisons."
         )
+    )
+    parser.add_argument(
+        "--sweep",
+        metavar="PATH",
+        help=(
+            "run_full_sweep output root or runN directory. "
+            "Auto-discovers no-control, envoy-retry-budget, arolla, rb-rl-v*, … "
+            "under each scenario."
+        ),
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Repeat index when --sweep points at a sweep timestamp dir (default: 1)",
+    )
+    parser.add_argument(
+        "--policies",
+        metavar="A,B,...",
+        help="Comma-separated policy subdir filter (sweep mode only)",
     )
     parser.add_argument(
         "--policy",
         action="append",
         nargs=2,
         metavar=("PATH", "LABEL"),
-        required=True,
         help=(
-            "Policy run root (timestamped) and human-readable label. "
-            "Repeat for each policy you want to compare. "
-            "Example: --policy outputs/prototype/rb-mega-fault-sweep/20260501_151421 'Static RB'"
+            "Legacy: policy run root (timestamped) and human-readable label. "
+            "Repeat for each policy you want to compare across separate runs."
         ),
     )
     parser.add_argument(
@@ -1474,34 +1563,55 @@ def main() -> int:
     args = parser.parse_args()
     if args.health_only and args.retry_budget_plot_only:
         parser.error("use either --health-only or --retry-budget-plot-only, not both")
+    if args.sweep and args.policy:
+        parser.error("use either --sweep or --policy, not both")
+    if not args.sweep and not args.policy:
+        parser.error("one of --sweep or --policy is required")
 
-    pairs: list[tuple[str, str]] = [(p[0], p[1]) for p in args.policy]
-    policies = build_policies(pairs)
+    policy_filter: set[str] | None = None
+    if args.policies:
+        policy_filter = {p.strip() for p in args.policies.split(",") if p.strip()}
+
+    if args.sweep:
+        try:
+            run_dir = resolve_sweep_run_dir(Path(args.sweep), repeat=args.repeat)
+        except FileNotFoundError as exc:
+            print(f"[plot-rl] {exc}", file=sys.stderr)
+            return 1
+        policies, scenarios = discover_sweep_scenarios(run_dir, policy_filter)
+        if not policies:
+            print(f"[plot-rl] no policies discovered under {run_dir}", file=sys.stderr)
+            return 1
+        print(
+            f"[plot-rl] sweep mode: {run_dir} "
+            f"({len(policies)} policies, {len(scenarios)} scenarios)",
+            file=sys.stderr,
+        )
+    else:
+        pairs: list[tuple[str, str]] = [(p[0], p[1]) for p in args.policy]
+        policies = build_policies(pairs)
+        scenarios = discover_scenarios(policies)
+        if not scenarios:
+            print("[plot-rl] no scenarios discovered under any --policy root", file=sys.stderr)
+            return 1
+        print(
+            f"[plot-rl] {len(policies)} policy(ies), "
+            f"{len(scenarios)} scenario(s) in the union",
+            file=sys.stderr,
+        )
+
     _patch_analyze(policies)
-
-    scenarios = discover_scenarios(policies)
-    if not scenarios:
-        print("[plot-rl] no scenarios discovered under any --policy root", file=sys.stderr)
-        return 1
-
-    print(
-        f"[plot-rl] {len(policies)} policy(ies), "
-        f"{len(scenarios)} scenario(s) in the union",
-        file=sys.stderr,
-    )
 
     count = 0
     for scen in scenarios:
         label = scen["label"]
-        paths: dict[str, Path] = scen["paths"]
-        experiment = _load_experiment_for_scenario(paths)
+        policy_dirs: dict[str, Path] = scen["policy_dirs"]
+        experiment = _load_experiment_for_scenario(policy_dirs)
 
-        # Owner scenario dir = first --policy that contains this scenario.
-        # Comparison plots and per-scenario health JSON are written here.
-        owner_key = next((p.key for p in policies if p.key in paths), None)
+        owner_key = next((p.key for p in policies if p.key in policy_dirs), None)
         if owner_key is None:
             continue
-        owner_dir = paths[owner_key]
+        owner_dir = policy_dirs[owner_key].parent
         owner_policy = next(p for p in policies if p.key == owner_key)
 
         print(f"[plot-rl] {label}  (owner={owner_policy.label})", flush=True)
@@ -1509,27 +1619,25 @@ def main() -> int:
         try:
             if args.retry_budget_plot_only:
                 for p in policies:
-                    scen_dir = paths.get(p.key)
-                    if scen_dir is None:
+                    pol_dir = policy_dirs.get(p.key)
+                    if pol_dir is None:
                         continue
-                    plot_retry_budget_for_policy(p, scen_dir, experiment)
+                    plot_retry_budget_for_policy(p, pol_dir, owner_dir, experiment)
                 count += 1
                 continue
 
             if args.health_only:
-                write_comparison_health(owner_dir, paths, policies)
+                write_comparison_health(owner_dir, policy_dirs, policies)
                 count += 1
                 continue
 
-            # RL-specific plots per policy that has rl-controller data.
             for p in policies:
-                scen_dir = paths.get(p.key)
-                if scen_dir is None:
+                pol_dir = policy_dirs.get(p.key)
+                if pol_dir is None:
                     continue
-                plot_rl_only_for_policy(p, scen_dir, experiment)
+                plot_rl_only_for_policy(p, pol_dir, owner_dir, experiment)
 
-            # Multi-policy comparison plots into the owner's scenario folder.
-            compare_scenario(paths, policies, experiment, owner_dir)
+            compare_scenario(policy_dirs, policies, experiment, owner_dir)
             count += 1
         except Exception as exc:
             print(f"  [error] {exc}", flush=True)

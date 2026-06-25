@@ -211,8 +211,7 @@ __marimo__/
 # Custom
 outputs/
 *.csv
-!prototype/experiments/sweep_scenarios.csv
-!prototype/experiments/sweep_scenarios_ext.csv
+!prototype/experiments/scenarios/sweep_scenarios.csv
 prototype/experiments/rl/rl_controller_image/*.tar.gz
 *.png
 *.DS_Store
