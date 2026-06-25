@@ -3,12 +3,9 @@
 # (no-control, envoy-retry-budget, arolla, rb-rl-v5), with N repeats for
 # noise-averaging. Output root is outputs/proto-report/ unless overridden.
 #
-# Scenarios come from TWO files:
-#   * sweep_scenarios.csv      — the canonical 25 (cartservice, single spike,
-#                                post-cart-stress-open client).
-#   * sweep_scenarios_ext.csv  — the 5 new ones (per-row client profile, fault
-#                                manifest, num_spikes, inter_spike_gap, and the
-#                                RL callee/caller-labels for alt-service runs).
+# Scenarios are defined in scenarios/sweep_scenarios.csv (30 rows: S01–S25,
+# AS1–AS2). Each row specifies client profile, fault manifest, spike pattern,
+# and RL callee/caller-labels.
 #
 # Per (repeat, scenario) this script:
 #   1. Calls run-experiment.sh once with the 3 non-RL baselines.
@@ -79,16 +76,31 @@ done
 SWEEP_DIR="${OUTPUT_ROOT}/${SWEEP_TS}"
 mkdir -p "${SWEEP_DIR}"
 
-# In-cluster RL Jobs mount ConfigMaps (e.g. rl-controller-v5). One-shot cluster
-# setup may only have created a subset — apply all variants from rl/rl_configs/ so
-# FailedMount does not surface mid-sweep.
+# In-cluster RL Jobs mount ConfigMaps (e.g. rl-controller-v5). Apply each
+# variant's bundle before the sweep so FailedMount does not surface mid-run.
 if ! "${DRY_RUN}"; then
-  "${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh"
+  for _entry in "${RL_VARIANTS[@]}"; do
+    IFS=: read -r _variant _cfg _cm <<< "${_entry}"
+    _ver="${_cfg#*/rl_configs/}"
+    _ver="${_ver%%/*}"
+    "${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh" "${_ver}"
+  done
 fi
 
-SCENARIOS_CSV="${SCRIPT_DIR}/sweep_scenarios.csv"
-SCENARIOS_EXT_CSV="${SCRIPT_DIR}/sweep_scenarios_ext.csv"
+SCENARIOS_CSV="${SCRIPT_DIR}/scenarios/sweep_scenarios.csv"
 [[ -f "${SCENARIOS_CSV}" ]] || { echo "missing ${SCENARIOS_CSV}" >&2; exit 1; }
+
+# Flatten to TSV so quoted caller-labels fields (commas) survive shell splitting.
+SCENARIOS_TSV="$(python3 - "${SCENARIOS_CSV}" <<'PY'
+import csv, sys
+cols = ["id","client_profile","fault_manifest","rate_rps","fault_duration",
+        "fault_rate","num_spikes","inter_spike_gap","rl_callee",
+        "rl_caller_labels","default_label"]
+with open(sys.argv[1], newline="") as f:
+    for r in csv.DictReader(f):
+        print("\t".join(r[c] for c in cols))
+PY
+)"
 
 # Wanted-IDs set as a space-padded string for bash 3.2 compatibility
 # (no associative arrays). Empty when --ids was not passed.
@@ -199,7 +211,6 @@ run_rl_variant() {  # $1=variant $2=cfg_rel $3=cm $4=scen_dir $5=profile $6=mani
     --settle 30
     --output "${tmp_out}"
     --rl-controller-config "${cfg_path}"
-    --rl-in-cluster
     --rl-image-tag "${RL_IMAGE_TAG}"
     --rl-configmap "${cm}"
     --rl-loader-port-base "${RL_LOADER_PORT_BASE}"
@@ -315,47 +326,16 @@ echo "[full-sweep] repeats: ${REPEATS}"
 echo "[full-sweep] non-RL policies: ${NON_RL_POLICIES}"
 echo "[full-sweep] RL variants: ${RL_VARIANTS[*]%%:*}"
 
-# Pre-flatten the extended CSV to TSV so the quoted caller-labels field (which
-# contains commas) survives shell field-splitting. Empty if the file is absent.
-EXT_TSV=""
-if [[ -f "${SCENARIOS_EXT_CSV}" ]]; then
-  EXT_TSV="$(python3 - "${SCENARIOS_EXT_CSV}" <<'PY'
-import csv, sys
-cols = ["id","client_profile","fault_manifest","rate_rps","fault_duration",
-        "fault_rate","num_spikes","inter_spike_gap","rl_callee",
-        "rl_caller_labels","default_label"]
-with open(sys.argv[1], newline="") as f:
-    for r in csv.DictReader(f):
-        print("\t".join(r[c] for c in cols))
-PY
-)"
-fi
-
 for (( run_idx=1; run_idx<=REPEATS; run_idx++ )); do
   RUN_DIR="${SWEEP_DIR}/run${run_idx}"
   mkdir -p "${RUN_DIR}"
   echo "[full-sweep] ===== repeat ${run_idx}/${REPEATS} → ${RUN_DIR} ====="
 
-  # --- canonical 25 (cartservice, single spike, post-cart-stress-open) ---
-  # fd 3 keeps stdin (fd 0) free for ssh and friends inside the loop body.
-  while IFS=, read -r id rps fd fr default_label <&3; do
-    [[ "${id}" == "id" ]] && continue
+  # Read via fd 3 so ssh inside run-experiment.sh cannot swallow remaining rows.
+  while IFS=$'\t' read -r id profile manifest rps fd fr nsp gap callee labels default_label <&3; do
     [[ -z "${id}" ]] && continue
-    run_scenario "${RUN_DIR}" "${id}" "post-cart-stress-open" \
-      "cartservice-${fr}pct" "${rps}" "${fd}" 1 0 \
-      "cartservice" "frontend,checkoutservice" "${default_label}" \
+    run_scenario "${RUN_DIR}" "${id}" "${profile}" "${manifest}" "${rps}" "${fd}" \
+      "${nsp}" "${gap}" "${callee}" "${labels}" "${default_label}" \
       || echo "[full-sweep][warn] scenario ${id} failed in repeat ${run_idx}; continuing (resumable)"
-  done 3< "${SCENARIOS_CSV}"
-
-  # --- the 5 new scenarios (per-row profile / manifest / spikes / RL target) ---
-  # Read via fd 3 (like the canonical loop) so ssh inside run-experiment.sh
-  # cannot swallow the remaining rows from stdin and end the loop early.
-  if [[ -n "${EXT_TSV}" ]]; then
-    while IFS=$'\t' read -r id profile manifest rps fd fr nsp gap callee labels default_label <&3; do
-      [[ -z "${id}" ]] && continue
-      run_scenario "${RUN_DIR}" "${id}" "${profile}" "${manifest}" "${rps}" "${fd}" \
-        "${nsp}" "${gap}" "${callee}" "${labels}" "${default_label}" \
-        || echo "[full-sweep][warn] scenario ${id} failed in repeat ${run_idx}; continuing (resumable)"
-    done 3<<< "${EXT_TSV}"
-  fi
+  done 3<<< "${SCENARIOS_TSV}"
 done

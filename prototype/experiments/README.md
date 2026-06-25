@@ -16,13 +16,11 @@ prototype/experiments/
 ├── run_full_sweep.sh        ← 30-scenario batch driver (Phase-B sweep)
 ├── run_rl.sh                ← dev/debug: one RL run + comparison plots
 │
-├── scenarios/               ← .conf files for named single-run scenarios
+├── scenarios/               ← named single-run .conf files + Phase-B sweep CSV
 │   ├── sustained-failure.conf   (paper §6.2.1 — 50% abort for 60 s)
 │   ├── recovery-overload.conf   (paper §6.2.2 — product-catalog fault)
-│   └── transient.conf           (single burst approximation)
-│
-├── sweep_scenarios.csv      ← canonical 25 S-series scenarios (Phase-B)
-├── sweep_scenarios_ext.csv  ← 5 extended scenarios: MS1–MS3, AS1–AS2
+│   ├── transient.conf           (single burst approximation)
+│   └── sweep_scenarios.csv      ← 30 Phase-B scenarios (S01–S25, MS1–MS3, AS1–AS2)
 │
 ├── rl/                      ← RL controller implementation
 │   ├── rl_controller.py         ← RL agent (policy gradient, in-process)
@@ -104,6 +102,10 @@ prototype/experiments/run_full_sweep.sh \
 
 # Three repeats
 prototype/experiments/run_full_sweep.sh --repeats 3
+
+# Comparison plots for a completed sweep (all policies under each scenario)
+python3 prototype/experiments/plot_rl_comparison.py \
+  --sweep outputs/proto-report/<sweep_ts>
 ```
 
 ### RL-only dev run
@@ -153,30 +155,24 @@ Every experiment produces one subdirectory per policy:
                                          └── resource-usage.csv
 ```
 
-`plot_rl_comparison.py` discovers both `rb-rl-v5/` and `envoy-retry-budget/`
-automatically.
+`plot_rl_comparison.py` auto-discovers the `run_full_sweep` layout (all four
+policies under each scenario). Legacy `run_rl.sh` cross-run comparisons still
+use repeated `--policy` flags.
 
 ---
 
-## Scenario CSVs
+## Scenario CSV
 
-**`sweep_scenarios.csv`** — 25 canonical scenarios (S01–S25).
-
-Columns: `id, rate_rps, fault_duration, fault_rate, default_label`
-
-All canonical scenarios fault `cartservice` with `post-cart-stress-open` load.
-`fault_rate` is the abort percentage; `fault_manifest` is
-`cartservice-<fault_rate>pct.yaml`.
-
-**`sweep_scenarios_ext.csv`** — 5 extended scenarios (MS1–MS3 multi-spike,
-AS1–AS2 alternate-service).
+**`scenarios/sweep_scenarios.csv`** — all 30 Phase-B scenarios (S01–S25 canonical
+cartservice runs, MS1–MS3 multi-spike, AS1–AS2 alternate-service).
 
 Columns: `id, client_profile, fault_manifest, rate_rps, fault_duration,
 fault_rate, num_spikes, inter_spike_gap, rl_callee, rl_caller_labels,
 default_label`
 
-`rl_callee` / `rl_caller_labels` retarget the RL observation to the faulted
-service rather than the default `cartservice`.
+Canonical rows (S01–S25) use `post-cart-stress-open`, single spike,
+`cartservice` faults, and default RL caller labels. Extended rows vary
+profile, manifest, spike pattern, and `rl_callee` / `rl_caller_labels`.
 
 ---
 

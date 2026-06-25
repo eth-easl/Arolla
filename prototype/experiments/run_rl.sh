@@ -18,13 +18,10 @@ SKIP_PLOTS=false
 SHADOW_MODE=false
 NUM_LOADERS_OVERRIDE=""
 
-RL_IN_CLUSTER=false
 RL_IMAGE_TAG=""
 RL_CONFIGMAP=""
 RL_LOADER_PORT_BASE=""
 RL_LOADER_HOST=""
-RL_LEGACY_PATCH=false
-RL_LEGACY_FETCH=false
 RL_OBS_MODE=""
 
 usage() {
@@ -39,8 +36,7 @@ Options:
   --num-loaders <n>      Override experiment.num_loaders
   --shadow               Run the controller in shadow mode (no DestinationRule patches)
   --skip-plots           Skip final RL-vs-default comparison plotting
-  --rl-in-cluster        Run the RL controller as an in-cluster Job
-  --rl-image-tag <tag>   Image tag for in-cluster mode (default: v5)
+  --rl-image-tag <tag>   Image tag for the in-cluster controller Job (default: v5)
   --rl-configmap <name>  ConfigMap name (default: rl-controller-v5)
   --rl-loader-port-base <n>  /window port base on the loader (default: 8765)
   --rl-loader-host <ip>  Address pods use to reach the loader (default: \$CLIENT_IP)
@@ -60,13 +56,10 @@ while (( $# > 0 )); do
     --num-loaders) NUM_LOADERS_OVERRIDE="$2"; shift 2 ;;
     --shadow) SHADOW_MODE=true; shift ;;
     --skip-plots) SKIP_PLOTS=true; shift ;;
-    --rl-in-cluster) RL_IN_CLUSTER=true; shift ;;
     --rl-image-tag) RL_IMAGE_TAG="$2"; shift 2 ;;
     --rl-configmap) RL_CONFIGMAP="$2"; shift 2 ;;
     --rl-loader-port-base) RL_LOADER_PORT_BASE="$2"; shift 2 ;;
     --rl-loader-host) RL_LOADER_HOST="$2"; shift 2 ;;
-    --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
-    --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
     --obs-mode) RL_OBS_MODE="$2"; shift 2 ;;
     -n|--dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -279,15 +272,10 @@ PY
   )
   [[ "${RESOURCE_ENABLED}" == "true" ]] && cmd+=(--resource-sampling)
   [[ "${SHADOW_MODE}" == "true" ]] && cmd+=(--rl-shadow)
-  if [[ "${RL_IN_CLUSTER}" == "true" ]]; then
-    cmd+=(--rl-in-cluster)
-    [[ -n "${RL_IMAGE_TAG}" ]] && cmd+=(--rl-image-tag "${RL_IMAGE_TAG}")
-    [[ -n "${RL_CONFIGMAP}" ]] && cmd+=(--rl-configmap "${RL_CONFIGMAP}")
-    [[ -n "${RL_LOADER_PORT_BASE}" ]] && cmd+=(--rl-loader-port-base "${RL_LOADER_PORT_BASE}")
-    [[ -n "${RL_LOADER_HOST}" ]] && cmd+=(--rl-loader-host "${RL_LOADER_HOST}")
-  fi
-  [[ "${RL_LEGACY_PATCH}" == "true" ]] && cmd+=(--rl-legacy-patch)
-  [[ "${RL_LEGACY_FETCH}" == "true" ]] && cmd+=(--rl-legacy-fetch)
+  [[ -n "${RL_IMAGE_TAG}" ]] && cmd+=(--rl-image-tag "${RL_IMAGE_TAG}")
+  [[ -n "${RL_CONFIGMAP}" ]] && cmd+=(--rl-configmap "${RL_CONFIGMAP}")
+  [[ -n "${RL_LOADER_PORT_BASE}" ]] && cmd+=(--rl-loader-port-base "${RL_LOADER_PORT_BASE}")
+  [[ -n "${RL_LOADER_HOST}" ]] && cmd+=(--rl-loader-host "${RL_LOADER_HOST}")
   [[ -n "${RL_OBS_MODE}" ]] && cmd+=(--rl-obs-mode "${RL_OBS_MODE}")
   [[ "${DRY_RUN}" == "true" ]] && cmd+=(--dry-run)
 

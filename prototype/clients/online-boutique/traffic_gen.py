@@ -1032,13 +1032,10 @@ async def open_loop_firer(
 # RL controller. One server per shard, on `port_base + shard_id`, so the
 # controller can fan-out across all 4 shard ports per tick.
 #
-# aiohttp is imported lazily because:
-#   * the loader machine doesn't always have it installed (opt-in per
-#     cluster bootstrap; legacy SSH-cat path still works without it),
-#   * even on machines with it, this module is sometimes imported by the
-#     test harness which doesn't need the server.
-# If the import fails the server is silently disabled and a warning is
-# printed; the controller's --legacy-ssh-obs flag is the fallback.
+# aiohttp is imported lazily because the loader machine doesn't always have
+# it installed (opt-in per cluster bootstrap), and this module is sometimes
+# imported by the test harness which doesn't need the server.
+# If the import fails the server is silently disabled and a warning is printed.
 
 
 async def _handle_window(request: "Any") -> "Any":
@@ -1114,8 +1111,7 @@ async def _start_window_server(port: int) -> "Any":
         from aiohttp import web  # noqa: PLC0415
     except ImportError:
         print(
-            "[traffic_gen] aiohttp is not installed; /window server "
-            "disabled (controller falls back to --legacy-ssh-obs).",
+            "[traffic_gen] aiohttp is not installed; /window server disabled.",
             file=sys.stderr,
         )
         return None
@@ -1130,8 +1126,7 @@ async def _start_window_server(port: int) -> "Any":
         await site.start()
     except OSError as exc:
         print(
-            f"[traffic_gen] /window server bind failed on :{port}: {exc}; "
-            "the controller will fall back to --legacy-ssh-obs.",
+            f"[traffic_gen] /window server bind failed on :{port}: {exc}.",
             file=sys.stderr,
         )
         await runner.cleanup()
@@ -1213,8 +1208,7 @@ async def main_async(args) -> int:
     # Enable the in-memory ring + /window server when a port base is
     # configured. The ring is enabled even if aiohttp is missing — it's
     # cheap and lets us see in the log what the server *would* have
-    # exposed. The server start is best-effort: failure prints a warning
-    # and the controller transparently falls back to --legacy-ssh-obs.
+    # exposed. The server start is best-effort: failure prints a warning.
     window_runner = None
     if args.rl_window_port_base > 0:
         _WINDOW_SHARD_ID = shard_id

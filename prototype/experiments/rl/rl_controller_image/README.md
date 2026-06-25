@@ -2,8 +2,8 @@
 
 Builds a small container that runs `rl_controller.py` inside the cluster as
 a `Job`. Combined with the loader's `/window` HTTP endpoint and the
-in-cluster `kubernetes` client, it replaces the laptop-side SSH + kubectl
-loop that drove every patch in the legacy controller.
+in-cluster `kubernetes` client, the controller observes retry pressure and
+patches the retry-budget DestinationRule at runtime.
 
 ## Layout
 
@@ -32,6 +32,6 @@ kubectl -n online-boutique create configmap rl-controller-v3 \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-`run-experiment.sh --rl-in-cluster` then templates and applies the Job
+`run-experiment.sh --rl-controller-config` templates and applies the Job
 manifest at the start of each policy run, follows its logs, copies
 `/var/log/rl/` out, and deletes the Job.

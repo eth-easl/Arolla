@@ -12,6 +12,44 @@ source "${PROTO_DIR}/k8s-config.sh"
 
 NAMESPACE="online-boutique"
 RL_ROOT="${SCRIPT_DIR}/rl_configs"
+VERSION=""
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <version>
+
+Apply RL controller ConfigMap(s) for rl_configs/<version>/ into ${NAMESPACE}.
+
+  <version>   Directory under rl_configs/ (e.g. v5, v1). Applies every
+              rb-rl-*.yaml in that directory (v1 ships v1-a and v1-b).
+
+Examples:
+  $(basename "$0") v5
+  $(basename "$0") v1
+EOF
+}
+
+while (( $# > 0 )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -*) echo "ensure_rl_configmaps: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [[ -n "${VERSION}" ]]; then
+        echo "ensure_rl_configmaps: extra argument: $1" >&2
+        usage >&2
+        exit 2
+      fi
+      VERSION="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -n "${VERSION}" ]] || {
+  echo "ensure_rl_configmaps: missing <version>" >&2
+  usage >&2
+  exit 2
+}
 
 apply_cm() {
   local name="$1" zip="$2" yaml="$3"
@@ -70,31 +108,47 @@ kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 || {
   exit 1
 }
 
-apply_cm rl-controller-v1-a "${RL_ROOT}/v1/model-v1.zip" "${RL_ROOT}/v1/rb-rl-v1-a.yaml"
-apply_cm rl-controller-v1-b "${RL_ROOT}/v1/model-v1.zip" "${RL_ROOT}/v1/rb-rl-v1-b.yaml"
-apply_cm rl-controller-v2 "${RL_ROOT}/v2/model-v2.zip" "${RL_ROOT}/v2/rb-rl-v2.yaml"
-apply_cm rl-controller-v3 "${RL_ROOT}/v3/model-v3.zip" "${RL_ROOT}/v3/rb-rl-v3.yaml"
-apply_cm rl-controller-v4 "${RL_ROOT}/v4/model-v4.zip" "${RL_ROOT}/v4/rb-rl-v4.yaml"
+# Apply rl_configs/<version>/:
+#   * one model zip per directory (model-<version>.zip or any *.zip)
+#   * one or more rb-rl-*.yaml configs (e.g. v1-a / v1-b share model-v1.zip)
+#   * ConfigMap name: rl-controller-<suffix> where suffix is the yaml stem
+#     after stripping the rb-rl- prefix (rb-rl-v2.yaml → rl-controller-v2).
+dir="${RL_ROOT}/${VERSION}/"
+[[ -d "${dir}" ]] || {
+  echo "ensure_rl_configmaps: unknown version ${VERSION} (${dir} not found)" >&2
+  exit 1
+}
 
-# Future versions (v5+) auto-register once the labmate drops the
-# trained model and a matching `rb-rl-<dir>.yaml` config under
-# rl_configs/<dir>/. The ConfigMap name follows the same `rl-controller-<dir>`
-# convention as the explicit entries above. No action needed for the
-# v1..v4 set: that's already covered above.
-for dir in "${RL_ROOT}"/v*/; do
-  [[ -d "${dir}" ]] || continue
-  name="$(basename "${dir}")"
-  case "${name}" in
-    v1|v2|v3|v4) continue ;;  # already applied above
-  esac
-  yaml="${dir}rb-rl-${name}.yaml"
+zip=""
+if [[ -f "${dir}model-${VERSION}.zip" ]]; then
+  zip="${dir}model-${VERSION}.zip"
+else
+  shopt -s nullglob
   zip_files=("${dir}"*.zip)
-  if [[ ! -f "${yaml}" ]]; then
-    continue
+  shopt -u nullglob
+  if [[ -f "${zip_files[0]:-}" ]]; then
+    zip="${zip_files[0]}"
+    if ((${#zip_files[@]} > 1)); then
+      echo "ensure_rl_configmaps: ${VERSION}: multiple zips, using $(basename "${zip}")" >&2
+    fi
   fi
-  if [[ ! -f "${zip_files[0]}" ]]; then
-    echo "ensure_rl_configmaps: skipping ${name} (no model zip yet)" >&2
-    continue
-  fi
-  apply_cm "rl-controller-${name}" "${zip_files[0]}" "${yaml}"
+fi
+
+shopt -s nullglob
+yaml_files=("${dir}"rb-rl-*.yaml)
+shopt -u nullglob
+
+if ((${#yaml_files[@]} == 0)); then
+  echo "ensure_rl_configmaps: no rb-rl-*.yaml under ${dir}" >&2
+  exit 1
+fi
+if [[ -z "${zip}" ]]; then
+  echo "ensure_rl_configmaps: missing model zip in ${dir}" >&2
+  exit 1
+fi
+
+for yaml in "${yaml_files[@]}"; do
+  stem="$(basename "${yaml}" .yaml)"
+  suffix="${stem#rb-rl-}"
+  apply_cm "rl-controller-${suffix}" "${zip}" "${yaml}"
 done

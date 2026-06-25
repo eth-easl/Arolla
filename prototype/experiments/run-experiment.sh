@@ -95,21 +95,15 @@ PHASE_SNAPSHOTS=false
 RL_CONTROLLER_CONFIG=""
 RL_SHADOW=false
 
-# when --rl-in-cluster is on, the controller runs as an
-# in-cluster Job (one per policy) instead of as a Laptop-side subprocess.
-# Observations come from the loader's /window HTTP endpoint, patches go
-# through the in-cluster apiserver.
-RL_IN_CLUSTER=false
+# When --rl-controller-config is set, the controller runs as an in-cluster
+# Job (one per policy). Observations come from the loader's /window HTTP
+# endpoint (or Envoy sidecar stats), patches go through the in-cluster
+# apiserver.
 RL_IMAGE_TAG="v5"
 RL_CONFIGMAP="rl-controller-v5"
 RL_LOADER_PORT_BASE=8765
 RL_LOADER_HOST=""               # default: derived from CLIENT_IP (k8s-config.sh)
 
-# Measurement baselines: when true, the controller falls back to
-# its patch / fetch paths (kubectl subprocess, full-CSV cat).
-# Used only for the baseline row
-RL_LEGACY_PATCH=false
-RL_LEGACY_FETCH=false
 # Observation transport. `auto` is back-compatible with loaders that
 # pre-date the /buckets endpoint (falls back to /window on 404 /
 # connection refused) and with clusters that don't expose Envoy
@@ -250,11 +244,8 @@ Options:
       --rl-shadow             Run the controller in shadow mode: observe and
                               log decisions but do NOT patch the retry-budget
                               DestinationRule.
-      --rl-in-cluster         Run the RL controller as a Kubernetes Job
-                              instead of as a laptop-side subprocess.
-                              Implies the loader's /window HTTP endpoint
-                              and the in-cluster apiserver patch path.
-      --rl-image-tag <tag>    Image tag for in-cluster mode (default: ${RL_IMAGE_TAG}).
+      --rl-image-tag <tag>    Image tag for the in-cluster controller Job
+                              (default: ${RL_IMAGE_TAG}).
                               Must match build.sh / distribute.sh.
       --rl-configmap <name>   ConfigMap holding model.zip + config.yaml
                               (default: ${RL_CONFIGMAP}).
@@ -337,13 +328,10 @@ while (( $# > 0 )); do
     --phase-snapshots) PHASE_SNAPSHOTS=true; shift ;;
     --rl-controller-config) RL_CONTROLLER_CONFIG="$2"; shift 2 ;;
     --rl-shadow)     RL_SHADOW=true; shift ;;
-    --rl-in-cluster) RL_IN_CLUSTER=true; shift ;;
     --rl-image-tag)  RL_IMAGE_TAG="$2"; shift 2 ;;
     --rl-configmap)  RL_CONFIGMAP="$2"; shift 2 ;;
     --rl-loader-port-base) RL_LOADER_PORT_BASE="$2"; shift 2 ;;
     --rl-loader-host) RL_LOADER_HOST="$2"; shift 2 ;;
-    --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
-    --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
     --rl-obs-mode)   RL_OBS_MODE="$2"; shift 2 ;;
     --rl-callee)     RL_CALLEE="$2"; shift 2 ;;
     --rl-caller-labels) RL_CALLER_LABELS="$2"; shift 2 ;;
@@ -407,11 +395,10 @@ fi
 # never reaches Ready or sit on stale logs without the new pod creating any.
 RL_JOB_MANIFEST="${PROTO_DIR}/manifests/online-boutique/rl-controller/job.yaml"
 RL_LOADER_PORTS_CSV=""
-if "${RL_IN_CLUSTER}"; then
-  [[ -n "${RL_CONTROLLER_CONFIG}" ]] || err "--rl-in-cluster requires --rl-controller-config"
+if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
   [[ -f "${RL_JOB_MANIFEST}" ]] || err "RL Job manifest not found: ${RL_JOB_MANIFEST}"
   if [[ -z "${RL_LOADER_HOST}" ]]; then
-    [[ -n "${CLIENT_IP:-}" ]] || err "--rl-in-cluster: CLIENT_IP not set in k8s-config.sh"
+    [[ -n "${CLIENT_IP:-}" ]] || err "RL controller: CLIENT_IP not set in k8s-config.sh"
     RL_LOADER_HOST="${CLIENT_IP}"
   fi
   # Build the comma-port list from NUM_LOADERS. Defaulting NUM_LOADERS=1
@@ -426,9 +413,11 @@ if "${RL_IN_CLUSTER}"; then
     fi
   done
   if ! kubectl -n "${NAMESPACE}" get configmap "${RL_CONFIGMAP}" >/dev/null 2>&1; then
-    err "ConfigMap '${RL_CONFIGMAP}' not found in '${NAMESPACE}'. Apply RL bundles with: ${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh"
+    _rl_ver="${RL_CONFIGMAP#rl-controller-}"
+    _rl_ver="${_rl_ver%%-*}"
+    err "ConfigMap '${RL_CONFIGMAP}' not found in '${NAMESPACE}'. Apply RL bundles with: ${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh ${_rl_ver}"
   fi
-  log "rl-in-cluster: loader=${RL_LOADER_HOST} ports=${RL_LOADER_PORTS_CSV} image=rl-controller:${RL_IMAGE_TAG} configmap=${RL_CONFIGMAP}"
+  log "rl-controller: loader=${RL_LOADER_HOST} ports=${RL_LOADER_PORTS_CSV} image=rl-controller:${RL_IMAGE_TAG} configmap=${RL_CONFIGMAP}"
 fi
 
 # Base routing config (mesh-wide retries, no fault). Re-applied to "remove"
@@ -950,81 +939,55 @@ run_single() {
 
   if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
     mkdir -p "${rl_controller_dir}"
-    if "${RL_IN_CLUSTER}"; then
-      # controller runs as an in-cluster Job, observations come
-      # from the loader's HTTP /window endpoint, patches go through the
-      # in-cluster apiserver.
-      _run_id="$(echo -n "${policy}-$(date +%H%M%S)-$$" | tr -c 'a-z0-9-' '-' | cut -c1-30)"
-      _rl_job_name="rl-controller-${_run_id}"
-      phase "[${policy}] apply Job ${_rl_job_name} (image rl-controller:${RL_IMAGE_TAG}, obs-mode=${RL_OBS_MODE})"
-      _tmp_job="$(mktemp)"
-      sed \
-        -e "s|__RUN_ID__|${_run_id}|g" \
-        -e "s|__NAMESPACE__|${NAMESPACE}|g" \
-        -e "s|__IMAGE__|rl-controller:${RL_IMAGE_TAG}|g" \
-        -e "s|__CONFIGMAP__|${RL_CONFIGMAP}|g" \
-        -e "s|__LOADER_HOST__|${RL_LOADER_HOST}|g" \
-        -e "s|__LOADER_PORTS__|${RL_LOADER_PORTS_CSV}|g" \
-        -e "s|__OBS_MODE__|${RL_OBS_MODE}|g" \
-        -e "s|__CALLEE__|${RL_CALLEE}|g" \
-        -e "s|__CALLER_LABELS__|${RL_CALLER_LABELS}|g" \
-        "${RL_JOB_MANIFEST}" > "${_tmp_job}"
-      kubectl apply -f "${_tmp_job}" >/dev/null
-      rm -f "${_tmp_job}"
+    # Controller runs as an in-cluster Job; observations come from the
+    # loader's HTTP /window endpoint (or Envoy sidecar stats), patches go
+    # through the in-cluster apiserver.
+    _run_id="$(echo -n "${policy}-$(date +%H%M%S)-$$" | tr -c 'a-z0-9-' '-' | cut -c1-30)"
+    _rl_job_name="rl-controller-${_run_id}"
+    phase "[${policy}] apply Job ${_rl_job_name} (image rl-controller:${RL_IMAGE_TAG}, obs-mode=${RL_OBS_MODE})"
+    _tmp_job="$(mktemp)"
+    sed \
+      -e "s|__RUN_ID__|${_run_id}|g" \
+      -e "s|__NAMESPACE__|${NAMESPACE}|g" \
+      -e "s|__IMAGE__|rl-controller:${RL_IMAGE_TAG}|g" \
+      -e "s|__CONFIGMAP__|${RL_CONFIGMAP}|g" \
+      -e "s|__LOADER_HOST__|${RL_LOADER_HOST}|g" \
+      -e "s|__LOADER_PORTS__|${RL_LOADER_PORTS_CSV}|g" \
+      -e "s|__OBS_MODE__|${RL_OBS_MODE}|g" \
+      -e "s|__CALLEE__|${RL_CALLEE}|g" \
+      -e "s|__CALLER_LABELS__|${RL_CALLER_LABELS}|g" \
+      "${RL_JOB_MANIFEST}" > "${_tmp_job}"
+    kubectl apply -f "${_tmp_job}" >/dev/null
+    rm -f "${_tmp_job}"
 
-      log "[${policy}] waiting for pod of ${_rl_job_name} (≤ ${RL_POD_READY_TIMEOUT_SEC}s)"
-      # Pod name is not predictable up-front (the Job's controller appends
-      # a random suffix). Poll until selector matches a pod, then wait for
-      # it to be Ready.
-      _rl_pod=""
-      for _i in $(seq 1 45); do
-        _rl_pod="$(kubectl -n "${NAMESPACE}" get pod -l job-name="${_rl_job_name}" \
-          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-        [[ -n "${_rl_pod}" ]] && break
-        sleep 1
-      done
-      [[ -n "${_rl_pod}" ]] || err "[${policy}] no pod ever appeared for ${_rl_job_name}"
-      if ! kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod "${_rl_pod}" \
-        --timeout="${RL_POD_READY_TIMEOUT_SEC}s"; then
-        log "[${policy}] pod ${_rl_pod} not Ready — tail of describe (events / state):"
-        kubectl -n "${NAMESPACE}" describe pod "${_rl_pod}" 2>/dev/null | tail -n 50 >&2 || true
-        err "[${policy}] pod ${_rl_pod} did not reach Ready within ${RL_POD_READY_TIMEOUT_SEC}s"
-      fi
-
-      log "[${policy}] streaming logs from ${_rl_pod} → rl-controller.log"
-      kubectl -n "${NAMESPACE}" logs -f "${_rl_pod}" \
-        > "${rl_controller_dir}/rl-controller.log" 2>&1 &
-      rl_controller_pid="$!"
-      HELPER_PIDS+=("${rl_controller_pid}")
-      # Stash the names so the cleanup path (after stop_load) knows to
-      # kubectl-cp logs out and delete the Job.
-      _rl_pod_for_cleanup="${_rl_pod}"
-      _rl_job_for_cleanup="${_rl_job_name}"
-    else
-      # in-process Laptop-side controller (legacy path).
-      phase "[${policy}] start RL controller ($(basename "${RL_CONTROLLER_CONFIG}"))"
-      controller_args=(
-        python3 "${SCRIPT_DIR}/rl/rl_controller.py"
-        --config "${RL_CONTROLLER_CONFIG}"
-        --out-dir "${rl_controller_dir}"
-        --namespace "${NAMESPACE}"
-        --client-host "${CLIENT_HOST}"
-        --ssh-user "${SSH_USER}"
-        --ssh-opts "${SSH_OPTS}"
-        --remote-metrics-dir "${REMOTE_METRICS_DIR}"
-      )
-      [[ "${RL_SHADOW}" == true ]] && controller_args+=(--shadow)
-      [[ "${RL_LEGACY_PATCH}" == true ]] && controller_args+=(--legacy-patch-kubectl)
-      [[ "${RL_LEGACY_FETCH}" == true ]] && controller_args+=(--legacy-full-cat)
-      controller_args+=(--obs-mode "${RL_OBS_MODE}")
-      controller_args+=(--envoy-callee "${RL_CALLEE}")
-      controller_args+=(--envoy-caller-labels "${RL_CALLER_LABELS}")
-      "${controller_args[@]}" > "${rl_controller_dir}/rl-controller.log" 2>&1 &
-      rl_controller_pid="$!"
-      HELPER_PIDS+=("${rl_controller_pid}")
-      _rl_pod_for_cleanup=""
-      _rl_job_for_cleanup=""
+    log "[${policy}] waiting for pod of ${_rl_job_name} (≤ ${RL_POD_READY_TIMEOUT_SEC}s)"
+    # Pod name is not predictable up-front (the Job's controller appends
+    # a random suffix). Poll until selector matches a pod, then wait for
+    # it to be Ready.
+    _rl_pod=""
+    for _i in $(seq 1 45); do
+      _rl_pod="$(kubectl -n "${NAMESPACE}" get pod -l job-name="${_rl_job_name}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+      [[ -n "${_rl_pod}" ]] && break
+      sleep 1
+    done
+    [[ -n "${_rl_pod}" ]] || err "[${policy}] no pod ever appeared for ${_rl_job_name}"
+    if ! kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod "${_rl_pod}" \
+      --timeout="${RL_POD_READY_TIMEOUT_SEC}s"; then
+      log "[${policy}] pod ${_rl_pod} not Ready — tail of describe (events / state):"
+      kubectl -n "${NAMESPACE}" describe pod "${_rl_pod}" 2>/dev/null | tail -n 50 >&2 || true
+      err "[${policy}] pod ${_rl_pod} did not reach Ready within ${RL_POD_READY_TIMEOUT_SEC}s"
     fi
+
+    log "[${policy}] streaming logs from ${_rl_pod} → rl-controller.log"
+    kubectl -n "${NAMESPACE}" logs -f "${_rl_pod}" \
+      > "${rl_controller_dir}/rl-controller.log" 2>&1 &
+    rl_controller_pid="$!"
+    HELPER_PIDS+=("${rl_controller_pid}")
+    # Stash the names so the cleanup path (after stop_load) knows to
+    # kubectl-cp logs out and delete the Job.
+    _rl_pod_for_cleanup="${_rl_pod}"
+    _rl_job_for_cleanup="${_rl_job_name}"
   fi
 
   if "${RESOURCE_SAMPLING}"; then
@@ -1063,12 +1026,9 @@ run_single() {
   t_cooldown_end=$((t_recovery_end + COOLDOWN_SEC))
 
   # ---- Start load ----
-  # When --rl-in-cluster is on, export RL_WINDOW_PORT_BASE so each loader
-  # shard launches its /window aiohttp server on port_base + shard_id.
-  # The default of 0 leaves the server disabled; traffic_gen.py no-ops
-  # the server in that case so non-RL runs are byte-for-byte the same
-  # as before.
-  if "${RL_IN_CLUSTER}"; then
+  # When an RL controller is configured, export RL_WINDOW_PORT_BASE so each
+  # loader shard launches its /window aiohttp server on port_base + shard_id.
+  if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
     export RL_WINDOW_PORT_BASE="${RL_LOADER_PORT_BASE}"
   else
     unset RL_WINDOW_PORT_BASE 2>/dev/null || true
@@ -1229,7 +1189,7 @@ run_single() {
   # before tearing down the Job. We do this BEFORE stopping the log-stream
   # helper so the kubectl-cp doesn't race a still-writing controller, but
   # AFTER the run finished so /var/log/rl/ is fully populated.
-  if "${RL_IN_CLUSTER}" && [[ -n "${_rl_pod_for_cleanup:-}" ]]; then
+  if [[ -n "${RL_CONTROLLER_CONFIG}" && -n "${_rl_pod_for_cleanup:-}" ]]; then
     log "[${policy}] kubectl cp ${_rl_pod_for_cleanup}:/var/log/rl/. → ${rl_controller_dir}/"
     kubectl -n "${NAMESPACE}" cp "${_rl_pod_for_cleanup}:/var/log/rl/." \
       "${rl_controller_dir}/" >/dev/null 2>&1 || \
@@ -1239,7 +1199,7 @@ run_single() {
   stop_helper_pid "${rl_controller_pid}"
   stop_helper_pid "${resource_sampler_pid}"
 
-  if "${RL_IN_CLUSTER}" && [[ -n "${_rl_job_for_cleanup:-}" ]]; then
+  if [[ -n "${RL_CONTROLLER_CONFIG}" && -n "${_rl_job_for_cleanup:-}" ]]; then
     log "[${policy}] kubectl delete job ${_rl_job_for_cleanup}"
     kubectl -n "${NAMESPACE}" delete job "${_rl_job_for_cleanup}" \
       --ignore-not-found >/dev/null 2>&1 || true
