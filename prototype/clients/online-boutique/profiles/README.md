@@ -195,19 +195,39 @@ attempt, is_retry, status, ok, latency_s
 - `is_retry` is 1 for `attempt > 1`, 0 otherwise.
 - `ok` is 1 when `200 <= status < 400`.
 
-## Profile library (current)
+## Profile library
 
-| Profile                  | Mode       | Purpose |
-|--------------------------|------------|---------|
-| `post-cart-stress-open`  | open-loop  | Cart-focused stress for cartservice fault scenarios (canonical 25 + multi-spike) |
-| `browse-stress-open`     | open-loop  | Browse workload for productcatalogservice alt-service scenarios (AS1) |
-| `checkout-stress-open`   | open-loop  | Checkout workflow for paymentservice alt-service scenarios (AS2) |
+### Open-loop (RL sweep scenarios)
 
-`run-experiment.sh` and `run_full_sweep.sh` pass `--client-profiles` explicitly so only
-the profile for each scenario is loaded.
+Used by `run_full_sweep.sh` / `run_rl.sh`. Each uses open-loop firing with
+per-scenario `rate_rps` tuned by the driver before each run.
 
-All three profiles use open-loop firing with per-scenario `rate_rps` tuned by
-`run_full_sweep.sh` before each run.
+| Profile                  | Purpose |
+|--------------------------|---------|
+| `post-cart-stress-open`  | Cart-focused stress for cartservice fault scenarios (canonical 25 + multi-spike) |
+| `browse-stress-open`     | Browse workload for productcatalogservice alt-service scenarios (AS1) |
+| `checkout-stress-open`   | Checkout workflow for paymentservice alt-service scenarios (AS2) |
+
+### Closed-loop (legacy effectiveness / fairness experiments)
+
+Used by `paper.sh` effectiveness and fairness targets and the sweep drivers
+(`run_sweep.sh` / `run_grid.sh`). Retained from the pre-RL prototype.
+
+| Profile         | Workers × RPS | Root rps | Retries | Backoff          | Purpose                                           |
+|-----------------|---------------|---------:|---------|------------------|---------------------------------------------------|
+| `browse`        | 4 × 1.0       |      4.0 | 2       | exp 0.1→2s + jit | Read-only catalog browser (no POSTs, no checkout) |
+| `checkout`      | 3 × 0.5       |      1.5 | 3       | exp 0.1→2s + jit | Full shopper: browse + cart + checkout workflow   |
+| `conservative`  | 3 × 0.5       |      1.5 | 1       | fixed 500ms      | Well-behaved tenant for §6.4 fairness             |
+| `aggressive`    | 20 × 2.0      |     40.0 | 5       | none (0ms)       | Misbehaving tenant (§6.4) — mixed request workload|
+| `cart-stress`   | 20 × 2.0      |     40.0 | 5       | none (0ms)       | Cart-focused aggressive retry — 100% POST /cart   |
+| `no-retry`      | 2 × 1.0       |      2.0 | 0       | —                | Control — raw server-visible failure rate         |
+
+The `fairness-same-rps/` and `fairness-diff-rps/` directories each hold six
+per-tenant client profiles (`client1`–`client6`) for the §6.4 multi-tenant
+fairness experiments driven by `paper.sh`.
+
+`run-experiment.sh`, `run_full_sweep.sh`, and `paper.sh` pass `--client-profiles`
+explicitly so only the profiles needed for each scenario are loaded.
 
 ### Subsetting for a specific experiment
 
