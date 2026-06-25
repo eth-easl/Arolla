@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Run the rb-rl-v1 shadow controller over the scenarios embedded in the
 # chosen rl_configs/*/rb-rl-*.yaml (see the `scenarios:` block in that file).
+# Run the rb-rl-v1 shadow controller over the scenarios embedded in the
+# chosen rl_configs/*/rb-rl-*.yaml (see the `scenarios:` block in that file).
 
 set -euo pipefail
 
