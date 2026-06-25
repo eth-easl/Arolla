@@ -10,6 +10,10 @@
 #   __OBS_MODE__       auto | rows | buckets | envoy
 #                      (controller obs transport; see
 #                      rl_controller.py --obs-mode)
+#   __CALLEE__         service whose caller-side envoy stats are observed
+#                      (default cartservice; retarget for alt-service faults)
+#   __CALLER_LABELS__  comma-separated app= labels of that callee's callers
+#                      (default frontend,checkoutservice)
 #
 # A `Job` (not `Deployment`) is used so the controller's state — including
 # the SB3 model's warm caches and the persistent kubernetes client — is
@@ -56,6 +60,8 @@ spec:
             - "--loader-url-template=http://__LOADER_HOST__:{port}/window"
             - "--loader-ports=__LOADER_PORTS__"
             - "--obs-mode=__OBS_MODE__"
+            - "--envoy-callee=__CALLEE__"
+            - "--envoy-caller-labels=__CALLER_LABELS__"
           # 1 cpu / 1 GiB is comfortable for the SB3 forward pass and
           # decision-rate computations at 2s cadence; bump if profiling
           # ever shows CPU contention.

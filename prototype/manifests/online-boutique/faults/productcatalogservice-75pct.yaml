@@ -1,0 +1,47 @@
+# Alt-service AS1 fault — sustained partial failure on productcatalogservice,
+# 75% abort.
+#
+# productcatalogservice has very high fan-in: frontend, checkoutservice, AND
+# recommendationservice all call it, so a failure here fans retries along
+# multiple call paths simultaneously. This is the high-fan-in analogue of the
+# post-cart-stress fault used by the AS1 alternate-service scenario.
+#
+# IMPORTANT: this VirtualService reuses the base name `productcatalog-routing`
+# (see ../../service-retries.yaml), NOT `productcatalogservice-routing`, so
+# `kubectl apply` REPLACES the base entry in place. run-experiment.sh restores
+# the base routing by re-applying service-retries.yaml after the fault window;
+# that restore only works if the fault VS shares the base name. A differently
+# named VS would leave a duplicate route rule live after the experiment.
+#
+# Retry block mirrors the base productcatalog entry (attempts: 3,
+# perTryTimeout: 50ms) so chain retries stay on during the fault — without it,
+# applying the fault would disable retries and we'd see only the raw 75% drop
+# instead of the retry-amplification dynamics. See cartservice-75pct.yaml for
+# the rationale shared with the cart-side variant.
+#
+# Usage:
+#   Apply:  kubectl apply -f faults/productcatalogservice-75pct.yaml
+#   Remove: kubectl apply -f service-retries.yaml         ← restore base
+#   (run-experiment.sh handles the apply-to-restore pattern automatically.)
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: productcatalog-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - productcatalogservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 75.0
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 50ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: productcatalogservice

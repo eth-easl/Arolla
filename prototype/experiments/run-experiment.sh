@@ -116,6 +116,14 @@ RL_LEGACY_FETCH=false
 # sidecar stats. Explicit `envoy` / `buckets` / `rows` lets a sweep
 # A/B without editing job.yaml by hand.
 RL_OBS_MODE="auto"
+# Service the RL controller observes (envoy caller-side stats) and, implicitly,
+# controls. The budget patch always targets the wildcard `arolla-baseline-retry-
+# budget` DestinationRule (*.online-boutique), so it reaches every service; only
+# the *observation* needs retargeting for non-cart faults. Defaults reproduce
+# the controller's built-in cartservice defaults so cart scenarios are
+# unchanged. Override for alt-service scenarios (e.g. productcatalogservice).
+RL_CALLEE="cartservice"
+RL_CALLER_LABELS="frontend,checkoutservice"
 # In-cluster Job pod: after a namespace-wide rollout, workers can stay busy
 # (disk/cpu) and delay image unpack / schedule; 60s was tight on Emulab.
 RL_POD_READY_TIMEOUT_SEC="${RL_POD_READY_TIMEOUT_SEC:-180}"
@@ -262,6 +270,15 @@ Options:
                                 buckets force the loader's pre-
                                         aggregated counters.
                                 rows    force per-attempt rows.
+      --rl-callee <svc>       Service the RL controller observes (envoy
+                              caller-side stats). Default: ${RL_CALLEE}.
+                              Set to the faulted service for alt-service
+                              scenarios (e.g. productcatalogservice). The
+                              budget patch is wildcard so control reaches it
+                              regardless; only observation needs retargeting.
+      --rl-caller-labels <csv> Comma-separated app= labels of the pods whose
+                              Envoy sidecars expose retry counters for the
+                              callee. Default: ${RL_CALLER_LABELS}.
       --resource-sampling     Sample cart/Istio pod and node CPU/memory during
                               each policy run.
       --resource-sample-interval <sec>
@@ -328,6 +345,8 @@ while (( $# > 0 )); do
     --rl-legacy-patch) RL_LEGACY_PATCH=true; shift ;;
     --rl-legacy-fetch) RL_LEGACY_FETCH=true; shift ;;
     --rl-obs-mode)   RL_OBS_MODE="$2"; shift 2 ;;
+    --rl-callee)     RL_CALLEE="$2"; shift 2 ;;
+    --rl-caller-labels) RL_CALLER_LABELS="$2"; shift 2 ;;
     --resource-sampling) RESOURCE_SAMPLING=true; shift ;;
     --resource-sample-interval) RESOURCE_SAMPLE_INTERVAL_SEC="$2"; shift 2 ;;
     --num-spikes)    NUM_SPIKES="$2"; shift 2 ;;
@@ -947,6 +966,8 @@ run_single() {
         -e "s|__LOADER_HOST__|${RL_LOADER_HOST}|g" \
         -e "s|__LOADER_PORTS__|${RL_LOADER_PORTS_CSV}|g" \
         -e "s|__OBS_MODE__|${RL_OBS_MODE}|g" \
+        -e "s|__CALLEE__|${RL_CALLEE}|g" \
+        -e "s|__CALLER_LABELS__|${RL_CALLER_LABELS}|g" \
         "${RL_JOB_MANIFEST}" > "${_tmp_job}"
       kubectl apply -f "${_tmp_job}" >/dev/null
       rm -f "${_tmp_job}"
@@ -996,6 +1017,8 @@ run_single() {
       [[ "${RL_LEGACY_PATCH}" == true ]] && controller_args+=(--legacy-patch-kubectl)
       [[ "${RL_LEGACY_FETCH}" == true ]] && controller_args+=(--legacy-full-cat)
       controller_args+=(--obs-mode "${RL_OBS_MODE}")
+      controller_args+=(--envoy-callee "${RL_CALLEE}")
+      controller_args+=(--envoy-caller-labels "${RL_CALLER_LABELS}")
       "${controller_args[@]}" > "${rl_controller_dir}/rl-controller.log" 2>&1 &
       rl_controller_pid="$!"
       HELPER_PIDS+=("${rl_controller_pid}")

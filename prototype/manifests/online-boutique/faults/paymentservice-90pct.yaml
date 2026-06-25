@@ -1,0 +1,46 @@
+# Alt-service AS2 fault — chain amplification on the deepest leaf, 90% abort.
+#
+# 90% of requests to paymentservice return HTTP 503. Payment is the deepest
+# leaf reachable from a client checkout: client → frontend → checkoutservice
+# → paymentservice. Each layer above payment has its own Istio retry policy
+# (attempts: 3), so a single failed payment call can produce up to
+# 4 (client) × 4 (frontend → checkout) × 4 (checkout → payment) = 64
+# payment-attempts at the bottom.
+#
+# Why 90% and not 50%: at 50% abort, 3 retries per hop mask the fault almost
+# entirely (logical success ≈ 1 − 0.5^k stays high), so no-control sails
+# through unaffected — calibration confirmed zero end-user impact. 90% abort
+# is needed to break through the retry masking and actually exercise the
+# multiplicative amplification this scenario is meant to measure.
+#
+# Reuses the base name `paymentservice-routing` (see ../../service-retries.yaml)
+# so kubectl apply REPLACES the base entry; run-experiment.sh restores base
+# routing by re-applying service-retries.yaml afterward. The retry block is
+# re-included so chain retries stay on during the fault.
+#
+# Usage:
+#   Apply:  kubectl apply -f faults/paymentservice-90pct.yaml
+#   Remove: kubectl apply -f service-retries.yaml         ← restore base
+#   (run-experiment.sh handles the apply-to-restore pattern automatically.)
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: paymentservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - paymentservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 90.0
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 100ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: paymentservice
