@@ -1,0 +1,41 @@
+{
+  "name": "aggressive",
+  "description": "Misbehaving client (paper §6.4) — short timeout, many retries, zero backoff. Same request mix as `checkout` so the aggressive behavior shows up on the same code paths as a well-behaved client. Provisioned for ~40 rps of root requests under normal conditions; under the fault window + retry amplification, total HTTP call rate can reach ~150-250 req/s. Scale `count` higher if you want more load (traffic_gen.py has a 256-thread pool to support it).",
+
+  "count": 20,
+  "rate_rps_per_client": 2.0,
+  "timeout_s": 1.0,
+
+  "sku_pool": [
+    "OLJCESPC7Z", "66VCHSJNUP", "1YMWWN1N4O", "L9ECAV7KIM", "2ZYFJ3GM2N",
+    "0PUK6V6EV0", "LS4PSXUNUM", "9SIQT8TOJO", "6E92ZMYYFZ"
+  ],
+
+  "requests": [
+    { "name": "home",           "weight": 15, "method": "GET", "path": "/" },
+    { "name": "browse-product", "weight": 25, "method": "GET", "path": "/product/{sku}" },
+    { "name": "view-cart",      "weight": 20, "method": "GET", "path": "/cart" },
+
+    { "name": "add-to-cart",    "weight": 20,
+      "method": "POST", "path": "/cart",
+      "body": "product_id={sku}&quantity=1",
+      "content_type": "application/x-www-form-urlencoded" },
+
+    { "name": "checkout-flow",  "weight": 20,
+      "workflow": [
+        { "name": "checkout-add",
+          "method": "POST", "path": "/cart",
+          "body": "product_id={sku}&quantity=1",
+          "content_type": "application/x-www-form-urlencoded" },
+        { "name": "checkout-place",
+          "method": "POST", "path": "/cart/checkout",
+          "body": "email=someone%40example.com&street_address=1+Main+St&zip_code=94000&city=San+Francisco&state=CA&country=United+States&credit_card_number=4432801561520454&credit_card_expiration_month=1&credit_card_expiration_year=2040&credit_card_cvv=672",
+          "content_type": "application/x-www-form-urlencoded" }
+      ]
+    }
+  ],
+
+  "retries": 5,
+  "backoff": { "mode": "none", "base_s": 0.0, "max_s": 0.0, "jitter": "none" },
+  "retry_on_status": [0, 500, 502, 503, 504]
+}
