@@ -68,14 +68,14 @@ upload_files() {
   scp ${SSH_OPTS} "${SCRIPT_DIR}/traffic_gen.py" "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/traffic_gen.py" >/dev/null
   # traffic_gen.py imports `rl_obs_schema` (the WindowBucket schema +
   # histogram edges shared with the in-cluster RL controller) when the
-  # /buckets endpoint is enabled. The file lives in prototype/experiments/
+  # /buckets endpoint is enabled. The file lives in prototype/experiments/rl/
   # in the repo but must land next to traffic_gen.py on CLIENT_HOST so
   # the import resolves against sys.path[0] = the script's directory.
   # Missing the upload would surface as the loader exiting in the
   # liveness check below with "ImportError: rl_obs_schema" — defensive
   # but not visible in non-RL runs because the import only runs when
   # --rl-window-port-base > 0.
-  local schema_path="${PROTO_DIR}/experiments/rl_obs_schema.py"
+  local schema_path="${PROTO_DIR}/experiments/rl/rl_obs_schema.py"
   if [[ -f "${schema_path}" ]]; then
     scp ${SSH_OPTS} "${schema_path}" \
       "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/rl_obs_schema.py" >/dev/null

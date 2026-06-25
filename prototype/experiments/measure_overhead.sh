@@ -14,7 +14,7 @@
 #   ./measure_overhead.sh [options]
 #
 # Options:
-#   --rps <list>         Comma-separated RPS values (default: 500,1500,3000)
+#   --rps <list>         Comma-separated RPS values (default: 600)
 #   --rounds <N>         Independent runs per (RPS, policy) (default: 5)
 #   --warmup <sec>       Warmup before measurement (default: 60)
 #   --measurement <sec>  Measurement window (default: 90)

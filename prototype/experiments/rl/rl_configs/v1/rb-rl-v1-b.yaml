@@ -48,7 +48,7 @@ resource_sampling:
   interval_sec: 2
 
 scenarios:
-  source: scenarios_rl.md
+  source: embedded in this file
   core:
     - {id: S01, rate_rps: 1000, fault_duration: 20, fault_rate: 50, default_label: Recovered}
     - {id: S02, rate_rps: 1000, fault_duration: 75, fault_rate: 100, default_label: Recovered}

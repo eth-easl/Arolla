@@ -58,7 +58,7 @@ from typing import Any, Optional
 # the client host the loader is deployed alongside rl_obs_schema.py inside
 # REMOTE_BASE (see run-clients.sh::upload_files), so the import resolves
 # against sys.path[0] = traffic_gen.py's directory. In repo / test contexts
-# we fall back to inserting prototype/experiments/ before importing.
+# we fall back to inserting prototype/experiments/rl/ before importing.
 try:
     from rl_obs_schema import (  # noqa: PLC0415
         LATENCY_HISTOGRAM_EDGES_S,
@@ -68,7 +68,7 @@ try:
     )
 except ImportError:
     _experiments_dir = (
-        Path(__file__).resolve().parent.parent.parent / "experiments"
+        Path(__file__).resolve().parent.parent.parent / "experiments" / "rl"
     )
     if _experiments_dir.is_dir():
         sys.path.insert(0, str(_experiments_dir))
