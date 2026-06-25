@@ -95,28 +95,6 @@ effectiveness_retry_budget_only()     { run_experiment "envoy-retry-budget"; }
 effectiveness_arolla_only()           { run_experiment "arolla"; }
 
 # ==========================================================================
-# Per-tenant fairness: multi-profile fan-out exercising the
-# fairness bucket with heterogeneous retry loads.
-# ==========================================================================
-fairness_experiment_same_rps() {
-  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
-    "${SCRIPT_DIR}/run-experiment.sh" \
-    --policies "arolla,arolla-fairness" \
-    --client-profiles "fairness-same-rps/client1,fairness-same-rps/client2,fairness-same-rps/client3,fairness-same-rps/client4,fairness-same-rps/client5,fairness-same-rps/client6" \
-    -F "${FAULT_MANIFEST}" \
-    --warmup 30 --prefault 60 --fault 20 --recovery 60 --cooldown 10
-}
-
-fairness_experiment_diff_rps() {
-  exec_cmd NUM_LOADERS="${NUM_LOADERS}" \
-    "${SCRIPT_DIR}/run-experiment.sh" \
-    --policies "arolla,arolla-fairness" \
-    --client-profiles "fairness-diff-rps/client1,fairness-diff-rps/client2,fairness-diff-rps/client3,fairness-diff-rps/client4,fairness-diff-rps/client5,fairness-diff-rps/client6" \
-    -F "${FAULT_MANIFEST}" \
-    --warmup 30 --prefault 60 --fault 20 --recovery 60 --cooldown 10
-}
-
-# ==========================================================================
 # Recovery time vs. workload / failure characteristics
 # load sweep with two policies takes about 1h30min
 # failure rate sweep with two policies takes about 2h40min
@@ -188,26 +166,6 @@ plot_grid_sensitivity() {
   local sweep_dir="${2:?usage: plot_grid_sensitivity <grid-yaml-basename> <sweep-output-dir>}"
   exec_cmd python3 "${SCRIPT_DIR}/plot_grid_sensitivity.py" \
     "${SCRIPT_DIR}/sweeps/${yaml}" "${sweep_dir}"
-}
-
-# Per-tenant fairness two-panel plot (same-rps vs diff-rps).
-# Usage:
-#   plot_fairness <same_rps_dir> <diff_rps_dir> [metric]
-# If metric omitted, renders all three (count, rate, sod). Output PDFs go
-# next to the input dirs (outputs/nsdi/fairness-{same,diff}-rps-<metric>.pdf).
-plot_fairness() {
-  local same="${1:?usage: plot_fairness <same_rps_dir> <diff_rps_dir> [metric]}"
-  local diff="${2:?usage: plot_fairness <same_rps_dir> <diff_rps_dir> [metric]}"
-  local metrics
-  if [[ $# -ge 3 && -n "$3" ]]; then metrics=("$3"); else metrics=(count rate sod); fi
-  local outroot="${OUTPUT_BASE:-${REPO_ROOT}/outputs/nsdi}"
-  for m in "${metrics[@]}"; do
-    exec_cmd python3 "${SCRIPT_DIR}/plot_fairness_two_panel.py" \
-      "$same" "$diff" \
-      --metric "$m" \
-      --same-output "${outroot}/fairness-same-rps-${m}.pdf" \
-      --diff-output "${outroot}/fairness-diff-rps-${m}.pdf"
-  done
 }
 
 # ==========================================================================

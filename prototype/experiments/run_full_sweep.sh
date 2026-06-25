@@ -14,7 +14,6 @@
 #   1. Calls run-experiment.sh once with the 3 non-RL baselines.
 #   2. Calls run-experiment.sh once for rb-rl-v5, then renames the variant's
 #      envoy-retry-budget/ dir into rb-rl-v5/ and merges its rows.
-#   3. Calls aggregate_for_viewer.py on the scenario dir (best-effort).
 #
 # Output layout: <output_root>/<sweep_ts>/run{1..N}/<scenario_label>/<policy>/…
 #
@@ -35,7 +34,6 @@ SCENARIO_IDS=""              # optional comma-separated S01,MS1,... to subset
 POLICY_FILTER=""             # optional comma-separated allowlist
 REPEATS=1
 DRY_RUN=false
-SKIP_AGGREGATE=false
 RL_IMAGE_TAG="v5"
 RL_LOADER_PORT_BASE="8765"
 
@@ -57,7 +55,6 @@ Options:
   --policies <a,b,...>    Subset of {${NON_RL_POLICIES},rb-rl-v5}
   --rl-image-tag <tag>    Image tag for in-cluster RL controllers (default: ${RL_IMAGE_TAG})
   --rl-port-base <n>      Loader /window port base (default: ${RL_LOADER_PORT_BASE})
-  --skip-aggregate        Skip the aggregate_for_viewer.py step
   -n, --dry-run           Print planned invocations without running
   -h, --help              Show this message
 EOF
@@ -72,7 +69,6 @@ while (( $# > 0 )); do
     --policies)    POLICY_FILTER="$2"; shift 2 ;;
     --rl-image-tag) RL_IMAGE_TAG="$2"; shift 2 ;;
     --rl-port-base) RL_LOADER_PORT_BASE="$2"; shift 2 ;;
-    --skip-aggregate) SKIP_AGGREGATE=true; shift ;;
     -n|--dry-run)  DRY_RUN=true; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -102,8 +98,7 @@ if [[ -n "${SCENARIO_IDS}" ]]; then
 fi
 
 # Label encodes target service + fault severity (via the manifest token) and,
-# for multi-spike runs, the spike count and inter-spike gap. The report builder
-# and this driver parse it; the plot-viewer does not.
+# for multi-spike runs, the spike count and inter-spike gap.
 scenario_label() {  # $1=rps $2=fd $3=fault_token $4=num_spikes $5=gap
   local base
   base="rate_rps=$1__fault_duration=$2__fault_rate=$3"
@@ -313,11 +308,6 @@ run_scenario() {  # $1=run_dir $2=id $3=profile $4=manifest $5=rps $6=fd
       "${profile}" "${manifest}" "${fd}" "${nsp}" "${gap}" "${callee}" "${caller_labels}"
   done
 
-  if ! "${SKIP_AGGREGATE}" && ! "${DRY_RUN}"; then
-    echo "  [aggregate] python3 ${SCRIPT_DIR}/aggregate_for_viewer.py ${scen_dir}"
-    python3 "${SCRIPT_DIR}/aggregate_for_viewer.py" "${scen_dir}" \
-      || echo "  [warn] aggregation failed for ${label}"
-  fi
 }
 
 echo "[full-sweep] output dir: ${SWEEP_DIR}"

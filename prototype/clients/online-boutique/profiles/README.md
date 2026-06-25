@@ -197,45 +197,17 @@ attempt, is_retry, status, ok, latency_s
 
 ## Profile library (current)
 
-| Profile         | Workers × RPS | Root rps | Retries | Backoff          | Purpose                                           |
-|-----------------|---------------|---------:|---------|------------------|---------------------------------------------------|
-| `browse`        | 4 × 1.0       |      4.0 | 2       | exp 0.1→2s + jit | Read-only catalog browser (no POSTs, no checkout) |
-| `checkout`      | 3 × 0.5       |      1.5 | 3       | exp 0.1→2s + jit | Full shopper: browse + cart + checkout workflow   |
-| `conservative`  | 3 × 0.5       |      1.5 | 1       | fixed 500ms      | Well-behaved tenant for §6.4 fairness             |
-| `aggressive`    | 20 × 2.0      |     40.0 | 5       | none (0ms)       | Misbehaving tenant (§6.4) — mixed request workload|
-| `cart-stress`   | **20 × 2.0**  | **40.0** | 5       | none (0ms)       | **Cart-focused** aggressive retry — 100% POST /cart; use this for cart-service fault smoke tests |
-| `no-retry`      | 2 × 1.0       |      2.0 | 0       | —                | Control — raw server-visible failure rate         |
+| Profile                  | Mode       | Purpose |
+|--------------------------|------------|---------|
+| `post-cart-stress-open`  | open-loop  | Cart-focused stress for cartservice fault scenarios (canonical 25 + multi-spike) |
+| `browse-stress-open`     | open-loop  | Browse workload for productcatalogservice alt-service scenarios (AS1) |
+| `checkout-stress-open`   | open-loop  | Checkout workflow for paymentservice alt-service scenarios (AS2) |
 
-**Total steady-state load** (all profiles combined): ~49 root rps.
-Under retry amplification during a fault, total HTTP call rate can reach
-~150-250 req/s — driven almost entirely by the `aggressive` profile.
+`run-experiment.sh` and `run_full_sweep.sh` pass `--client-profiles` explicitly so only
+the profile for each scenario is loaded.
 
-## Scaling load
-
-Two knobs, each tuned per profile:
-
-- **`count`** — number of concurrent worker tasks. More workers → more
-  parallelism, bounded by the traffic_gen.py thread pool (`DEFAULT_HTTP_THREAD_POOL_SIZE = 256`).
-  Bump this first when you want more load.
-- **`rate_rps_per_client`** — target per-worker request rate. Workers sleep
-  `1 / rate_rps_per_client` seconds between requests. Under fault with long
-  retry chains a worker can easily exceed its interval (each attempt is up
-  to `timeout_s` long), in which case it goes back-to-back — so this knob
-  mostly controls the *pre-fault* steady-state rate, not the peak.
-
-**To push harder**: bump `count` in the profile(s) you want to stress.
-`traffic_gen.py` sizes its thread pool to 256, so `count: 100` per profile
-is fine on a single CLIENT_HOST. Beyond that you'll need a second load
-generator node.
-
-**To model a congested-pool client**: keep `count` low but set very short
-`timeout_s` and high `retries`. This models the "stuck in retry" failure
-mode without generating huge root rates.
-
-All profiles other than `browse` use the same 15/25/20/20/20 request mix so
-their failure modes can be compared on the same code paths. `browse` uses
-40/40/20 GET-only to avoid cluttering the cart-oriented experiments with
-noise from read-only clients.
+All three profiles use open-loop firing with per-scenario `rate_rps` tuned by
+`run_full_sweep.sh` before each run.
 
 ### Subsetting for a specific experiment
 

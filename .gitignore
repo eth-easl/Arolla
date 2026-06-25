@@ -15,7 +15,6 @@ downloads/
 eggs/
 .eggs/
 lib/
-!plot-viewer/lib/
 node_modules/
 lib64/
 parts/
