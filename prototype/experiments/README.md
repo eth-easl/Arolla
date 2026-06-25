@@ -43,6 +43,20 @@ prototype/experiments/
 ├── measure_overhead.sh      ← CPU/memory overhead measurement sweep
 ├── resource_sampler.py      ← in-experiment resource sampler (kubectl top)
 │
+├── paper.sh                 ← named-experiment dispatcher (effectiveness, fairness)
+├── paper_plotting.py        ← paper-ready figures for single runs + sweeps
+├── run_sweep.sh             ← single-parameter sweep driver (YAML-configured)
+├── run_grid.sh              ← cartesian-grid sweep driver
+├── sweeps/*.yaml            ← sweep/grid configs (rps, failure-rate, sensitivity, …)
+├── plot_sensitivity.py      ← sweep recovery-vs-parameter plots
+├── plot_param_sensitivity.py, plot_grid_sensitivity.py
+├── plot_arolla_sensitivity{,_multirun}.py
+├── plot_rb_sensitivity{,_multirun}.py
+├── plot_failure_sweep.py, plot_failure_duration_multirun.py
+├── plot_fairness_two_panel.py, plot_slack_postmortem.py
+├── verify_retry_budget.sh   ← assert envoy-retry-budget is live in Envoy
+├── verify_circuit_breaker.sh← assert circuit-breaker is live in Envoy
+│
 └── tests/
     ├── test_sustained_recovery.py
     └── test_classify_decision.py
