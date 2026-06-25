@@ -1,0 +1,80 @@
+# RL retry-budget controller — v1-b (faster decisions, short 2s window).
+#
+# Both decision_interval_sec and observation_window_sec are set to 2s.
+# This tests whether the agent can react within 2-second windows with the
+# same model, using a startup_hold_off_sec to ensure the first patch only
+# fires once real traffic data fills the 2s window.
+name: rb-rl-v1-b
+label: "RB-RL v1-b (2s window, 2s decision)"
+mode: rl_ppo
+model_path: rl_configs/v1/model-v1.zip
+
+output_root: outputs/prototype/rb-rl-v1-b
+baseline_root: outputs/prototype/rb-rl-v1-a/ignored-20260503_231749
+baseline_label: "RB-RL v1-a"
+# Optional additional baselines layered into the comparison plots after the
+# primary one. Same shape as baseline_root + baseline_label.
+extra_baselines:
+  - root: outputs/prototype/rb-mega-fault-sweep/20260501_151421
+    label: "Static RB"
+
+experiment:
+  scenario: sustained-failure
+  policy: envoy-retry-budget
+  client_profile: post-cart-stress-open
+  warmup: 30
+  prefault: 60
+  recovery: 180
+  cooldown: 10
+  settle: 30
+  num_loaders: 4
+
+controller:
+  decision_interval_sec: 2       # fast decision cadence
+  observation_window_sec: 2      # 2s rolling window (matches decision interval)
+  # Delta window for #11/#12 — v1 trained tick-to-tick, mirror obs window.
+  delta_window_sec: 2
+  attempt_timeout_ms: 3000       # production loader timeout_s = 3.0
+  startup_hold_off_sec: 60       # wait for real load data before first patch
+  default_retry_budget:
+    percent: 20.0
+    minRetryConcurrency: 3
+  action_maps:
+    percent: [5.0, 10.0, 20.0, 30.0, 50.0]
+    minRetryConcurrency: [1, 2, 3, 5, 8]
+
+resource_sampling:
+  enabled: true
+  interval_sec: 2
+
+scenarios:
+  source: embedded in this file
+  core:
+    - {id: S01, rate_rps: 1000, fault_duration: 20, fault_rate: 50, default_label: Recovered}
+    - {id: S02, rate_rps: 1000, fault_duration: 75, fault_rate: 100, default_label: Recovered}
+    - {id: S03, rate_rps: 1200, fault_duration: 30, fault_rate: 90, default_label: Recovered}
+    - {id: S04, rate_rps: 1400, fault_duration: 20, fault_rate: 90, default_label: Recovered}
+    - {id: S05, rate_rps: 1200, fault_duration: 20, fault_rate: 95, default_label: Metastable}
+    - {id: S06, rate_rps: 1200, fault_duration: 45, fault_rate: 75, default_label: Metastable}
+    - {id: S07, rate_rps: 1200, fault_duration: 45, fault_rate: 90, default_label: Metastable}
+    - {id: S08, rate_rps: 1200, fault_duration: 75, fault_rate: 75, default_label: Metastable}
+    - {id: S09, rate_rps: 1400, fault_duration: 20, fault_rate: 50, default_label: Metastable}
+    - {id: S10, rate_rps: 1400, fault_duration: 20, fault_rate: 75, default_label: Recovered}
+    - {id: S11, rate_rps: 1400, fault_duration: 45, fault_rate: 75, default_label: Recovered}
+    - {id: S12, rate_rps: 1400, fault_duration: 45, fault_rate: 90, default_label: Metastable}
+    - {id: S13, rate_rps: 1400, fault_duration: 45, fault_rate: 100, default_label: Metastable}
+    - {id: S14, rate_rps: 1400, fault_duration: 75, fault_rate: 50, default_label: Recovered}
+    - {id: S15, rate_rps: 1400, fault_duration: 75, fault_rate: 75, default_label: Metastable}
+    - {id: S16, rate_rps: 1600, fault_duration: 30, fault_rate: 50, default_label: Metastable}
+    - {id: S17, rate_rps: 1600, fault_duration: 30, fault_rate: 90, default_label: Metastable}
+    - {id: S18, rate_rps: 1600, fault_duration: 60, fault_rate: 75, default_label: Metastable}
+    - {id: S19, rate_rps: 1800, fault_duration: 20, fault_rate: 50, default_label: Metastable}
+    - {id: S20, rate_rps: 1800, fault_duration: 30, fault_rate: 95, default_label: Metastable}
+    - {id: S21, rate_rps: 1600, fault_duration: 45, fault_rate: 75, default_label: Ambiguous}
+    - {id: S22, rate_rps: 1600, fault_duration: 75, fault_rate: 100, default_label: Ambiguous}
+    - {id: S23, rate_rps: 1800, fault_duration: 45, fault_rate: 100, default_label: Ambiguous}
+    - {id: S24, rate_rps: 1800, fault_duration: 60, fault_rate: 90, default_label: Ambiguous}
+    - {id: S25, rate_rps: 1800, fault_duration: 75, fault_rate: 75, default_label: Ambiguous}
+  smoke:
+    - S01
+    - S12

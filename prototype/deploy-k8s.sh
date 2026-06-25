@@ -267,10 +267,16 @@ step7_join_workers() {
 step8_install_cni() {
     banner "Step 8: Install CNI plugin (${CNI_PLUGIN}) on master"
     if [[ "${CNI_PLUGIN}" == "calico" ]]; then
+        local autodetect_iface="${CALICO_AUTODETECT_INTERFACE:-}"
         remote "$MASTER_HOST" "
             kubectl apply -f '${CALICO_MANIFEST}'
+            if [[ -n '${autodetect_iface}' ]]; then
+                echo 'Pinning Calico autodetect to interface=${autodetect_iface}'
+                kubectl -n kube-system set env ds/calico-node IP_AUTODETECTION_METHOD='interface=${autodetect_iface}'
+            fi
             echo 'Waiting for Calico pods to start…'
             sleep 10
+            kubectl -n kube-system rollout status ds/calico-node --timeout=180s || true
             kubectl get pods -n kube-system
         "
     elif [[ "${CNI_PLUGIN}" == "flannel" ]]; then

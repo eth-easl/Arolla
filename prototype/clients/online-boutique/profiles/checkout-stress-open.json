@@ -1,18 +1,22 @@
 {
   "name": "checkout-stress-open",
-  "description": "Open-loop chain-amplification workload. Each logical request is a 2-step workflow: POST /cart (populate the session's cart) followed by POST /cart/checkout (place the order). The checkout call fans out from frontend → checkout → {cart, productcatalog, currency, payment, shipping, email}, exercising the deepest HTTP/gRPC chain in Online Boutique. Used for chain-amplification experiments where the fault sits on a deep leaf service (typically paymentservice).",
-
+  "description": "Open-loop chain-amplification workload. Each logical request is a 2-step workflow: POST /cart (populate the session's cart) followed by POST /cart/checkout (place the order). The checkout call fans out from frontend \u2192 checkout \u2192 {cart, productcatalog, currency, payment, shipping, email}, exercising the deepest HTTP/gRPC chain in Online Boutique. Used for chain-amplification experiments where the fault sits on a deep leaf service (typically paymentservice).",
   "mode": "open-loop",
-  "rate_rps": 20,
+  "rate_rps": 500,
   "pool_size": 500,
   "max_inflight": 2000,
   "timeout_s": 1.0,
-
   "sku_pool": [
-    "OLJCESPC7Z", "66VCHSJNUP", "1YMWWN1N4O", "L9ECAV7KIM", "2ZYFJ3GM2N",
-    "0PUK6V6EV0", "LS4PSXUNUM", "9SIQT8TOJO", "6E92ZMYYFZ"
+    "OLJCESPC7Z",
+    "66VCHSJNUP",
+    "1YMWWN1N4O",
+    "L9ECAV7KIM",
+    "2ZYFJ3GM2N",
+    "0PUK6V6EV0",
+    "LS4PSXUNUM",
+    "9SIQT8TOJO",
+    "6E92ZMYYFZ"
   ],
-
   "requests": [
     {
       "name": "checkout-flow",
@@ -35,8 +39,15 @@
       ]
     }
   ],
-
   "retries": 3,
-  "backoff": { "mode": "none" },
-  "retry_on_status": [0, 500, 502, 503, 504]
+  "backoff": {
+    "mode": "none"
+  },
+  "retry_on_status": [
+    0,
+    500,
+    502,
+    503,
+    504
+  ]
 }

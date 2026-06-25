@@ -2,7 +2,7 @@
 //!
 //! Implements the aggregate mixed-refill token bucket from the paper's
 //! Algorithm 1 (§4.2). Per-tenant max-min fairness (§4.3) is intentionally
-//! deferred to Phase 2; this MVP enforces a single aggregate budget per
+//! out of scope for this MVP; it enforces a single aggregate budget per
 //! upstream cluster, which is sufficient for experiments §6.2.1/6.2.2/6.2.3,
 //! §6.5 sensitivity, and §6.6 overhead.
 //!
@@ -292,7 +292,7 @@ impl HttpContext for ArollaHttp {
         //
         // gRPC note: gRPC-over-HTTP/2 always returns HTTP :status 200 even on
         // logical errors; the real outcome is in the `grpc-status` trailer.
-        // For Phase 1 we approximate by treating status 200 as success, which
+        // This MVP approximates by treating status 200 as success, which
         // over-credits gRPC errors. A future revision should also inspect
         // `grpc-status` in on_http_response_trailers().
         let status: u32 = self

@@ -12,3 +12,30 @@ spec:
       interval: 1s
       baseEjectionTime: 30s
       maxEjectionPercent: 0
+---
+# Cartservice pool override (mirrors envoy-retry-budget.yaml). Even
+# though no retries are configured in `no-control`, the cart pool can
+# still queue under raw application traffic during the fault window —
+# keeping the pool ceilings consistent across policies makes the
+# observation features comparable between baselines.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: arolla-baseline-no-control-cart-pool
+  namespace: online-boutique
+spec:
+  host: "cartservice.online-boutique.svc.cluster.local"
+  trafficPolicy:
+    outlierDetection:
+      consecutive5xxErrors: 0
+      interval: 1s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 0
+    connectionPool:
+      http:
+        http2MaxRequests: 16384
+        http1MaxPendingRequests: 16384
+        maxRequestsPerConnection: 0
+        maxRetries: 16384
+      tcp:
+        maxConnections: 16384

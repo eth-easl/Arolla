@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+node_modules/
 lib64/
 parts/
 sdist/
@@ -210,13 +211,23 @@ __marimo__/
 # Custom
 outputs/
 *.csv
+!prototype/experiments/scenarios/sweep_scenarios.csv
+prototype/experiments/rl/rl_controller_image/*.tar.gz
 *.png
 *.DS_Store
 results*/
 .k8s-deploy-logs/
+calibration/configs/
+calibration/data/
+calibration/reports/
 paper_figures/
 *.pdf
 simulator/experiments/yaml/aimd_vs_sysname/
 simulator/experiments/yaml/sysname/
 .vscode/
 *.sweep-backup
+
+prototype/experiments/rl_controller_image/*.tar.gz
+graphify-out/
+.trash
+manifest.xml

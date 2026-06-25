@@ -68,11 +68,11 @@ CPU_STRESS_WORKERS=1        # number of stress-ng worker threads
 # Per-run output goes under outputs/prototype/<profile>/<profile>_<timestamp>/
 # at the repo root. The profile subfolder groups runs by workload type so
 # cart-stress and checkout-stress results don't intermingle.
-# When -o is passed (e.g. from run_sweep.sh), that path is used directly
-# as the run directory — no profile/timestamp subdirectory is appended.
-# Base output directory. paper.sh (and any other caller) can override by
-# exporting OUTPUT_BASE — e.g. `OUTPUT_BASE=.../outputs/nsdi` routes
-# everything under outputs/nsdi/<profile>/… instead of outputs/prototype/.
+# When -o is passed, that path is used directly as the run directory —
+# no profile/timestamp subdirectory is appended.
+# Base output directory. Callers can override by exporting OUTPUT_BASE —
+# e.g. `OUTPUT_BASE=.../outputs/nsdi` routes everything under
+# outputs/nsdi/<profile>/… instead of outputs/prototype/.
 OUTPUT_ROOT="${OUTPUT_BASE:-${REPO_ROOT}/outputs/prototype}"
 OUTPUT_EXPLICIT=false
 DRY_RUN=false
@@ -89,6 +89,42 @@ POST_POLICY_SETTLE_SEC=30    # give xDS a moment after switching policies
 # depends on) are taken regardless.
 PHASE_SNAPSHOTS=false
 
+# Optional RL/shadow-controller integration. When --rl-controller-config is
+# set the controller defaults to closed-loop apply mode; --rl-shadow flips it
+# back to observation-only (no DestinationRule patches).
+RL_CONTROLLER_CONFIG=""
+RL_SHADOW=false
+
+# When --rl-controller-config is set, the controller runs as an in-cluster
+# Job (one per policy). Observations come from the loader's /window HTTP
+# endpoint (or Envoy sidecar stats), patches go through the in-cluster
+# apiserver.
+RL_IMAGE_TAG="v5"
+RL_CONFIGMAP="rl-controller-v5"
+RL_LOADER_PORT_BASE=8765
+RL_LOADER_HOST=""               # default: derived from CLIENT_IP (k8s-config.sh)
+
+# Observation transport. `auto` is back-compatible with loaders that
+# pre-date the /buckets endpoint (falls back to /window on 404 /
+# connection refused) and with clusters that don't expose Envoy
+# sidecar stats. Explicit `envoy` / `buckets` / `rows` lets a sweep
+# A/B without editing job.yaml by hand.
+RL_OBS_MODE="auto"
+# Service the RL controller observes (envoy caller-side stats) and, implicitly,
+# controls. The budget patch always targets the wildcard `arolla-baseline-retry-
+# budget` DestinationRule (*.online-boutique), so it reaches every service; only
+# the *observation* needs retargeting for non-cart faults. Defaults reproduce
+# the controller's built-in cartservice defaults so cart scenarios are
+# unchanged. Override for alt-service scenarios (e.g. productcatalogservice).
+RL_CALLEE="cartservice"
+RL_CALLER_LABELS="frontend,checkoutservice"
+# In-cluster Job pod: after a namespace-wide rollout, workers can stay busy
+# (disk/cpu) and delay image unpack / schedule; 60s was tight on Emulab.
+RL_POD_READY_TIMEOUT_SEC="${RL_POD_READY_TIMEOUT_SEC:-180}"
+RESOURCE_SAMPLING=false
+RESOURCE_SAMPLE_INTERVAL_SEC=2
+HELPER_PIDS=()
+
 # Phase durations (seconds). The scenario config can override these; CLI
 # flags override both.
 WARMUP_SEC=60
@@ -96,6 +132,12 @@ PREFAULT_SEC=30
 FAULT_SEC=60
 RECOVERY_SEC=60
 COOLDOWN_SEC=30
+
+# Multi-spike support. NUM_SPIKES > 1 injects the fault manifest N times in
+# a row, separated by a gap of INTER_SPIKE_GAP_SEC between clearance and the
+# next injection. These can be set by scenario .conf files or CLI flags.
+NUM_SPIKES=1
+INTER_SPIKE_GAP_SEC=30
 
 # Scenario-provided
 SCENARIO_TITLE=""
@@ -194,6 +236,52 @@ Options:
                                 deliberate fault is applied. Enable only
                                 when you need the per-phase retry data.
                                 .pre and post snapshots are always taken.
+      --rl-controller-config <yaml>
+                              Start prototype RL controller for each policy
+                              run, writing rl-observations.jsonl and
+                              rl-decisions.csv under the policy output dir.
+                              Defaults to closed-loop apply mode.
+      --rl-shadow             Run the controller in shadow mode: observe and
+                              log decisions but do NOT patch the retry-budget
+                              DestinationRule.
+      --rl-image-tag <tag>    Image tag for the in-cluster controller Job
+                              (default: ${RL_IMAGE_TAG}).
+                              Must match build.sh / distribute.sh.
+      --rl-configmap <name>   ConfigMap holding model.zip + config.yaml
+                              (default: ${RL_CONFIGMAP}).
+      --rl-loader-port-base <n>  First /window port on the loader.
+                              shard i gets port_base + i. Default ${RL_LOADER_PORT_BASE}.
+      --rl-loader-host <ip>   Loader address the controller will hit
+                              (default: \${CLIENT_IP} from k8s-config.sh).
+      --rl-obs-mode <mode>    Observation transport. One of:
+                                auto    (default) cascade
+                                        envoy → buckets → rows.
+                                envoy   GET /stats on caller-pod
+                                        sidecars (production-shape).
+                                buckets force the loader's pre-
+                                        aggregated counters.
+                                rows    force per-attempt rows.
+      --rl-callee <svc>       Service the RL controller observes (envoy
+                              caller-side stats). Default: ${RL_CALLEE}.
+                              Set to the faulted service for alt-service
+                              scenarios (e.g. productcatalogservice). The
+                              budget patch is wildcard so control reaches it
+                              regardless; only observation needs retargeting.
+      --rl-caller-labels <csv> Comma-separated app= labels of the pods whose
+                              Envoy sidecars expose retry counters for the
+                              callee. Default: ${RL_CALLER_LABELS}.
+      --resource-sampling     Sample cart/Istio pod and node CPU/memory during
+                              each policy run.
+      --resource-sample-interval <sec>
+                              Resource sampler interval. Default:
+                              ${RESOURCE_SAMPLE_INTERVAL_SEC}
+      --num-spikes <n>        Inject the fault manifest N times in a row,
+                              separated by --inter-spike-gap seconds between
+                              clearance and re-injection. Default: ${NUM_SPIKES}
+                              (1 = classic single-fault behaviour)
+      --inter-spike-gap <sec> Gap between end of one spike and start of the
+                              next. Only used when --num-spikes > 1.
+                              Default: ${INTER_SPIKE_GAP_SEC}
   -n, --dry-run                 Print the timeline, don't touch the cluster
       --skip-analyze            Don't invoke analyze.py at the end
   -h, --help                    Show this message
@@ -208,6 +296,19 @@ EOF
   exit "${1:-0}"
 }
 
+# Track explicit CLI phase overrides so sourcing scenarios/*.conf can change
+# durations when flags are omitted.
+CLI_WARMUP_SET=false
+CLI_PREFAULT_SET=false
+CLI_FAULT_SET=false
+CLI_RECOVERY_SET=false
+CLI_COOLDOWN_SET=false
+CLI_WARMUP_VAL=""
+CLI_PREFAULT_VAL=""
+CLI_FAULT_VAL=""
+CLI_RECOVERY_VAL=""
+CLI_COOLDOWN_VAL=""
+
 while (( $# > 0 )); do
   case "$1" in
     -s|--scenario)        SCENARIO="$2"; shift 2 ;;
@@ -218,26 +319,32 @@ while (( $# > 0 )); do
     --cpu-stress-load)    CPU_STRESS_LOAD="$2"; shift 2 ;;
     --cpu-stress-workers) CPU_STRESS_WORKERS="$2"; shift 2 ;;
     -o|--output)          OUTPUT_ROOT="$2"; OUTPUT_EXPLICIT=true; shift 2 ;;
-    --warmup)        WARMUP_SEC="$2"; shift 2 ;;
-    --prefault)      PREFAULT_SEC="$2"; shift 2 ;;
-    --fault)         FAULT_SEC="$2"; shift 2 ;;
-    --recovery)      RECOVERY_SEC="$2"; shift 2 ;;
-    --cooldown)      COOLDOWN_SEC="$2"; shift 2 ;;
+    --warmup)        WARMUP_SEC="$2"; CLI_WARMUP_SET=true; CLI_WARMUP_VAL="$2"; shift 2 ;;
+    --prefault)      PREFAULT_SEC="$2"; CLI_PREFAULT_SET=true; CLI_PREFAULT_VAL="$2"; shift 2 ;;
+    --fault)         FAULT_SEC="$2"; CLI_FAULT_SET=true; CLI_FAULT_VAL="$2"; shift 2 ;;
+    --recovery)      RECOVERY_SEC="$2"; CLI_RECOVERY_SET=true; CLI_RECOVERY_VAL="$2"; shift 2 ;;
+    --cooldown)      COOLDOWN_SEC="$2"; CLI_COOLDOWN_SET=true; CLI_COOLDOWN_VAL="$2"; shift 2 ;;
     --settle)        POST_POLICY_SETTLE_SEC="$2"; shift 2 ;;
     --phase-snapshots) PHASE_SNAPSHOTS=true; shift ;;
+    --rl-controller-config) RL_CONTROLLER_CONFIG="$2"; shift 2 ;;
+    --rl-shadow)     RL_SHADOW=true; shift ;;
+    --rl-image-tag)  RL_IMAGE_TAG="$2"; shift 2 ;;
+    --rl-configmap)  RL_CONFIGMAP="$2"; shift 2 ;;
+    --rl-loader-port-base) RL_LOADER_PORT_BASE="$2"; shift 2 ;;
+    --rl-loader-host) RL_LOADER_HOST="$2"; shift 2 ;;
+    --rl-obs-mode)   RL_OBS_MODE="$2"; shift 2 ;;
+    --rl-callee)     RL_CALLEE="$2"; shift 2 ;;
+    --rl-caller-labels) RL_CALLER_LABELS="$2"; shift 2 ;;
+    --resource-sampling) RESOURCE_SAMPLING=true; shift ;;
+    --resource-sample-interval) RESOURCE_SAMPLE_INTERVAL_SEC="$2"; shift 2 ;;
+    --num-spikes)    NUM_SPIKES="$2"; shift 2 ;;
+    --inter-spike-gap) INTER_SPIKE_GAP_SEC="$2"; shift 2 ;;
     -n|--dry-run)    DRY_RUN=true; shift ;;
     --skip-analyze)  SKIP_ANALYZE=true; shift ;;
     -h|--help)       usage 0 ;;
     *) err "unknown argument: $1 (see --help)" ;;
   esac
 done
-
-# Capture CLI-set durations so they can override the scenario config.
-CLI_WARMUP="${WARMUP_SEC}"
-CLI_PREFAULT="${PREFAULT_SEC}"
-CLI_FAULT="${FAULT_SEC}"
-CLI_RECOVERY="${RECOVERY_SEC}"
-CLI_COOLDOWN="${COOLDOWN_SEC}"
 
 # --------------------------------------------------------------------------- #
 # Load scenario config
@@ -248,12 +355,12 @@ SCENARIO_FILE="${SCRIPT_DIR}/scenarios/${SCENARIO}.conf"
 # shellcheck source=/dev/null
 source "${SCENARIO_FILE}"
 
-# Re-apply CLI overrides (they win over scenario defaults).
-WARMUP_SEC="${CLI_WARMUP}"
-PREFAULT_SEC="${CLI_PREFAULT}"
-FAULT_SEC="${CLI_FAULT}"
-RECOVERY_SEC="${CLI_RECOVERY}"
-COOLDOWN_SEC="${CLI_COOLDOWN}"
+# Re-apply CLI overrides only when those flags were passed (they win).
+[[ "${CLI_WARMUP_SET}" == true ]] && WARMUP_SEC="${CLI_WARMUP_VAL}"
+[[ "${CLI_PREFAULT_SET}" == true ]] && PREFAULT_SEC="${CLI_PREFAULT_VAL}"
+[[ "${CLI_FAULT_SET}" == true ]] && FAULT_SEC="${CLI_FAULT_VAL}"
+[[ "${CLI_RECOVERY_SET}" == true ]] && RECOVERY_SEC="${CLI_RECOVERY_VAL}"
+[[ "${CLI_COOLDOWN_SET}" == true ]] && COOLDOWN_SEC="${CLI_COOLDOWN_VAL}"
 
 [[ -n "${SCENARIO_FAULT_MANIFEST}" ]] || err "scenario ${SCENARIO} did not set SCENARIO_FAULT_MANIFEST"
 
@@ -278,6 +385,40 @@ else
   FAULT_MANIFEST_PATH="${PROTO_DIR}/${FAULT_DIR_REL}/${SCENARIO_FAULT_MANIFEST}"
 fi
 [[ -f "${FAULT_MANIFEST_PATH}" ]] || err "fault manifest not found: ${FAULT_MANIFEST_PATH}"
+if [[ -n "${RL_CONTROLLER_CONFIG}" && ! -f "${RL_CONTROLLER_CONFIG}" ]]; then
+  err "RL controller config not found: ${RL_CONTROLLER_CONFIG}"
+fi
+
+# In-cluster controller bootstrap: locate the Job manifest, derive the
+# loader host/ports, and validate the prerequisites are in place. Any
+# missing piece fails fast — partial runs would either hang on a pod that
+# never reaches Ready or sit on stale logs without the new pod creating any.
+RL_JOB_MANIFEST="${PROTO_DIR}/manifests/online-boutique/rl-controller/job.yaml"
+RL_LOADER_PORTS_CSV=""
+if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
+  [[ -f "${RL_JOB_MANIFEST}" ]] || err "RL Job manifest not found: ${RL_JOB_MANIFEST}"
+  if [[ -z "${RL_LOADER_HOST}" ]]; then
+    [[ -n "${CLIENT_IP:-}" ]] || err "RL controller: CLIENT_IP not set in k8s-config.sh"
+    RL_LOADER_HOST="${CLIENT_IP}"
+  fi
+  # Build the comma-port list from NUM_LOADERS. Defaulting NUM_LOADERS=1
+  # here matches the env-var contract used by run-clients.sh.
+  _nl="${NUM_LOADERS:-1}"
+  for ((_i=0; _i<_nl; _i++)); do
+    p=$((RL_LOADER_PORT_BASE + _i))
+    if [[ -z "${RL_LOADER_PORTS_CSV}" ]]; then
+      RL_LOADER_PORTS_CSV="${p}"
+    else
+      RL_LOADER_PORTS_CSV="${RL_LOADER_PORTS_CSV},${p}"
+    fi
+  done
+  if ! kubectl -n "${NAMESPACE}" get configmap "${RL_CONFIGMAP}" >/dev/null 2>&1; then
+    _rl_ver="${RL_CONFIGMAP#rl-controller-}"
+    _rl_ver="${_rl_ver%%-*}"
+    err "ConfigMap '${RL_CONFIGMAP}' not found in '${NAMESPACE}'. Apply RL bundles with: ${SCRIPT_DIR}/rl/ensure_rl_configmaps.sh ${_rl_ver}"
+  fi
+  log "rl-controller: loader=${RL_LOADER_HOST} ports=${RL_LOADER_PORTS_CSV} image=rl-controller:${RL_IMAGE_TAG} configmap=${RL_CONFIGMAP}"
+fi
 
 # Base routing config (mesh-wide retries, no fault). Re-applied to "remove"
 # the fault — see service-retries.yaml header for the rationale.
@@ -328,7 +469,9 @@ RUN_TS="$(date +%Y%m%d_%H%M%S)"
 # RUN_DIR is computed after RESOLVED_PROFILES is known (see below).
 
 # Total duration per policy
-TOTAL_SEC=$((WARMUP_SEC + PREFAULT_SEC + FAULT_SEC + RECOVERY_SEC + COOLDOWN_SEC))
+# Total fault-window duration expands with multiple spikes.
+FAULT_WINDOW_SEC=$(( NUM_SPIKES * FAULT_SEC + (NUM_SPIKES > 1 ? (NUM_SPIKES - 1) * INTER_SPIKE_GAP_SEC : 0) ))
+TOTAL_SEC=$((WARMUP_SEC + PREFAULT_SEC + FAULT_WINDOW_SEC + RECOVERY_SEC + COOLDOWN_SEC))
 TOTAL_POLICIES=${#POLICIES[@]}
 GRAND_TOTAL_SEC=$((TOTAL_SEC * TOTAL_POLICIES + POST_POLICY_SETTLE_SEC * TOTAL_POLICIES))
 
@@ -433,7 +576,7 @@ else
   _profile_slug="${_joined_names}"
 fi
 if "${OUTPUT_EXPLICIT}"; then
-  # -o was passed (e.g. from run_sweep.sh) — use it directly.
+  # -o was passed — use it directly.
   RUN_DIR="${OUTPUT_ROOT}"
 else
   if [[ -n "${_common_dir}" ]]; then
@@ -471,6 +614,10 @@ export _COOLDOWN_SEC="${COOLDOWN_SEC}"
 export _CPU_STRESS_TARGET="${CPU_STRESS_TARGET}"
 export _CPU_STRESS_LOAD="${CPU_STRESS_LOAD}"
 export _CPU_STRESS_WORKERS="${CPU_STRESS_WORKERS}"
+export _RL_CONTROLLER_CONFIG="${RL_CONTROLLER_CONFIG}"
+export _RL_SHADOW="${RL_SHADOW}"
+export _RESOURCE_SAMPLING="${RESOURCE_SAMPLING}"
+export _RESOURCE_SAMPLE_INTERVAL_SEC="${RESOURCE_SAMPLE_INTERVAL_SEC}"
 export _POLICIES_CSV
 _POLICIES_CSV="$(IFS=,; echo "${POLICIES[*]}")"
 export _RESOLVED_PROFILES_CSV
@@ -566,6 +713,12 @@ doc = {
         "workers": worker_hosts,
         "client": os.environ["_CLIENT_HOST"],
     },
+    "rl_controller": {
+        "config": os.environ["_RL_CONTROLLER_CONFIG"],
+        "shadow": os.environ["_RL_SHADOW"].lower() == "true",
+        "resource_sampling": os.environ["_RESOURCE_SAMPLING"].lower() == "true",
+        "resource_sample_interval_sec": float(os.environ["_RESOURCE_SAMPLE_INTERVAL_SEC"]),
+    },
 }
 
 # Only emit scenario_fault_manifest at the top level when an istio_fault
@@ -587,8 +740,11 @@ log "wrote ${RUN_DIR}/experiment.json"
 cleanup() {
   local code=$?
   warn "cleanup: restoring base routing + stopping clients"
+  for pid in "${HELPER_PIDS[@]:-}"; do
+    [[ -n "${pid}" ]] && kill "${pid}" >/dev/null 2>&1 || true
+  done
   if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-    kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
+    kubectl apply --validate=false -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
   else
     kubectl delete --ignore-not-found -f "${FAULT_MANIFEST_PATH}" >/dev/null 2>&1 || true
   fi
@@ -615,6 +771,14 @@ wait_until() {
 }
 
 now() { date +%s; }
+
+stop_helper_pid() {
+  local pid="${1:-}"
+  [[ -z "${pid}" ]] && return 0
+  if kill "${pid}" >/dev/null 2>&1; then
+    wait "${pid}" 2>/dev/null || true
+  fi
+}
 
 # Services whose sidecar stats we dump each run. Declared at file scope so
 # both the pre-run snapshot and the post-run dump share the same list.
@@ -710,6 +874,11 @@ run_single() {
   local out_dir="${RUN_DIR}/${policy}"
   local client_metrics_dir="${out_dir}/client-metrics"
   local sidecar_stats_dir="${out_dir}/sidecar-stats"
+  local rl_controller_dir="${out_dir}/rl-controller"
+  local rl_controller_pid=""
+  local resource_sampler_pid=""
+  local _rl_job_for_cleanup=""
+  local _rl_pod_for_cleanup=""
 
   mkdir -p "${client_metrics_dir}" "${sidecar_stats_dir}"
 
@@ -718,7 +887,7 @@ run_single() {
   # ---- Pre-run cleanup (make the run reproducible) ----
   log "pre-run: restoring base routing, clearing remote metrics"
   if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-    kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
+    kubectl apply --validate=false -f "${SERVICE_RETRIES_PATH}" >/dev/null 2>&1 || true
   else
     kubectl delete --ignore-not-found -f "${FAULT_MANIFEST_PATH}" >/dev/null 2>&1 || true
   fi
@@ -768,6 +937,77 @@ run_single() {
   log "[${policy}] snapshotting sidecar bucket state (pre.prom)"
   dump_sidecar_stats "${sidecar_stats_dir}" ".pre"
 
+  if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
+    mkdir -p "${rl_controller_dir}"
+    # Controller runs as an in-cluster Job; observations come from the
+    # loader's HTTP /window endpoint (or Envoy sidecar stats), patches go
+    # through the in-cluster apiserver.
+    _run_id="$(echo -n "${policy}-$(date +%H%M%S)-$$" | tr -c 'a-z0-9-' '-' | cut -c1-30)"
+    _rl_job_name="rl-controller-${_run_id}"
+    phase "[${policy}] apply Job ${_rl_job_name} (image rl-controller:${RL_IMAGE_TAG}, obs-mode=${RL_OBS_MODE})"
+    _tmp_job="$(mktemp)"
+    sed \
+      -e "s|__RUN_ID__|${_run_id}|g" \
+      -e "s|__NAMESPACE__|${NAMESPACE}|g" \
+      -e "s|__IMAGE__|rl-controller:${RL_IMAGE_TAG}|g" \
+      -e "s|__CONFIGMAP__|${RL_CONFIGMAP}|g" \
+      -e "s|__LOADER_HOST__|${RL_LOADER_HOST}|g" \
+      -e "s|__LOADER_PORTS__|${RL_LOADER_PORTS_CSV}|g" \
+      -e "s|__OBS_MODE__|${RL_OBS_MODE}|g" \
+      -e "s|__CALLEE__|${RL_CALLEE}|g" \
+      -e "s|__CALLER_LABELS__|${RL_CALLER_LABELS}|g" \
+      "${RL_JOB_MANIFEST}" > "${_tmp_job}"
+    kubectl apply -f "${_tmp_job}" >/dev/null
+    rm -f "${_tmp_job}"
+
+    log "[${policy}] waiting for pod of ${_rl_job_name} (≤ ${RL_POD_READY_TIMEOUT_SEC}s)"
+    # Pod name is not predictable up-front (the Job's controller appends
+    # a random suffix). Poll until selector matches a pod, then wait for
+    # it to be Ready.
+    _rl_pod=""
+    for _i in $(seq 1 45); do
+      _rl_pod="$(kubectl -n "${NAMESPACE}" get pod -l job-name="${_rl_job_name}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+      [[ -n "${_rl_pod}" ]] && break
+      sleep 1
+    done
+    [[ -n "${_rl_pod}" ]] || err "[${policy}] no pod ever appeared for ${_rl_job_name}"
+    if ! kubectl -n "${NAMESPACE}" wait --for=condition=Ready pod "${_rl_pod}" \
+      --timeout="${RL_POD_READY_TIMEOUT_SEC}s"; then
+      log "[${policy}] pod ${_rl_pod} not Ready — tail of describe (events / state):"
+      kubectl -n "${NAMESPACE}" describe pod "${_rl_pod}" 2>/dev/null | tail -n 50 >&2 || true
+      err "[${policy}] pod ${_rl_pod} did not reach Ready within ${RL_POD_READY_TIMEOUT_SEC}s"
+    fi
+
+    log "[${policy}] streaming logs from ${_rl_pod} → rl-controller.log"
+    kubectl -n "${NAMESPACE}" logs -f "${_rl_pod}" \
+      > "${rl_controller_dir}/rl-controller.log" 2>&1 &
+    rl_controller_pid="$!"
+    HELPER_PIDS+=("${rl_controller_pid}")
+    # Stash the names so the cleanup path (after stop_load) knows to
+    # kubectl-cp logs out and delete the Job.
+    _rl_pod_for_cleanup="${_rl_pod}"
+    _rl_job_for_cleanup="${_rl_job_name}"
+  fi
+
+  if "${RESOURCE_SAMPLING}"; then
+    phase "[${policy}] start resource sampler (${RESOURCE_SAMPLE_INTERVAL_SEC}s)"
+    local sampler_args=(
+      python3 "${SCRIPT_DIR}/resource_sampler.py"
+      --out "${out_dir}/resource-usage.csv"
+      --namespace "${NAMESPACE}"
+      --interval "${RESOURCE_SAMPLE_INTERVAL_SEC}"
+    )
+    # Also sample the RL controller process when it's running.
+    [[ -n "${rl_controller_pid}" ]] && sampler_args+=(--pid "${rl_controller_pid}")
+    # And sample the in-cluster RL controller Job's pod (CPU/mem of the
+    # actual controller, not just the local kubectl-logs streamer).
+    [[ -n "${_rl_job_for_cleanup}" ]] && sampler_args+=(--rl-job-name "${_rl_job_for_cleanup}")
+    "${sampler_args[@]}" > "${out_dir}/resource-sampler.log" 2>&1 &
+    resource_sampler_pid="$!"
+    HELPER_PIDS+=("${resource_sampler_pid}")
+  fi
+
   # ---- Define absolute phase boundaries (drift-free scheduling) ----
   # These are the *intended* phase boundaries the runner schedules against.
   # The *physical* fault boundaries (when the chaos object is actually
@@ -781,11 +1021,18 @@ run_single() {
   t_warmup_end=$((t0 + WARMUP_SEC))
   t_prefault_end=$((t_warmup_end + PREFAULT_SEC))
   t_fault_start="${t_prefault_end}"
-  t_fault_end=$((t_fault_start + FAULT_SEC))
+  t_fault_end=$((t_fault_start + FAULT_WINDOW_SEC))
   t_recovery_end=$((t_fault_end + RECOVERY_SEC))
   t_cooldown_end=$((t_recovery_end + COOLDOWN_SEC))
 
   # ---- Start load ----
+  # When an RL controller is configured, export RL_WINDOW_PORT_BASE so each
+  # loader shard launches its /window aiohttp server on port_base + shard_id.
+  if [[ -n "${RL_CONTROLLER_CONFIG}" ]]; then
+    export RL_WINDOW_PORT_BASE="${RL_LOADER_PORT_BASE}"
+  else
+    unset RL_WINDOW_PORT_BASE 2>/dev/null || true
+  fi
   if [[ -n "${CLIENT_PROFILES}" ]]; then
     phase "[${policy}] start load at t=${t0} (profiles: ${CLIENT_PROFILES})"
     PROFILES="${CLIENT_PROFILES}" \
@@ -833,6 +1080,12 @@ run_single() {
   # applied to one pod of that workload, INSTEAD OF the Istio fault manifest.
   # This is the OSDI '22 metastability methodology — a transient CPU
   # restriction on a stateful component, applied for FAULT_SEC seconds.
+  #
+  # _spike_starts / _spike_ends are populated by the multi-spike Istio-trigger
+  # loop (Trigger B) and embedded in timeline.json. Initialise here so they
+  # are always defined regardless of which branch is taken.
+  _spike_starts=()
+  _spike_ends=()
   if (( FAULT_SEC > 0 )); then
     if [[ -n "${CPU_STRESS_TARGET}" ]]; then
       # ---- Trigger A: chaos-mesh CPU stress ----
@@ -842,7 +1095,7 @@ run_single() {
           -e "s|__WORKERS__|${CPU_STRESS_WORKERS}|g" \
           -e "s|__DURATION__|${FAULT_SEC}|g" \
           "${CHAOS_CPU_STRESS_TEMPLATE}" \
-        | kubectl apply -f -
+        | kubectl apply --validate=false -f -
       # Stamp the actual fault start *after* the apply call returns. This
       # is closer to (but not equal to) the moment cart's CPU is actually
       # restricted; chaos-mesh's controller still needs to reconcile the
@@ -855,25 +1108,53 @@ run_single() {
       kubectl delete -n "${NAMESPACE}" "${CHAOS_STRESS_RESOURCE}" --ignore-not-found >/dev/null
       t_fault_actual_end="$(now)"
     else
-      # ---- Trigger B: Istio fault manifest ----
-      phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
-      kubectl apply -f "${FAULT_MANIFEST_PATH}" >/dev/null
-      t_fault_actual_start="$(now)"
-      wait_until "${t_fault_end}"
+      # ---- Trigger B: Istio fault manifest (supports NUM_SPIKES > 1) ----
+      # With NUM_SPIKES=1 this is identical to the original single-spike
+      # behaviour. With NUM_SPIKES>1 the fault is injected and cleared N times,
+      # with INTER_SPIKE_GAP_SEC of clean traffic between consecutive spikes.
+      #
+      # Per-spike actual timestamps are recorded for timeline.json and
+      # can be used by draw_spike_bands() in the plotting scripts.
+      _spike_starts=()
+      _spike_ends=()
 
-      # ---- Remove fault ----
-      # Apply the base routing config (chain retries, no abort/timeout)
-      # which has the same VirtualService names as the fault manifest, so
-      # kubectl apply replaces the faulted entries in-place. Falling back
-      # to `delete` would also remove the chain-retry config and produce
-      # an unrealistic recovery.
-      phase "[${policy}] remove fault (restore base routing)"
-      if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
-        kubectl apply -f "${SERVICE_RETRIES_PATH}" >/dev/null
-      else
-        kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
-      fi
-      t_fault_actual_end="$(now)"
+      for (( _spike=1; _spike<=NUM_SPIKES; _spike++ )); do
+        if (( NUM_SPIKES > 1 )); then
+          phase "[${policy}] inject fault spike ${_spike}/${NUM_SPIKES} ($(basename "${FAULT_MANIFEST_PATH}"))"
+        else
+          phase "[${policy}] inject fault ($(basename "${FAULT_MANIFEST_PATH}"))"
+        fi
+        kubectl apply --validate=false -f "${FAULT_MANIFEST_PATH}" >/dev/null
+        _spike_now="$(now)"
+        _spike_starts+=("${_spike_now}")
+        [[ ${_spike} -eq 1 ]] && t_fault_actual_start="${_spike_now}"
+
+        sleep "${FAULT_SEC}"
+
+        # Apply the base routing config to restore clean traffic.
+        # kubectl apply replaces the faulted VirtualService entries in-place
+        # so chain-retry config is preserved (falling back to delete would
+        # strip it and produce an unrealistic recovery).
+        if (( NUM_SPIKES > 1 )); then
+          phase "[${policy}] remove fault spike ${_spike}/${NUM_SPIKES} (restore base routing)"
+        else
+          phase "[${policy}] remove fault (restore base routing)"
+        fi
+        if [[ -f "${SERVICE_RETRIES_PATH}" ]]; then
+          kubectl apply --validate=false -f "${SERVICE_RETRIES_PATH}" >/dev/null
+        else
+          kubectl delete -f "${FAULT_MANIFEST_PATH}" >/dev/null
+        fi
+        _spike_now="$(now)"
+        _spike_ends+=("${_spike_now}")
+        t_fault_actual_end="${_spike_now}"
+
+        # Inter-spike gap: let the system breathe before the next injection.
+        if (( _spike < NUM_SPIKES )); then
+          phase "[${policy}] inter-spike gap ${_spike}/${NUM_SPIKES-1}: ${INTER_SPIKE_GAP_SEC}s"
+          sleep "${INTER_SPIKE_GAP_SEC}"
+        fi
+      done
     fi
   else
     log "[${policy}] fault window = 0s, skipping trigger (clean baseline run)"
@@ -904,6 +1185,26 @@ run_single() {
   log "[${policy}] cooldown → t+${TOTAL_SEC}s"
   wait_until "${t_cooldown_end}"
 
+  # In-cluster mode: pull the controller's logs/timings out of the pod
+  # before tearing down the Job. We do this BEFORE stopping the log-stream
+  # helper so the kubectl-cp doesn't race a still-writing controller, but
+  # AFTER the run finished so /var/log/rl/ is fully populated.
+  if [[ -n "${RL_CONTROLLER_CONFIG}" && -n "${_rl_pod_for_cleanup:-}" ]]; then
+    log "[${policy}] kubectl cp ${_rl_pod_for_cleanup}:/var/log/rl/. → ${rl_controller_dir}/"
+    kubectl -n "${NAMESPACE}" cp "${_rl_pod_for_cleanup}:/var/log/rl/." \
+      "${rl_controller_dir}/" >/dev/null 2>&1 || \
+      warn "kubectl cp from ${_rl_pod_for_cleanup} failed (logs may be incomplete)"
+  fi
+
+  stop_helper_pid "${rl_controller_pid}"
+  stop_helper_pid "${resource_sampler_pid}"
+
+  if [[ -n "${RL_CONTROLLER_CONFIG}" && -n "${_rl_job_for_cleanup:-}" ]]; then
+    log "[${policy}] kubectl delete job ${_rl_job_for_cleanup}"
+    kubectl -n "${NAMESPACE}" delete job "${_rl_job_for_cleanup}" \
+      --ignore-not-found >/dev/null 2>&1 || true
+  fi
+
   # ---- Write timeline ----
   # `t_fault_*` are the *intended* boundaries the runner scheduled against;
   # `t_fault_actual_*` are stamped at the moment the chaos object's apply
@@ -912,6 +1213,28 @@ run_single() {
   # `t_fault_actual_*` when available and falls back to `t_fault_*`
   # otherwise. For runs with FAULT_SEC=0 the actual fields are 0 and the
   # analyzer falls back.
+  # Build per-spike timestamp fragment to embed in timeline.json.
+  # Python emits a trailing comma followed by the extra keys so the fragment
+  # can be spliced directly between "t_cooldown_end" and the closing '}'.
+  _spike_json_fragment="$(python3 - "${NUM_SPIKES}" \
+      "${_spike_starts[*]:- }" "${_spike_ends[*]:- }" <<'PYEOF'
+import json, sys
+num    = int(sys.argv[1])
+starts = [int(x) for x in sys.argv[2].split() if x.strip()]
+ends   = [int(x) for x in sys.argv[3].split() if x.strip()]
+d = {"num_spikes": num}
+for i, (s, e) in enumerate(zip(starts, ends), 1):
+    d[f"t_spike_{i}_actual_start"] = s
+    d[f"t_spike_{i}_actual_end"]   = e
+# Emit as a fragment that follows the last comma-separated field.
+# Each line is indented 2 spaces to match the surrounding JSON.
+lines = []
+for k, v in d.items():
+    lines.append(f'  "{k}": {json.dumps(v)}')
+print(",\n".join([""] + lines))
+PYEOF
+  )"
+
   cat > "${out_dir}/timeline.json" <<EOF
 {
   "policy": "${policy}",
@@ -923,7 +1246,7 @@ run_single() {
   "t_fault_actual_start": ${t_fault_actual_start},
   "t_fault_actual_end": ${t_fault_actual_end},
   "t_recovery_end": ${t_recovery_end},
-  "t_cooldown_end": ${t_cooldown_end}
+  "t_cooldown_end": ${t_cooldown_end}${_spike_json_fragment}
 }
 EOF
 

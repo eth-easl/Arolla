@@ -19,6 +19,13 @@ REMOTE_METRICS_DIR="${REMOTE_BASE}/metrics"
 # GIL ceiling that caps a single Python loader at ~1000 rps.
 NUM_LOADERS="${NUM_LOADERS:-1}"
 
+# When RL_WINDOW_PORT_BASE > 0, each shard exposes an aiohttp /window
+# endpoint on port_base + shard_id so the in-cluster RL controller can
+# pull recent attempt rows over HTTP. 0 (default) disables the server —
+# safe for non-RL runs; traffic_gen.py no-ops when the value is 0.
+RL_WINDOW_PORT_BASE="${RL_WINDOW_PORT_BASE:-0}"
+RL_WINDOW_KEEP_SEC="${RL_WINDOW_KEEP_SEC:-60}"
+
 SSH="ssh ${SSH_OPTS} ${SSH_USER}@${CLIENT_HOST}"
 MASTER_SSH="ssh ${SSH_OPTS} ${SSH_USER}@${MASTER_HOST}"
 
@@ -58,6 +65,20 @@ remote_mkdir() {
 upload_files() {
   remote_mkdir
   scp ${SSH_OPTS} "${SCRIPT_DIR}/traffic_gen.py" "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/traffic_gen.py" >/dev/null
+  # traffic_gen.py imports `rl_obs_schema` (the WindowBucket schema +
+  # histogram edges shared with the in-cluster RL controller) when the
+  # /buckets endpoint is enabled. The file lives in prototype/experiments/rl/
+  # in the repo but must land next to traffic_gen.py on CLIENT_HOST so
+  # the import resolves against sys.path[0] = the script's directory.
+  # Missing the upload would surface as the loader exiting in the
+  # liveness check below with "ImportError: rl_obs_schema" — defensive
+  # but not visible in non-RL runs because the import only runs when
+  # --rl-window-port-base > 0.
+  local schema_path="${PROTO_DIR}/experiments/rl/rl_obs_schema.py"
+  if [[ -f "${schema_path}" ]]; then
+    scp ${SSH_OPTS} "${schema_path}" \
+      "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/rl_obs_schema.py" >/dev/null
+  fi
   scp -r ${SSH_OPTS} "${SCRIPT_DIR}/profiles/" "${SSH_USER}@${CLIENT_HOST}:${REMOTE_BASE}/" >/dev/null
 }
 
@@ -72,6 +93,24 @@ start_clients() {
   [[ -n "${profiles_arg}" ]] && echo "[info] Profiles:     ${profiles_arg}"
 
   upload_files
+
+  # Ensure the loader's optional aiohttp dependency is present when the
+  # in-cluster RL controller is active (RL_WINDOW_PORT_BASE > 0). Without
+  # aiohttp, traffic_gen.py silently no-ops the /window+/buckets HTTP
+  # servers (see _start_window_server), and the in-cluster controller
+  # observes 0-traffic windows for the entire run. The check is a no-op
+  # when aiohttp is already installed and when RL_WINDOW_PORT_BASE=0.
+  if [[ "${RL_WINDOW_PORT_BASE:-0}" != "0" ]]; then
+    ${SSH} "bash -lc '
+      set -e
+      if ! python3 -c \"import aiohttp\" >/dev/null 2>&1; then
+        echo \"[run-clients] aiohttp missing on ${CLIENT_HOST}, installing...\" >&2
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq python3-aiohttp
+        python3 -c \"import aiohttp; print(\\\"aiohttp\\\", aiohttp.__version__)\" >&2
+      fi
+    '"
+  fi
 
   ${SSH} "bash -lc '
     set -euo pipefail
@@ -110,6 +149,8 @@ start_clients() {
         --output-dir \"${REMOTE_METRICS_DIR}\" \
         --shard-id \$i \
         --num-shards ${NUM_LOADERS} \
+        --rl-window-port-base ${RL_WINDOW_PORT_BASE} \
+        --rl-window-keep-sec ${RL_WINDOW_KEEP_SEC} \
         > \"\$log_i\" 2>&1 < /dev/null &
       echo \$! >> \"${REMOTE_PID_FILE}\"
     done

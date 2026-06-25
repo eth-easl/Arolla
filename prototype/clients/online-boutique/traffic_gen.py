@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import concurrent.futures
 import http.client
 import json
@@ -52,6 +53,32 @@ import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+
+# The bucket schema is shared with rl_controller.py via rl_obs_schema.py. On
+# the client host the loader is deployed alongside rl_obs_schema.py inside
+# REMOTE_BASE (see run-clients.sh::upload_files), so the import resolves
+# against sys.path[0] = traffic_gen.py's directory. In repo / test contexts
+# we fall back to inserting prototype/experiments/rl/ before importing.
+try:
+    from rl_obs_schema import (  # noqa: PLC0415
+        LATENCY_HISTOGRAM_EDGES_S,
+        LATENCY_HISTOGRAM_NUM_BUCKETS,
+        WindowBucket,
+        latency_bucket_index,
+    )
+except ImportError:
+    _experiments_dir = (
+        Path(__file__).resolve().parent.parent.parent / "experiments" / "rl"
+    )
+    if _experiments_dir.is_dir():
+        sys.path.insert(0, str(_experiments_dir))
+    from rl_obs_schema import (  # noqa: PLC0415
+        LATENCY_HISTOGRAM_EDGES_S,
+        LATENCY_HISTOGRAM_NUM_BUCKETS,
+        WindowBucket,
+        latency_bucket_index,
+    )
+
 
 # Concurrent HTTP calls are issued through asyncio.to_thread(), which uses the
 # loop's default ThreadPoolExecutor. That defaults to min(32, cpu_count+4) —
@@ -80,6 +107,46 @@ DEFAULT_HTTP_THREAD_POOL_SIZE = 1024
 _CSV_FILE: "Optional[Any]" = None
 _LOG_ATTEMPTS: bool = False
 
+# ---------------------------------------------------------------------------
+# RL controller observation window (in-memory ring buffer + HTTP)
+# ---------------------------------------------------------------------------
+#
+# When --rl-window-port-base is non-zero, every CSV row is also appended to a
+# bounded deque, and a tiny aiohttp server on `port_base + shard_id` exposes
+# `/window?since=<unix_ts>` returning the rows newer than `since`. This
+# replaces the controller's SSH-cat loop: bytes per tick drop from
+# O(file_size) to O(rps × decision_interval), and the loader pays at most
+# one extra deque-append per HTTP attempt.
+#
+# `_WINDOW_KEEP_SEC` bounds memory: rows older than that are dropped on
+# every append (lazy GC). A 60 s ceiling fits the longest configured
+# observation window plus margin without growing unbounded. The
+# `_WINDOW_RING` is per-process (one shard), so the controller fans out
+# across ports per tick.
+
+_WINDOW_RING: "Optional[collections.deque[dict[str, Any]]]" = None
+_WINDOW_KEEP_SEC: float = 60.0
+_WINDOW_SHARD_ID: int = 0
+
+# Pre-aggregated parallel structure populated alongside `_WINDOW_RING` (see
+# enqueue_window_bucket_row). One bucket per (ts_sec, profile) — the firer
+# increments counters in place instead of pushing per-attempt dicts the
+# controller would have to scan linearly. `_BUCKET_INDEX` is the
+# fast-lookup map for the "current insertion point"; pruning runs lazily
+# alongside the row-deque's GC on every enqueue.
+#
+# The bucket cadence is per-process: this loader shard owns shard_id rows
+# only, so a single firer's asyncio loop is the only writer for these
+# structures. No locks are required for the same reason `_WINDOW_RING`
+# doesn't need any — the asyncio task that calls enqueue_window_row is the
+# same task that calls enqueue_window_bucket_row, and the GIL guarantees no
+# other thread reads either structure between increments. The aiohttp
+# `/buckets` handler is a coroutine on the same loop and snapshots the
+# deque with `list(...)` before iterating (see `_handle_buckets`).
+_WINDOW_BUCKETS: "Optional[collections.deque[WindowBucket]]" = None
+_BUCKET_KEEP_SEC: float = 60.0
+_BUCKET_INDEX: dict[tuple[int, str], WindowBucket] = {}
+
 
 def write_csv_row(line: str) -> None:
     """Append one row to the run's CSV. Single-threaded by construction:
@@ -87,6 +154,96 @@ def write_csv_row(line: str) -> None:
     holds the GIL until it returns, so two writes can never interleave."""
     if _CSV_FILE is not None:
         _CSV_FILE.write(line)
+
+
+def enqueue_window_row(row: dict[str, Any]) -> None:
+    """Push one structured attempt row onto the in-memory ring (if enabled).
+
+    The row schema mirrors the CSV columns so `/window` consumers see
+    exactly the same fields the on-disk file has. Pruning happens on every
+    enqueue: cheaper than a separate housekeeping task, and matches the
+    deque's natural growth rate."""
+    if _WINDOW_RING is None:
+        return
+    _WINDOW_RING.append(row)
+    cutoff = row["timestamp"] - _WINDOW_KEEP_SEC
+    # The deque is naturally ordered by enqueue time → drop from the left
+    # while it's older than the cutoff. Two-pop bound = the worst lag a
+    # single tick can introduce; in practice we drop 0-2 rows per call.
+    while _WINDOW_RING and _WINDOW_RING[0]["timestamp"] < cutoff:
+        _WINDOW_RING.popleft()
+
+
+def enqueue_window_bucket_row(
+    *,
+    timestamp: float,
+    profile: str,
+    is_retry: bool,
+    is_final: bool,
+    ok: bool,
+    status: int,
+    latency_s: float,
+) -> None:
+    """Pre-aggregate one attempt into the current second's bucket (if enabled).
+
+    Counterpart of :func:`enqueue_window_row` for the pre-aggregated
+    buckets path. Both helpers are called from the same site — the
+    firer's per-attempt code path — so the two ring buffers stay
+    consistent under any ordering of attempts.
+
+    `is_final` distinguishes "this was a real outcome for the request" from
+    "this was an interim retry attempt that did not terminate the request":
+
+      * `attempts` / `retries` / `*_failures` count every wire attempt.
+      * `requests` / `successes` / `latency_hist` count only is_final rows,
+        so success-rate and latency reconstruction match what
+        ``final_attempts(rows)`` would compute on the rows path. The
+        controller's existing observation vector is built on that
+        equivalence — see ``rl_controller.build_metrics``.
+    """
+    if _WINDOW_BUCKETS is None:
+        return
+
+    ts_sec = int(timestamp)
+    key = (ts_sec, profile)
+    bucket = _BUCKET_INDEX.get(key)
+    if bucket is None:
+        bucket = WindowBucket(
+            ts_sec=ts_sec,
+            shard_id=_WINDOW_SHARD_ID,
+            profile=profile,
+        )
+        _BUCKET_INDEX[key] = bucket
+        _WINDOW_BUCKETS.append(bucket)
+
+    bucket.attempts += 1
+    if is_retry:
+        bucket.retries += 1
+        if ok:
+            bucket.retry_successes += 1
+    if status >= 500:
+        bucket.server_failures += 1
+    elif status == 0:
+        bucket.deadline_failures += 1
+    if is_final:
+        bucket.requests += 1
+        if ok:
+            bucket.successes += 1
+        idx = latency_bucket_index(latency_s, LATENCY_HISTOGRAM_EDGES_S)
+        if 0 <= idx < LATENCY_HISTOGRAM_NUM_BUCKETS:
+            bucket.latency_hist[idx] += 1
+
+    # Lazy GC mirrors `_WINDOW_RING`: drop everything strictly older than
+    # the retention cutoff. The bucket deque is naturally ordered by
+    # `ts_sec` because new buckets are only ever appended on the right; a
+    # late-arriving row whose `int(timestamp)` is older than the head
+    # bucket but still within retention falls into the matching existing
+    # bucket via `_BUCKET_INDEX`. Rows older than the cutoff are charged
+    # to the dropped bucket and lost — same behaviour the rows path has.
+    cutoff = ts_sec - _BUCKET_KEEP_SEC
+    while _WINDOW_BUCKETS and _WINDOW_BUCKETS[0].ts_sec < cutoff:
+        old = _WINDOW_BUCKETS.popleft()
+        _BUCKET_INDEX.pop((old.ts_sec, old.profile), None)
 
 
 # ---------------------------------------------------------------------------
@@ -467,12 +624,58 @@ async def execute_step(
         latency = time.time() - t0
         final_ok = ok
 
+        # `is_final` mirrors the retry-policy decision the firer is about to
+        # take below: an attempt is "final" iff no further retry will be
+        # issued for this request_id. We compute it here, before the break
+        # check, so the row + bucket get a stable per-attempt flag (rather
+        # than relying on the post-loop break — which would force a
+        # second pass through this code or a more invasive refactor).
+        #
+        # The buckets path uses this flag directly. The rows path / CSV
+        # ignores it: ``rl_controller.final_attempts`` recomputes "final"
+        # from the row's `_attempt` column to stay byte-compatible with
+        # the existing on-disk schema.
+        is_final = (
+            ok
+            or not should_retry(profile, status)
+            or retry_index >= max_retries
+        )
+
         # One CSV row per attempt. Synchronous write to a long-held file
         # handle — see write_csv_row for why this is safe.
+        attempt_ts = time.time()
         write_csv_row(
-            f"{time.time():.6f},{name},{worker_idx},{req_id},{step_name},"
+            f"{attempt_ts:.6f},{name},{worker_idx},{req_id},{step_name},"
             f"{method},{path},{attempt_number},{int(is_retry)},{status},"
             f"{int(ok)},{latency:.6f}\n"
+        )
+
+        # Also enqueue the structured row for /window consumers.
+        # No-op when --rl-window-port-base is 0. Schema matches the CSV.
+        enqueue_window_row({
+            "timestamp": attempt_ts,
+            "profile": name,
+            "worker": worker_idx,
+            "request_id": req_id,
+            "request_type": step_name,
+            "method": method,
+            "path": path,
+            "attempt": attempt_number,
+            "is_retry": int(is_retry),
+            "status": status,
+            "ok": int(ok),
+            "latency_s": latency,
+        })
+        # Buckets path: pre-aggregate this attempt for the /buckets
+        # HTTP endpoint. No-op when buckets are disabled.
+        enqueue_window_bucket_row(
+            timestamp=attempt_ts,
+            profile=name,
+            is_retry=bool(is_retry),
+            is_final=bool(is_final),
+            ok=bool(ok),
+            status=status,
+            latency_s=latency,
         )
 
         # Per-attempt structured log line. Off by default — at high RPS the
@@ -601,6 +804,13 @@ async def client_worker(
         "User-Agent": f"retry-study-client/{name}",
         "X-Retry-Client-Type": name,
         "X-Retry-Client-Worker": str(worker_idx),
+        # Promoted to a Prometheus metric dimension by the Istio
+        # Telemetry CR at manifests/istio/telemetry-rl-profile.yaml.
+        # The controller's Envoy parser splits counters per
+        # ``rl_profile`` label so #2 (min_client_success) and #6
+        # (retry_fairness_gap) can compute per-profile shares without
+        # going back to loader-side aggregation.
+        "x-rl-profile": name,
     }
 
     # One long-lived HTTP connection per worker. Reconnects on error.
@@ -658,9 +868,37 @@ async def _open_loop_one(
     if inflight_sem is not None:
         if inflight_sem.locked():
             # Client itself is overloaded — drop this request and log it.
+            drop_ts = time.time()
+            drop_profile = profile.get("name", "client")
             write_csv_row(
-                f"{time.time():.6f},{profile.get('name','client')},{fire_idx},"
+                f"{drop_ts:.6f},{drop_profile},{fire_idx},"
                 f"client-overload,client-overload,DROP,/,1,0,-1,0,0.000000\n"
+            )
+            enqueue_window_row({
+                "timestamp": drop_ts,
+                "profile": drop_profile,
+                "worker": fire_idx,
+                "request_id": "client-overload",
+                "request_type": "client-overload",
+                "method": "DROP",
+                "path": "/",
+                "attempt": 1,
+                "is_retry": 0,
+                "status": -1,
+                "ok": 0,
+                "latency_s": 0.0,
+            })
+            # Buckets mirror: a drop terminates the request without a
+            # retry (is_final=True) and contributes to `attempts`+`requests`
+            # the same way ``final_attempts`` charges it on the rows path.
+            enqueue_window_bucket_row(
+                timestamp=drop_ts,
+                profile=drop_profile,
+                is_retry=False,
+                is_final=True,
+                ok=False,
+                status=-1,
+                latency_s=0.0,
             )
             return
         await inflight_sem.acquire()
@@ -722,6 +960,10 @@ async def open_loop_firer(
         "User-Agent": f"retry-study-client/{name}",
         "X-Retry-Client-Type": name,
         "X-Retry-Client-Worker": "open-loop",
+        # Promoted to a Prometheus metric dimension by the Istio
+        # Telemetry CR at manifests/istio/telemetry-rl-profile.yaml
+        # (see closed-loop worker for full rationale).
+        "x-rl-profile": name,
     }
 
     pool = ConnectionPool(target_host, target_port, pool_size, timeout_s)
@@ -783,6 +1025,123 @@ async def open_loop_firer(
 
 
 # ---------------------------------------------------------------------------
+# RL controller observation server (aiohttp /window endpoint)
+# ---------------------------------------------------------------------------
+#
+# Tiny HTTP server that exposes the in-memory ring buffer to the in-cluster
+# RL controller. One server per shard, on `port_base + shard_id`, so the
+# controller can fan-out across all 4 shard ports per tick.
+#
+# aiohttp is imported lazily because the loader machine doesn't always have
+# it installed (opt-in per cluster bootstrap), and this module is sometimes
+# imported by the test harness which doesn't need the server.
+# If the import fails the server is silently disabled and a warning is printed.
+
+
+async def _handle_window(request: "Any") -> "Any":
+    """`GET /window?since=<unix_ts>` → JSON of rows with timestamp ≥ since.
+
+    Lazily imports aiohttp inside this handler is wrong (handlers are
+    already running on aiohttp); this body only runs when aiohttp is in
+    scope, so the bare `web.json_response(...)` reference is safe."""
+    from aiohttp import web  # noqa: PLC0415
+
+    since_raw = request.query.get("since", "0")
+    try:
+        since = float(since_raw)
+    except (TypeError, ValueError):
+        return web.json_response({"error": f"bad since={since_raw!r}"}, status=400)
+
+    # Snapshot the deque first so we don't iterate concurrently with new
+    # appends. `list()` on a deque is O(n) and safe under the GIL — we
+    # don't need a lock as long as the snapshot is one statement.
+    if _WINDOW_RING is None:
+        rows: list[dict[str, Any]] = []
+    else:
+        rows = [r for r in list(_WINDOW_RING) if r["timestamp"] >= since]
+    return web.json_response({
+        "rows": rows,
+        "now": time.time(),
+        "shard": _WINDOW_SHARD_ID,
+    })
+
+
+async def _handle_buckets(request: "Any") -> "Any":
+    """`GET /buckets?since=<unix_ts>` → JSON of pre-aggregated buckets.
+
+    Pre-aggregated buckets transport. Each bucket is one second of one
+    (shard, profile) with integer counters + a fixed-edge latency
+    histogram. The controller's :func:`http_fetch_buckets` matches this
+    response schema.
+
+    `since` is the same wall-clock filter as `/window`'s — buckets with
+    ``ts_sec >= floor(since)`` are returned. Floor is used (rather than
+    a tighter `>=`) so a `since` value like 1.5 retains the second-1
+    bucket that contains attempts in [1.0, 2.0) — exactly the rows the
+    rows path would also keep at `since=1.5`.
+    """
+    from aiohttp import web  # noqa: PLC0415
+    from dataclasses import asdict as _asdict  # noqa: PLC0415
+
+    since_raw = request.query.get("since", "0")
+    try:
+        since = float(since_raw)
+    except (TypeError, ValueError):
+        return web.json_response({"error": f"bad since={since_raw!r}"}, status=400)
+    since_sec = int(since)  # floor; see docstring
+
+    if _WINDOW_BUCKETS is None:
+        buckets: list[dict[str, Any]] = []
+    else:
+        buckets = [
+            _asdict(b) for b in list(_WINDOW_BUCKETS) if b.ts_sec >= since_sec
+        ]
+    return web.json_response({
+        "buckets": buckets,
+        "now": time.time(),
+        "shard": _WINDOW_SHARD_ID,
+        "edges": list(LATENCY_HISTOGRAM_EDGES_S),
+    })
+
+
+async def _start_window_server(port: int) -> "Any":
+    """Start the aiohttp server. Returns the AppRunner so main_async can
+    cleanly stop it on shutdown. Returns None on import failure."""
+    try:
+        from aiohttp import web  # noqa: PLC0415
+    except ImportError:
+        print(
+            "[traffic_gen] aiohttp is not installed; /window server disabled.",
+            file=sys.stderr,
+        )
+        return None
+
+    app = web.Application()
+    app.router.add_get("/window", _handle_window)
+    app.router.add_get("/buckets", _handle_buckets)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    try:
+        await site.start()
+    except OSError as exc:
+        print(
+            f"[traffic_gen] /window server bind failed on :{port}: {exc}.",
+            file=sys.stderr,
+        )
+        await runner.cleanup()
+        return None
+
+    print(json.dumps({
+        "event": "window_server_started",
+        "ts": time.time(),
+        "port": port,
+        "shard_id": _WINDOW_SHARD_ID,
+    }), flush=True)
+    return runner
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -793,7 +1152,8 @@ CSV_HEADER = (
 
 
 async def main_async(args) -> int:
-    global _CSV_FILE, _LOG_ATTEMPTS
+    global _CSV_FILE, _LOG_ATTEMPTS, _WINDOW_RING, _WINDOW_KEEP_SEC, _WINDOW_SHARD_ID
+    global _WINDOW_BUCKETS, _BUCKET_KEEP_SEC, _BUCKET_INDEX
 
     profile_dir = Path(args.profile_dir)
     profiles = load_profiles(profile_dir)
@@ -844,6 +1204,27 @@ async def main_async(args) -> int:
     # this halves the syscalls and removes the asyncio.Lock entirely.
     _CSV_FILE = open(out_csv, "a", buffering=1)
     _LOG_ATTEMPTS = bool(args.log_attempts)
+
+    # Enable the in-memory ring + /window server when a port base is
+    # configured. The ring is enabled even if aiohttp is missing — it's
+    # cheap and lets us see in the log what the server *would* have
+    # exposed. The server start is best-effort: failure prints a warning.
+    window_runner = None
+    if args.rl_window_port_base > 0:
+        _WINDOW_SHARD_ID = shard_id
+        _WINDOW_KEEP_SEC = float(args.rl_window_keep_sec)
+        _WINDOW_RING = collections.deque()
+        # Pre-aggregated buckets ring: same retention as the row ring,
+        # so a controller asking `since=now-window` gets a fully
+        # populated pre-aggregated window when the rows path would also
+        # be fully populated. The extra in-memory cost is ~130 B per
+        # (sec, profile) — well under 10 KB total for a 60 s window on
+        # the configured profile set.
+        _BUCKET_KEEP_SEC = float(args.rl_window_keep_sec)
+        _WINDOW_BUCKETS = collections.deque()
+        _BUCKET_INDEX = {}
+        port = args.rl_window_port_base + shard_id
+        window_runner = await _start_window_server(port)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -932,6 +1313,11 @@ async def main_async(args) -> int:
             except Exception:
                 pass
             _CSV_FILE = None
+        if window_runner is not None:
+            try:
+                await window_runner.cleanup()
+            except Exception:
+                pass
     return 0
 
 
@@ -955,6 +1341,23 @@ def parse_args():
     # default; turn on for debugging.
     p.add_argument("--log-attempts", action="store_true",
                    help="Log a JSON line per HTTP attempt to stdout (slow)")
+    # In-memory ring + aiohttp /window endpoint on
+    # `port_base + shard_id`. 0 = disabled (legacy SSH-cat path).
+    p.add_argument(
+        "--rl-window-port-base", type=int, default=0,
+        help=(
+            "If > 0, expose a /window?since=<ts> aiohttp endpoint on "
+            "port_base + shard_id and keep an in-memory ring of recent "
+            "attempt rows. Used by the in-cluster RL controller."
+        ),
+    )
+    p.add_argument(
+        "--rl-window-keep-sec", type=float, default=60.0,
+        help=(
+            "How many seconds of attempt rows to keep in the ring. Default "
+            "60 s (longest configured observation_window_sec + margin)."
+        ),
+    )
     return p.parse_args()
 
 

@@ -1,0 +1,118 @@
+# Mesh-wide sidecar CPU reservation + proxy stats inclusion.
+#
+# Bumps the default sidecar `requests.cpu` from Istio's stock 10 m to 100 m
+# *for every pod in the mesh*, applied at sidecar-injection time via the
+# IstioOperator. This is a kubeadm-cluster-wide change; per-deployment
+# annotations (e.g. `sidecar.istio.io/proxyCPU`) remain available and stack
+# on top of this default.
+#
+# Why mesh-wide and not surgical
+# ------------------------------
+# A reactive "observe-which-sidecar-is-overloaded-then-bump-it" strategy is
+# structurally impossible: the pipeline that observes a sidecar's overload
+# *runs through* that very sidecar, so by the time we'd notice the throttle
+# we've already lost the channel that would tell us about it. Sidecar CPU
+# reservations therefore have to be pre-emptive. In production any service
+# could be the one to fault next, so the only architecture that covers
+# "any service could fault next" without leaving observation gaps is a
+# uniform floor across the mesh.
+#
+# In the experiment we know cart will be the faulting service, but
+# bumping only the cart-callers (frontend + checkoutservice) would
+# publish a recipe ("bump only the sidecars you plan to poll") that
+# doesn't generalise. Setting the floor mesh-wide matches what an Istio
+# operator would actually do.
+#
+# Sizing
+# ------
+# 100 m is a *floor* under contention, not a cap (no `limits:` block —
+# the sidecar can burst above 100 m if the node has idle CPU). Steady-
+# state sidecar usage in this workload is ~5–20 m; the bump is
+# insurance against the cgroup throttling the sidecar when the
+# application container saturates the pod's CPU budget.
+#
+# On this Emulab cluster (~20 application pods × 90 m extra = 1.8 CPU
+# of extra scheduling reservation across the mesh) the cost is well
+# within node headroom (4 worker × ~16 CPU each = 64 CPU available).
+# A 200-pod production cluster would pay ~18 CPU of scheduling
+# reservation — non-trivial but well within standard Istio sizing
+# guidance. If that's too aggressive, dropping to 50 m still covers
+# the contention-floor use case at half the scheduling cost.
+#
+# How to apply
+# ------------
+# Apply once at install time (deploy-istio.sh's step 3 already pipes
+# the equivalent --set flags into `istioctl install`). To re-apply
+# manually:
+#
+#     istioctl install -f sidecar-cpu-reservation.yaml -y
+#
+# Existing pods do *not* pick up the change until they are re-injected
+# by the webhook, so cycle the namespace afterwards (deploy-app.sh
+# does this automatically on a fresh deploy):
+#
+#     kubectl -n online-boutique rollout restart deployment
+#
+# Roll-out is sequential so the app keeps serving throughout.
+#
+# Verification
+# ------------
+# After applying, every fresh sidecar should report 100 m:
+#
+#     kubectl -n online-boutique get pod -o jsonpath='{range .items[*]}\
+# {.metadata.name}{"\t"}{.spec.containers[?(@.name=="istio-proxy")].resources.requests.cpu}{"\n"}{end}'
+#
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: installed-state
+  namespace: istio-system
+spec:
+  values:
+    global:
+      proxy:
+        # `requests` only — no `limits` so the sidecar can burst above
+        # this floor on an idle node. The 100 m is the scheduling
+        # guarantee, not a quota.
+        resources:
+          requests:
+            cpu: 100m       # was 10m (Istio default)
+            memory: 128Mi   # unchanged from Istio default
+  meshConfig:
+    # The Envoy-sidecar observation path requires per-outbound-cluster
+    # counters (`cluster.outbound|*|cartservice.*upstream_rq*`) and the
+    # `upstream_rq_time` histogram on every caller sidecar. Istio 1.27
+    # default-filters those down to the bare minimum (`xds-grpc`,
+    # `cluster_manager`, `listener_manager`, plus the `istiocustom.*`
+    # Prometheus metrics produced by the WASM plugin). Without the
+    # explicit inclusion below, /stats?format=json on a sidecar returns
+    # zero cluster.outbound entries even when the workload is healthy
+    # and traffic is flowing — the WASM plugin emits its own counters
+    # at a different scope so the Prometheus dashboard still looks
+    # fine, but the controller's parser has nothing to consume.
+    #
+    # We add both the prefix and the per-stat regex so the inclusion
+    # survives the next time Envoy tightens its default stats filter:
+    #   - `cluster.outbound`           — keeps the per-callee counters
+    #   - `cluster.inbound`            — kept symmetric for callees that
+    #                                    want to inspect their own
+    #                                    inbound side (cheap, ≤ 10 stats)
+    #   - regex `.*upstream_rq.*`      — guarantees the *_2xx / *_5xx /
+    #                                    *_retry / *_time histograms make
+    #                                    it through even if Envoy ever
+    #                                    namespaces them away from
+    #                                    cluster.outbound.
+    #
+    # Stats volume on a 20-pod mesh: ~30 outbound clusters × ~12
+    # counters + 1 histogram = ~400 extra stats per sidecar. Stats
+    # encoding inside Envoy is cheap (atomic counters); the cost is in
+    # the JSON response size when the controller polls (every 1 s).
+    # Measured: ~6 KB per /stats fetch for cartservice-only filtered
+    # queries.
+    defaultConfig:
+      proxyStatsMatcher:
+        inclusionPrefixes:
+          - "cluster.outbound"
+          - "cluster.inbound"
+        inclusionRegexps:
+          - ".*upstream_rq.*"

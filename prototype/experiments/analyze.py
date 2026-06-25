@@ -35,6 +35,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from sustained_recovery import per_spike_recovery
+
 # ---------------------------------------------------------------------------
 # Style — matches the paper figure aesthetic (recovery-overload reference)
 # ---------------------------------------------------------------------------
@@ -3109,7 +3111,8 @@ def _fairness_bar_chart(
 # Main
 # ---------------------------------------------------------------------------
 
-def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
+def _load_and_compute_basics(policy_dir: Path) -> Optional[dict]:
+    """Load client CSV + timeline; compute core per-second bins and scalars."""
     timeline = load_timeline(policy_dir)
     if not timeline:
         print(f"[warn] {policy_dir.name}: no timeline.json", file=sys.stderr)
@@ -3120,19 +3123,10 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         print(f"[warn] {policy_dir.name}: no client CSV data", file=sys.stderr)
         return None
 
-    t_start = float(timeline["t_start"])
     t_prefault_end = float(timeline["t_prefault_end"])
     t_warmup_end = float(timeline["t_warmup_end"])
     t_cooldown_end = float(timeline["t_cooldown_end"])
 
-    # Prefer the *actual* fault boundaries (stamped right after the chaos
-    # apply/delete kubectl calls return) over the *intended* boundaries
-    # (the runner's scheduling targets). They differ by ~1-7s in practice
-    # because of the chaos-mesh reconcile + daemon-dispatch + stress-ng
-    # startup latency, plus snapshot wall time at the phase boundary.
-    # Older runs only have `t_fault_start` / `t_fault_end`; the actual
-    # fields are written as 0 when the actual stamps weren't recorded
-    # (e.g. FAULT_SEC=0 baseline runs).
     t_fault_intended_start = float(timeline["t_fault_start"])
     t_fault_intended_end   = float(timeline["t_fault_end"])
     t_fault_actual_start = float(timeline.get("t_fault_actual_start", 0) or 0)
@@ -3140,43 +3134,108 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
     t_fault_start = t_fault_actual_start if t_fault_actual_start > 0 else t_fault_intended_start
     t_fault_end   = t_fault_actual_end   if t_fault_actual_end   > 0 else t_fault_intended_end
 
-    # Time-series x-axis is relative to warmup_end: t=0 is where the
-    # pre-fault baseline starts. Warmup data is dropped from the plot.
     t_ref = t_warmup_end
 
     goodput = goodput_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
     success_rate = success_rate_timeseries(
         df, t_ref, t_cooldown_end, bin_sec=1.0, smooth_win=5,
     )
-    rates = request_rate_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
-    retry_by_status_ts = retry_by_status_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
-    client_latency_ts = client_latency_timeseries(
-        df, t_ref, t_cooldown_end, bin_sec=1.0,
-    )
     amp = amplification(df, t_fault_start, t_fault_end)
     reff = retry_efficiency_pct(df, t_fault_start, t_fault_end)
 
-    # All bin coordinates are relative to t_ref (warmup_end). Each bin
-    # `b` represents the time interval [b, b+1) seconds from t_ref. So a
-    # phase that runs from t_ref+30 to t_ref+40 covers bins [30, 39] —
-    # 10 bins, not 11.
-    #
-    # We use Python-style half-open ranges throughout: `start_bin` is
-    # inclusive, `end_bin` is exclusive. pandas .loc[] is unfortunately
-    # *inclusive* on both ends, so we slice with `.loc[start:end-1]` to
-    # get the half-open semantics. Using round() instead of int() so that
-    # `t_fault_actual_*` values with sub-second precision land on the
-    # correct bin.
     pre_start_bin   = 0
-    pre_end_bin     = round(t_prefault_end - t_ref)   # exclusive
-    fault_start_bin = round(t_fault_start  - t_ref)   # inclusive
-    fault_end_bin   = round(t_fault_end    - t_ref)   # exclusive
+    pre_end_bin     = round(t_prefault_end - t_ref)
+    fault_start_bin = round(t_fault_start  - t_ref)
+    fault_end_bin   = round(t_fault_end    - t_ref)
 
     recovery = recovery_time_sec(success_rate, fault_end_bin)
     avg_goodput_fault = float(goodput.loc[fault_start_bin:fault_end_bin - 1].mean()) \
         if not goodput.empty else 0.0
     avg_goodput_pre = float(goodput.loc[pre_start_bin:pre_end_bin - 1].mean()) \
         if not goodput.empty else 0.0
+
+    prefault_sr_pct = float(success_rate.loc[pre_start_bin:pre_end_bin - 1].mean()) \
+        if not success_rate.empty else float("nan")
+    if np.isnan(prefault_sr_pct):
+        prefault_sr_pct = 0.0
+    gp_smooth = goodput.rolling(window=5, min_periods=1, center=True).mean()
+    sustained = per_spike_recovery(
+        timeline,
+        success_rate.to_dict(),
+        gp_smooth.to_dict(),
+        prefault_sr_pct=prefault_sr_pct,
+        prefault_goodput=avg_goodput_pre,
+        t_ref=t_ref,
+        window_sec=45,
+        sr_frac=0.95,
+        goodput_frac=0.90,
+        min_delay_sec=0,
+    )
+
+    return {
+        "policy_dir": policy_dir,
+        "timeline": timeline,
+        "df": df,
+        "t_ref": t_ref,
+        "t_cooldown_end": t_cooldown_end,
+        "t_fault_start": t_fault_start,
+        "t_fault_end": t_fault_end,
+        "goodput": goodput,
+        "success_rate": success_rate,
+        "pre_start_bin": pre_start_bin,
+        "pre_end_bin": pre_end_bin,
+        "fault_start_bin": fault_start_bin,
+        "fault_end_bin": fault_end_bin,
+        "amp": amp,
+        "reff": reff,
+        "recovery": recovery,
+        "avg_goodput_fault": avg_goodput_fault,
+        "avg_goodput_pre": avg_goodput_pre,
+        "sustained": sustained,
+    }
+
+
+def process_policy_summary(policy_dir: Path, experiment: dict | None = None) -> Optional[dict]:
+    """Client-CSV-only path for matrix/scalar summaries (no sidecar parsing)."""
+    del experiment  # reserved for API compatibility with process_policy
+    b = _load_and_compute_basics(policy_dir)
+    if b is None:
+        return None
+    return {
+        "amplification": b["amp"],
+        "recovery_sec": b["recovery"] if b["recovery"] is not None else float("nan"),
+        "sustained_recovery": b["sustained"],
+    }
+
+
+def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
+    b = _load_and_compute_basics(policy_dir)
+    if b is None:
+        return None
+
+    policy_dir = b["policy_dir"]
+    timeline = b["timeline"]
+    df = b["df"]
+    t_ref = b["t_ref"]
+    t_cooldown_end = b["t_cooldown_end"]
+    t_fault_start = b["t_fault_start"]
+    t_fault_end = b["t_fault_end"]
+    goodput = b["goodput"]
+    success_rate = b["success_rate"]
+    fault_start_bin = b["fault_start_bin"]
+    fault_end_bin = b["fault_end_bin"]
+    amp = b["amp"]
+    reff = b["reff"]
+    recovery = b["recovery"]
+    avg_goodput_fault = b["avg_goodput_fault"]
+    avg_goodput_pre = b["avg_goodput_pre"]
+    sustained = b["sustained"]
+
+    rates = request_rate_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
+    retry_by_status_ts = retry_by_status_timeseries(df, t_ref, t_cooldown_end, bin_sec=1.0)
+    client_latency_ts = client_latency_timeseries(
+        df, t_ref, t_cooldown_end, bin_sec=1.0,
+    )
 
     # Client-side latency split by scenario phase (for the CDF plot).
     client_latency_phase = client_latency_by_phase(df, t_ref, experiment)
@@ -3303,6 +3362,7 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         "avg_goodput_fault": avg_goodput_fault,
         "avg_goodput_pre": avg_goodput_pre,
         "recovery_sec": recovery if recovery is not None else float("nan"),
+        "sustained_recovery": sustained,
         "arolla_admitted": arolla_admitted,
         "arolla_rejected": arolla_rejected,
         "phase_retry_deltas": phase_retry_deltas,
@@ -3313,6 +3373,14 @@ def process_policy(policy_dir: Path, experiment: dict) -> Optional[dict]:
         "t_ref": t_ref,
         "t_cooldown_end": t_cooldown_end,
     }
+
+
+def _spike_sec(sustained: dict, idx: int) -> float:
+    """Per-spike sustained-recovery seconds (NaN if missing / never recovered)."""
+    vals = (sustained or {}).get("per_spike_sec", [])
+    if idx < len(vals) and vals[idx] is not None:
+        return float(vals[idx])
+    return float("nan")
 
 
 def main():
@@ -3357,6 +3425,10 @@ def main():
             "avg_goodput_prefault": d["avg_goodput_pre"],
             "avg_goodput_fault": d["avg_goodput_fault"],
             "recovery_sec": d["recovery_sec"],
+            "sustained_recovery_sec": _spike_sec(d["sustained_recovery"], 0),
+            "sustained_recovery_spike2_sec": _spike_sec(d["sustained_recovery"], 1),
+            "sustained_recovery_label": d["sustained_recovery"]["label"],
+            "num_spikes": d["sustained_recovery"]["num_spikes"],
             "arolla_admitted": d["arolla_admitted"],
             "arolla_rejected": d["arolla_rejected"],
         })
@@ -3455,6 +3527,8 @@ def main():
                 filename=f"first-attempt-sr-bar-{phase}.pdf",
                 ylim=(0, 105),
             )
+
+
 
 
 # ---------------------------------------------------------------------------

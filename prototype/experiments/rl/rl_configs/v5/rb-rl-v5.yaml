@@ -1,0 +1,125 @@
+# RL retry-budget controller — v5 (caller-side, per-attempt obs; 6×6 actions).
+#
+# v5 is the first model trained against the updated observation contract
+# (see ./istio_retry_budget_rl_spaces.md):
+#
+#   * Action space:        MultiDiscrete([6, 6])   (was [5, 5])
+#   * Observation space:   Box(18,) float32         (shape unchanged)
+#   * Slot 7 semantics:    "budget_reject_rate"     (was "queue_utilization")
+#   * Feature source:      caller-side, per-attempt
+#   * Inference contract:  apply VecNormalize.load(vecnormalize_stats.pkl)
+#                          to the raw 18-D vector before model.predict()
+#
+# The three timing values below are constructor arguments to
+# IstioRetryBudgetMetastableEnv and MUST equal the values the labmate
+# trained against. Per istio_retry_budget_rl_spaces.md (§ Timing
+# parameters → Example), the canonical tuple is decision=5 s,
+# observation=10 s, delta=5 s. Confirm with the labmate before the
+# first sweep — a mismatch shifts every windowed feature's
+# distribution and silently degrades inference.
+name: rb-rl-v5
+label: "RB-RL v5 (caller-side per-attempt, 6x6 actions)"
+mode: rl_ppo
+model_path: rl_configs/v5/model-v5.zip
+
+output_root: outputs/prototype/rb-rl-v5
+
+# Baseline grid for plot_rl_comparison.py. Reuses the same mega-fault sweep
+# that v1-a was benchmarked against (May-1 measurement run) so v5's S01/S12
+# cells line up with the static-budget reference. run_rl.sh dereferences
+# cfg["baseline_root"] directly, so this field is mandatory even when the
+# baseline content is stale — fix the path here when a fresher reference
+# sweep is available.
+baseline_root: outputs/prototype/rb-mega-fault-sweep/20260501_151421
+baseline_label: "Static RB (rb-mega May-1)"
+
+experiment:
+  scenario: sustained-failure
+  policy: envoy-retry-budget
+  client_profile: post-cart-stress-open
+  warmup: 30
+  prefault: 60
+  recovery: 180
+  cooldown: 10
+  settle: 30
+  num_loaders: 4
+
+controller:
+  # Three windows must match the values passed to
+  # train_istio_retry_budget_metastable.py (see spec doc § Timing
+  # parameters). Default tuple from the doc's example block:
+  decision_interval_sec: 5       # --decision-interval-s
+  observation_window_sec: 10     # --observation-window-s
+  delta_window_sec: 5            # --delta-window-s
+  # attempt_timeout_ms is the divisor for feature #6
+  # (p95_latency_pressure) and the threshold for feature #9
+  # (deadline_rate). It MUST match the simulator scenario's
+  # `clients[*].timeout.attempt_ms` — the labmate trained v5 with
+  # `attempt_ms: 160`, so the prototype observation pipeline divides
+  # by 160 ms here to feed the model the same feature distribution
+  # it learned to react to (VecNormalize stats are calibrated on
+  # this scale; using 3000 ms would shrink #6 by ~19× and silently
+  # degrade inference).
+  #
+  # CAVEAT: this is the *observation contract* deadline, not the
+  # loader's hard cancellation deadline. The production loader
+  # profile `post-cart-stress-open` still uses `timeout_s: 3.0` for
+  # the actual TCP/HTTP cutoff, so live attempts can sit between
+  # 160 ms and 3000 ms without being cancelled — the controller
+  # will record those as deadline_rate failures (matches what the
+  # sim records: every attempt that exceeds `attempt_ms` is
+  # accounted as a DEADLINE event, even if it eventually completed).
+  # If we ever want loader and observation deadlines to agree, drop
+  # the loader profile's timeout to ~200 ms or retrain on 3000 ms.
+  attempt_timeout_ms: 160
+  startup_hold_off_sec: 60       # wait for full window + warm-up before first patch
+  default_retry_budget:
+    # Baseline (20%, 3) — corresponds to action index [3, 3] per
+    # spec doc § Action space → Default / reset alignment. Slots 14/15
+    # of the observation will read 0.2 / 0.3 at reset, matching
+    # what the training env initialises on reset().
+    percent: 20.0
+    minRetryConcurrency: 3
+  action_maps:
+    # 6-entry maps mirror the spec doc's PERCENT_MAP /
+    # MIN_RETRY_CONCURRENCY_MAP exactly. A 5-entry copy/paste from
+    # v4 here would silently mis-decode action index 5 to 4 in
+    # rl_policy() (50 → 35 on percent, 8 → 5 on mrc).
+    percent: [0.0, 5.0, 10.0, 20.0, 35.0, 50.0]
+    minRetryConcurrency: [0, 1, 2, 3, 5, 8]
+
+resource_sampling:
+  enabled: false
+  interval_sec: 2
+
+scenarios:
+  source: embedded in this file
+  core:
+    - {id: S01, rate_rps: 1000, fault_duration: 20, fault_rate: 50, default_label: Recovered}
+    - {id: S02, rate_rps: 1000, fault_duration: 75, fault_rate: 100, default_label: Recovered}
+    - {id: S03, rate_rps: 1200, fault_duration: 30, fault_rate: 90, default_label: Recovered}
+    - {id: S04, rate_rps: 1400, fault_duration: 20, fault_rate: 90, default_label: Recovered}
+    - {id: S05, rate_rps: 1200, fault_duration: 20, fault_rate: 95, default_label: Metastable}
+    - {id: S06, rate_rps: 1200, fault_duration: 45, fault_rate: 75, default_label: Metastable}
+    - {id: S07, rate_rps: 1200, fault_duration: 45, fault_rate: 90, default_label: Metastable}
+    - {id: S08, rate_rps: 1200, fault_duration: 75, fault_rate: 75, default_label: Metastable}
+    - {id: S09, rate_rps: 1400, fault_duration: 20, fault_rate: 50, default_label: Metastable}
+    - {id: S10, rate_rps: 1400, fault_duration: 20, fault_rate: 75, default_label: Recovered}
+    - {id: S11, rate_rps: 1400, fault_duration: 45, fault_rate: 75, default_label: Recovered}
+    - {id: S12, rate_rps: 1400, fault_duration: 45, fault_rate: 90, default_label: Metastable}
+    - {id: S13, rate_rps: 1400, fault_duration: 45, fault_rate: 100, default_label: Metastable}
+    - {id: S14, rate_rps: 1400, fault_duration: 75, fault_rate: 50, default_label: Recovered}
+    - {id: S15, rate_rps: 1400, fault_duration: 75, fault_rate: 75, default_label: Metastable}
+    - {id: S16, rate_rps: 1600, fault_duration: 30, fault_rate: 50, default_label: Metastable}
+    - {id: S17, rate_rps: 1600, fault_duration: 30, fault_rate: 90, default_label: Metastable}
+    - {id: S18, rate_rps: 1600, fault_duration: 60, fault_rate: 75, default_label: Metastable}
+    - {id: S19, rate_rps: 1800, fault_duration: 20, fault_rate: 50, default_label: Metastable}
+    - {id: S20, rate_rps: 1800, fault_duration: 30, fault_rate: 95, default_label: Metastable}
+    - {id: S21, rate_rps: 1600, fault_duration: 45, fault_rate: 75, default_label: Ambiguous}
+    - {id: S22, rate_rps: 1600, fault_duration: 75, fault_rate: 100, default_label: Ambiguous}
+    - {id: S23, rate_rps: 1800, fault_duration: 45, fault_rate: 100, default_label: Ambiguous}
+    - {id: S24, rate_rps: 1800, fault_duration: 60, fault_rate: 90, default_label: Ambiguous}
+    - {id: S25, rate_rps: 1800, fault_duration: 75, fault_rate: 75, default_label: Ambiguous}
+  smoke:
+    - S01
+    - S12

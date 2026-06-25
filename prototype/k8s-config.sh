@@ -7,7 +7,7 @@
 # ============================================================================
 
 # ---------- SSH settings ----------
-SSH_USER="yazhuoz"
+SSH_USER="lcresci"
 SSH_KEY=""                          # e.g. "~/.ssh/id_rsa" (leave empty to use default)
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 
@@ -29,7 +29,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o LogLevel=ERROR"
 # Master node
 MASTER_HOST="pc835.emulab.net"      # SSH-reachable address
 MASTER_HOSTNAME="master-node"       # Hostname to set on the machine
-MASTER_IP=""                        # (optional) if empty, resolved automatically via SSH
+MASTER_IP="10.10.1.1"               # Private Emulab fabric IP (canonical path)
 
 # Worker nodes — add more entries to scale out
 WORKER_HOSTS=("pc822.emulab.net" "pc832.emulab.net" "pc830.emulab.net" "pc829.emulab.net")

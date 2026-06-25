@@ -1,0 +1,40 @@
+{
+  "name": "browse-stress-open",
+  "description": "Open-loop browse workload targeting productcatalogservice (high fan-in: frontend, checkoutservice, recommendationservice all call it). Fires GET /product/{sku} at a fixed rate regardless of backend latency. Open-loop analogue of post-cart-stress-open, used for the alt-service AS1 scenario where the fault sits on productcatalogservice. Uses pool_size 5000 to bound client memory under retry storms.",
+  "mode": "open-loop",
+  "rate_rps": 800,
+  "pool_size": 5000,
+  "max_inflight": 0,
+  "timeout_s": 3.0,
+  "sku_pool": [
+    "OLJCESPC7Z",
+    "66VCHSJNUP",
+    "1YMWWN1N4O",
+    "L9ECAV7KIM",
+    "2ZYFJ3GM2N",
+    "0PUK6V6EV0",
+    "LS4PSXUNUM",
+    "9SIQT8TOJO",
+    "6E92ZMYYFZ"
+  ],
+  "requests": [
+    {
+      "name": "browse-product",
+      "weight": 100,
+      "method": "GET",
+      "path": "/product/{sku}"
+    }
+  ],
+  "retries": 3,
+  "backoff": {
+    "mode": "none"
+  },
+  "retry_on_status": [
+    0,
+    500,
+    502,
+    503,
+    504,
+    429
+  ]
+}

@@ -1,0 +1,35 @@
+# §6.2.1 variant — sustained partial failure on cart, 90% abort.
+#
+# High-severity variant of cartservice-50pct.yaml: 90% of cart's responses to
+# its callers (frontend, checkout) become 503 during the fault window. Used
+# in the rb-mega-fault-sweep / rb-rl-v1 grids that vary fault_rate ∈
+# {50, 75, 90, 95, 100}% to characterise the metastability boundary.
+#
+# Same VirtualService name as service-retries.yaml so kubectl apply REPLACES
+# the base entry. To restore the base routing after the experiment:
+#   kubectl apply -f manifests/online-boutique/service-retries.yaml
+#
+# See cartservice-50pct.yaml for the rationale on perTryTimeout, retry
+# config, and the cart→Redis injection-point caveat.
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: cartservice-routing
+  namespace: online-boutique
+spec:
+  hosts:
+  - cartservice
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 90.0
+        httpStatus: 503
+    retries:
+      attempts: 3
+      perTryTimeout: 23ms
+      retryOn: 5xx,gateway-error,connect-failure,refused-stream,reset
+    route:
+    - destination:
+        host: cartservice

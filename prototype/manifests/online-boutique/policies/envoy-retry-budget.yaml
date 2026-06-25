@@ -11,3 +11,37 @@ spec:
     retryBudget:
       percent: 20.0          
       minRetryConcurrency: 3
+---
+# Cartservice-specific pool override. Sync invariant #2 from obs.md
+# requires `upstream_rq_pending_active` to stay near zero at peak load
+# (NUM_LOADERS=4 × post-cart-stress-open ≈ 3.2k RPS × ~1.5×
+# amplification during faults). With Envoy's default
+# `http2MaxRequests`=1024 the caller pool starts queueing during retry
+# storms, which makes the controller's #14 retry_pressure_vs_limit
+# feature reflect pool saturation instead of budget saturation and
+# breaks the alignment with the simulator (which has no caller-side
+# pool). Raise the ceilings well above the steady-state peak so the
+# pool is effectively unbounded.
+#
+# The more-specific cartservice host overrides the wildcard above
+# (Istio picks the most specific match), but inherits the retryBudget
+# from the wildcard because no per-host retryBudget is specified.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: arolla-baseline-retry-budget-cart-pool
+  namespace: online-boutique
+spec:
+  host: "cartservice.online-boutique.svc.cluster.local"
+  trafficPolicy:
+    retryBudget:
+      percent: 20.0
+      minRetryConcurrency: 3
+    connectionPool:
+      http:
+        http2MaxRequests: 16384
+        http1MaxPendingRequests: 16384
+        maxRequestsPerConnection: 0
+        maxRetries: 16384
+      tcp:
+        maxConnections: 16384
