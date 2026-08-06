@@ -46,7 +46,7 @@ ssh-add <your cloudlab private key>
 ### 2.2 Local setup
 Clone the experiment repository and install the required dependencies. You can run this on your local machine or you can use another cloudlab node (you should start a new experiment for this, DON'T run it on your 6-node cluster).
 ```bash
-git clone https://github.com/yazhuo/globalRetryBudget.git
+git clone https://github.com/eth-easl/Arolla.git
 cd globalRetryBudget
 ```
 
