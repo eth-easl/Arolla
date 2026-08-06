@@ -18,9 +18,9 @@ This repository contains:
 - `prototype/`
   - Kubernetes + Istio deployment scripts, the Arolla WASM filter (`arolla-filter/`, `arolla-filter-fairness/`), policy manifests, and the experiment harness in `experiments/`
   - Main docs: [`prototype/README.md`](prototype/README.md)
-- `incident-slack-2022-02/`
-  - Self-contained Kind reproduction of the Slack 2022-02-22 cache-stampede incident
-  - Main docs: [`incident-slack-2022-02/README.md`](incident-slack-2022-02/README.md)
+- `post-mortem-analysis/`
+  - Post-mortem analysis of real incidents
+  - Main docs: [`post-mortem-analysis/README.md`](post-mortem-analysis/README.md)
 - `outputs/`
   - Local experiment outputs / generated artifacts
 
