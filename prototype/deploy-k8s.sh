@@ -207,8 +207,17 @@ step5_install_k8s_components() {
         curl -fsSL https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/Release.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
         echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION}/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
+        # Release holds before installing. A previous failed run can leave these
+        # packages held but NOT installed (the hold below used to run even when
+        # the install above it failed), after which apt-get refuses with
+        # 'Held packages were changed and -y was used without
+        # --allow-change-held-packages' on every retry.
+        sudo apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
+
         sudo apt-get update -qq
-        sudo apt-get install -y -qq kubelet kubeadm kubectl
+        sudo apt-get install -y -qq --allow-change-held-packages kubelet kubeadm kubectl
+
+        # Pin versions only once the install actually succeeded.
         sudo apt-mark hold kubelet kubeadm kubectl
 
         echo 'Kubernetes components installed:'
