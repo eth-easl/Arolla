@@ -1,5 +1,5 @@
 
-# Please check out the [Artifact Evaluation Instructions](AE.md) for details  on reproducing the paper's results.
+# Please check out the [Artifact Evaluation Instructions](AE-instructions.md) for details  on reproducing the paper's results.
 
 
 # Arolla: It's Time to Retry
