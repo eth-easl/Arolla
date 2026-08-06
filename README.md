@@ -1,4 +1,8 @@
-# It's Time to Retry
+
+# Please check out the [Artifact Evaluation Instructions](AE.md) for details  on reproducing the paper's results.
+
+
+# Arolla: It's Time to Retry
 
 This repository contains:
 
