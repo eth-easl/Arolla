@@ -191,11 +191,76 @@ get_node_port() {
 # ============================================================================
 # Deploy
 # ============================================================================
+preflight_cluster() {
+    banner "Preflight: cluster networking and Istio"
+    local checks
+    checks=$(cat <<'PREFLIGHT'
+# Bound API requests as well as readiness waits; collect all failures.
+kube() { kubectl --request-timeout=15s "$@"; }
+failed=0
+
+echo 'Checking Kubernetes nodes…'
+# Also require the configured nodes to exist: --all alone could miss a worker.
+if kube get nodes ${EXPECTED_NODES} >/dev/null &&
+   kube wait --for=condition=Ready nodes --all --timeout=1s; then
+    echo '[ OK ] All configured nodes exist and all cluster nodes are Ready.'
+else
+    echo '[FAIL] Kubernetes nodes: a configured node is missing or a node is not Ready.' >&2
+    kube get nodes -o wide || true
+    failed=1
+fi
+
+if [[ "$CNI_PLUGIN" == 'calico' ]]; then
+    echo 'Checking Calico…'
+    if kube -n kube-system rollout status daemonset/calico-node --timeout=1s &&
+       kube -n kube-system wait --for=jsonpath='{.status.phase}'=Running \
+           pods -l k8s-app=calico-node --timeout=1s &&
+       kube -n kube-system wait --for=condition=Ready \
+           pods -l k8s-app=calico-node --timeout=1s; then
+        echo '[ OK ] Calico DaemonSet is ready; all calico-node pods are Running and Ready.'
+    else
+        echo '[FAIL] Calico: DaemonSet is missing/incomplete or calico-node pods are not Running and Ready.' >&2
+        kube -n kube-system get daemonset calico-node || true
+        kube -n kube-system get pods -l k8s-app=calico-node -o wide || true
+        echo 'Inspect a failing pod: kubectl -n kube-system describe pod <pod>'
+        echo 'Inspect Calico logs: kubectl -n kube-system logs <pod> -c calico-node --previous'
+        failed=1
+    fi
+fi
+
+echo "Checking istiod in ${ISTIO_NAMESPACE}…"
+if replicas=$(kube -n "$ISTIO_NAMESPACE" get deployment istiod -o jsonpath='{.spec.replicas}') &&
+   [[ "$replicas" =~ ^[1-9][0-9]*$ ]] &&
+   kube -n "$ISTIO_NAMESPACE" rollout status deployment/istiod --timeout=1s; then
+    echo '[ OK ] istiod deployment is Ready.'
+else
+    echo "[FAIL] Istio: istiod in ${ISTIO_NAMESPACE} is missing, scaled to zero, or not Ready." >&2
+    kube -n "$ISTIO_NAMESPACE" get deployment istiod || true
+    kube -n "$ISTIO_NAMESPACE" get pods -l app=istiod -o wide || true
+    echo "Inspect a failing pod: kubectl -n ${ISTIO_NAMESPACE} describe pod <pod>"
+    failed=1
+fi
+
+exit "$failed"
+PREFLIGHT
+)
+    if ! remote "$MASTER_HOST" "
+CNI_PLUGIN='${CNI_PLUGIN}'
+ISTIO_NAMESPACE='${ISTIO_NAMESPACE}'
+EXPECTED_NODES='${MASTER_HOSTNAME} ${WORKER_HOSTNAMES[*]}'
+${checks}
+"; then
+        err "Cluster preflight failed. Resolve the [FAIL] checks above before deploying ${APP_NAME}."
+        return 1
+    fi
+}
+
 do_deploy() {
     banner "Deploying: ${APP_NAME}"
     info "Manifests: ${APP_DIR}/"
     echo ""
 
+    preflight_cluster
     upload_manifests
 
     # Build the list of rollout-status waits
