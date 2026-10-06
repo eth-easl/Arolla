@@ -421,6 +421,12 @@ run_common_steps() {
 
 # ── Full deployment ─────────────────────────────────────────────────────────
 full_deploy() {
+    # Check before any SSH calls or remote changes, rather than at the final check.
+    if ! command -v kubectl >/dev/null 2>&1; then
+        err "kubectl is required on the local machine running this script, but was not found on PATH."
+        exit 1
+    fi
+
     info "Starting full Kubernetes cluster deployment"
     info "Master: ${SSH_USER}@${MASTER_HOST} → ${MASTER_HOSTNAME}"
     for i in "${!WORKER_HOSTS[@]}"; do
@@ -478,7 +484,10 @@ full_deploy() {
     scp ${scp_opts} "${SSH_USER}@${MASTER_HOST}:~/.kube/config" "${KUBECONFIG_PATH}"
     ok "Kubeconfig saved to ${KUBECONFIG_PATH}"
     info "Verifying local access:"
-    kubectl get nodes
+    if ! kubectl get nodes; then
+        err "Remote provisioning and kubeconfig copy completed, but local cluster access verification failed."
+        exit 1
+    fi
 
     banner "Deployment complete!"
     info "Logs saved to ${LOG_DIR}/"

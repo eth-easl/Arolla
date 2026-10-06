@@ -65,6 +65,8 @@ source $HOME/.cargo/env
 rustup target add wasm32-wasip1
 ```
 
+Install kubectl locally according to [official installation instructions](https://kubernetes.io/docs/tasks/tools/).
+
 #### 2.2.1 Configure the allocated nodes
 
 All commands below run on the evaluator's local machine. 
