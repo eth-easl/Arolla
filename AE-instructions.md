@@ -155,6 +155,7 @@ A successful run creates one timestamped directory under
 `arolla/timeline.json`, client CSV files, `summary.csv`, and diagnostic plots.
 This is just for functionality check.
 
+
 ## Reproduce experiments
 
 ### Figure 4: effectiveness under a sustained failure
@@ -235,3 +236,22 @@ Expected outputs:
 |---|---|
 | Figure 6a | `outputs/nsdi/fairness-same-rps-count.pdf` |
 | Figure 6b | `outputs/nsdi/fairness-diff-rps-count.pdf` |
+
+
+
+## Troubleshooting
+
+Run these commands in Bash on the evaluator's machine:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/prototype"
+source k8s-config.sh
+kubectl get nodes -o wide
+kubectl get pods -A -o wide
+```
+
+Before deploying the application, all five nodes must be `Ready`, all
+`calico-node` pods must be `Running` and ready (`1/1`), and `istiod` must be
+ready. `deploy-app.sh` reports failed preflight checks before deploying.
+
+See [diagnosis and recovery commands](prototype/README.md#troubleshooting).
