@@ -127,6 +127,7 @@ def build_clients_and_workloads(
                     retry=c_retry_policy,
                     timeout=c_timeout_policy,
                     e2e_retry_budget=getattr(client_cfg_yaml, 'e2e_retry_budget', None),
+                    propagate_deadline=client_cfg_yaml.propagate_deadline,
                 )
 
                 clients.append(ClientRuntime(cfg=c_cfg, service=services[target_name]))

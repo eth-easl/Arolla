@@ -18,6 +18,9 @@ class ClientConfig:
     retry: Optional['RetryPolicy'] = None
     timeout: Optional['Timeout'] = None
     e2e_retry_budget: Optional[int] = None  # Arolla Level 2: max retries across all hops
+    # False: the service only knows the deadline of the whole request.
+    # True: it also knows when the client stops waiting for each attempt.
+    propagate_deadline: bool = False
 
 
 @dataclass
@@ -89,16 +92,21 @@ class ClientRuntime:
         else:
             call = self._follow_call_with_policy(ctx, sim, begin_time)
 
+        deadline_for_service = ctx.root.global_deadline
         if self.cfg.timeout is not None:
             attempt_timeout = self.cfg.timeout.get_attempt_timeout()
             if attempt_timeout:
+                gives_up_at = sim.timestep + attempt_timeout
                 sim.schedule(
-                    sim.timestep + attempt_timeout,
+                    gives_up_at,
                     partial(self._on_local_timeout, ctx, sim, call, begin_time),
                 )
+                if self.cfg.propagate_deadline:
+                    if deadline_for_service is None or gives_up_at < deadline_for_service:
+                        deadline_for_service = gives_up_at
 
         call.submit(
-            global_deadline=ctx.root.global_deadline,
+            global_deadline=deadline_for_service,
             is_retry=is_retry,
             retry_budget_remaining=ctx._retry_budget_remaining,
             tenant_id=self.cfg.name,

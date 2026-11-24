@@ -78,6 +78,9 @@ class ServiceRuntime(
     dependencies: List["ServiceRuntime"] = field(default_factory=list)
     dependency_optionality: List[bool] = field(default_factory=list)
     dependency_call_pattern: str = "sequential"
+    dependency_fail_fast: bool = False
+    local_work_first: bool = False
+    propagate_deadline: bool = True
 
     _middleware_chain: Optional[MiddlewareChain] = field(
         default=None, init=False, repr=False
