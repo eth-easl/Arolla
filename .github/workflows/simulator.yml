@@ -1,0 +1,54 @@
+# Runs the unit tests on the simulator, and checks that PRs do not change the
+# results of the existing scenarios (simulator/bin/check_scenarios.py).
+name: simulator
+
+on:
+  pull_request:
+    paths: ["simulator/**", ".github/workflows/simulator.yml"]
+  push:
+    branches: [main]
+    paths: ["simulator/**", ".github/workflows/simulator.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: simulator/requirements.txt
+      - run: pip install -r simulator/requirements.txt pytest
+      - run: python -m pytest -q
+        working-directory: simulator
+        env:
+          PYTHONPATH: src
+
+  check-scenarios:
+    # This job only runs for PRs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: simulator/requirements.txt
+      - run: pip install -r simulator/requirements.txt
+      # Check out the PR base commit in a separate worktree, so that we can compare results.
+      # HEAD^1 is the base commit of the PR merge commit.
+      - run: git worktree add "$RUNNER_TEMP/base" HEAD^1
+      - run: python simulator/bin/check_scenarios.py "$RUNNER_TEMP/base" .

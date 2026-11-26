@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 from typing import List, Optional
 
-from simulator.config.schema import ServiceConfigYAML, WorkloadConfig
+from simulator.config.schema import DependencyJoin, LocalWork, ServiceConfigYAML, WorkloadConfig
 from simulator.runtime.service import ServiceConfig, ServiceRuntime
 from simulator.runtime.workload import Workload
 from simulator.core.engine import Simulator
@@ -56,6 +56,9 @@ def build_service(
         dependencies=dependencies or [],
         dependency_optionality=dependency_optionality or [],
         dependency_call_pattern=dependency_call_pattern,
+        dependency_fail_fast=cfg.dependency_join == DependencyJoin.FAIL_FAST,
+        local_work_first=cfg.local_work == LocalWork.FIRST,
+        propagate_deadline=cfg.propagate_deadline,
     ).bind(seed=seed, record_events=True)
 
 
@@ -79,4 +82,5 @@ def build_workload(cfg: WorkloadConfig, position: int = 0, replica: int = 0) -> 
         duration_s=cfg.duration_s,
         load_spikes=build_load_spikes(cfg.load_spikes),
         rng_seed=arrival_seed(cfg.rng_seed, position, replica),
+        exact_arrivals=cfg.exact_arrivals,
     )

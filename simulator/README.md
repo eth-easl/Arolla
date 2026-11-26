@@ -188,6 +188,46 @@ workload:
       rps_multiplier: 2.0      # 2x traffic
 ```
 
+### Service Dependencies
+
+Services can call other services while processing a request. You can configure how these calls are executed, how failures are handled, and when the service performs its own work.
+
+```yaml
+services:
+  - name: api
+    dependencies:
+      - service: db
+      - service: cache
+        optional: true                  # A failure does not fail the request
+    dependency_call_pattern: parallel   # sequential (default) | parallel
+    dependency_join: fail_fast          # wait_all (default) | fail_fast
+    local_work: first                   # last (default) | first
+```
+
+- `dependency_call_pattern` controls whether dependencies are called one after another (`sequential`) or at the same time (`parallel`).
+- `dependency_join` controls how the service waits for parallel calls. With `wait_all`, it waits for every call to finish. With `fail_fast`, it stops waiting as soon as a required dependency fails. Any other calls already in progress continue running.
+- `local_work` controls when the service performs its own work. By default (`last`), it calls its dependencies first. With `first`, it completes its own work before calling them.
+- `optional` determines whether a dependency failure causes the request to fail. If set to `true`, a failure of that dependency does not fail the request.
+
+### Exact Arrivals
+
+By default, the workload generates its first request at `t = 0`. Each subsequent request is scheduled using the RPS at the time of the previous request. If the RPS changes before the next request arrives, its scheduled arrival time is not updated. As a result, short load spikes may be missed entirely.
+
+Setting `exact_arrivals: true` changes this behavior:
+
+- The first request arrives after a random delay instead of immediately at `t = 0`.
+- Changes in RPS take effect at their configured times, even when they occur between requests.
+- Request arrivals remain random, but their timing correctly accounts for load spikes.
+
+```yaml
+workload:
+  base_rps: 300
+  duration_s: 120
+  exact_arrivals: true
+```
+
+Use `exact_arrivals: true` when you want traffic generation to accurately reflect short or rapidly changing load spikes.
+
 ### Multi-Client Mode
 
 ```yaml
@@ -210,6 +250,31 @@ clients:
       base_rps: 50
       duration_s: 60
 ```
+
+### Deadline Propagation
+
+Deadline propagation controls whether a service and its dependencies stop processing a request when the caller's timeout expires.
+
+By default, when a client times out, it stops waiting for a response, but the service continues processing the request. This can waste resources on requests whose results are no longer needed.
+
+Setting `propagate_deadline: true` on a client changes this behavior. The client passes its deadline to the service, which stops processing the request when that deadline is reached.
+
+```yaml
+clients:
+  - name: client_a
+    target_service: api
+    timeout:
+      attempt_ms: 100
+    propagate_deadline: true
+```
+
+In this example, if the request takes longer than 100 ms, the client times out and the service stops processing it.
+
+**Deadline propagation between services**
+
+By default, services also pass their own attempt deadlines to their dependencies. This ensures that dependencies stop working when the calling service's deadline expires.
+
+Setting `propagate_deadline: false` on a service disables this behavior. The service still stops waiting when its own deadline expires, but its dependencies continue processing their calls, even though their results are no longer needed.
 
 ### Parameter Sweeps
 
@@ -236,6 +301,23 @@ Run with: `python bin/workflow.py config.yaml` (auto-detects sweeps).
 | `python bin/run_experiment.py <yaml>` | Simulation only (no plots) |
 | `python bin/run_experiment.py <yaml> --validate-only` | Validate config without running |
 | `python bin/run_sweep.py <yaml>` | Parameter sweep only |
+
+## Tests
+
+```bash
+# Unit tests (from simulator/)
+PYTHONPATH=src python -m pytest -q
+
+# Scenario tests (from the repository root)
+git worktree add ../arolla-main main
+python simulator/bin/check_scenarios.py ../arolla-main .
+```
+
+`bin/check_scenarios.py` runs all scenarios in `experiments/yaml` using both versions of the code and
+reports which scenarios produce different results. 
+GitHub Actions runs both checks on every pull request that modifies `simulator/`.
+If a change affects the results of a scenario, the scenario check fails. The pull request must document
+which scenarios are affected and why.
 
 ## Capacity Planning
 
